@@ -1,0 +1,12 @@
+{
+  "ritual_id": "morning_yahoo_scan",
+  "built_at": "2026-07-16T02:44:24.047660Z",
+  "files": [
+    "SKILL.md",
+    "workflow.json",
+    "runner.sh",
+    "INTEGRATE.md",
+    "sample_context.json",
+    "manifest.json"
+  ]
+}

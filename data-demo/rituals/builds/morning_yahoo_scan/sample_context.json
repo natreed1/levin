@@ -1,0 +1,57 @@
+{
+  "ritual_id": "morning_yahoo_scan",
+  "runner": "morning_yf_scan",
+  "watchlist": [
+    "NVDA",
+    "AAPL",
+    "SPY"
+  ],
+  "schedule": "0 7 * * 1-5",
+  "steps": [
+    {
+      "fetch_quote": [
+        "price",
+        "pct_change",
+        "volume",
+        "market_cap"
+      ]
+    },
+    {
+      "fetch_calendar": [
+        "next_earnings"
+      ]
+    },
+    {
+      "fetch_headlines": {
+        "limit": 3,
+        "source": "yahoo"
+      }
+    },
+    {
+      "draft_note": "morning_scan_template"
+    }
+  ],
+  "hosts": {
+    "finance.yahoo.com": 3
+  },
+  "note_hints": [
+    "change"
+  ],
+  "allowlisted_fields": [
+    "symbol",
+    "price",
+    "pct_change",
+    "volume",
+    "market_cap",
+    "next_earnings",
+    "headlines"
+  ],
+  "sensitivity_rules": {
+    "max_egress": "internal",
+    "never_include": [
+      "restricted",
+      "raw confidential note dumps",
+      "account/client identifiers"
+    ]
+  }
+}

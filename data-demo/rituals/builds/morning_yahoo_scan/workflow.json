@@ -1,0 +1,41 @@
+{
+  "ritual_id": "morning_yahoo_scan",
+  "version": 1,
+  "approved": true,
+  "runner": "morning_yf_scan",
+  "schedule": "0 7 * * 1-5",
+  "watchlist": [
+    "NVDA",
+    "AAPL",
+    "SPY"
+  ],
+  "steps": [
+    {
+      "fetch_quote": [
+        "price",
+        "pct_change",
+        "volume",
+        "market_cap"
+      ]
+    },
+    {
+      "fetch_calendar": [
+        "next_earnings"
+      ]
+    },
+    {
+      "fetch_headlines": {
+        "limit": 3,
+        "source": "yahoo"
+      }
+    },
+    {
+      "draft_note": "morning_scan_template"
+    }
+  ],
+  "outputs": {
+    "ledger_session": true,
+    "obsidian_path_template": "Routines/Morning Scan {{date}}.md"
+  },
+  "built_at": "2026-07-16T02:44:24.047469Z"
+}

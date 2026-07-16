@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Analyst Ledger — TradingView Capture",
+  "version": "0.1.0",
+  "description": "Capture TradingView symbol, interval, drawing metadata, and notes into the local analyst ledger. No mouse/cursor recording.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://www.tradingview.com/*",
+    "https://tradingview.com/*",
+    "http://127.0.0.1:8788/*",
+    "http://localhost:8788/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Analyst Ledger TV"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.tradingview.com/*",
+        "https://tradingview.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

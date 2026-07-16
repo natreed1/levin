@@ -1,0 +1,50 @@
+{
+  "name": "morning_yahoo_scan",
+  "version": 1,
+  "approved": true,
+  "runner": "morning_yf_scan",
+  "schedule": "0 7 * * 1-5",
+  "schedule_comment": "OpenClaw cron or system crontab; adjust timezone locally",
+  "watchlist": [
+    "NVDA",
+    "AAPL",
+    "SPY"
+  ],
+  "steps": [
+    {
+      "fetch_quote": [
+        "price",
+        "pct_change",
+        "volume",
+        "market_cap"
+      ]
+    },
+    {
+      "fetch_calendar": [
+        "next_earnings"
+      ]
+    },
+    {
+      "fetch_headlines": {
+        "limit": 3,
+        "source": "yahoo"
+      }
+    },
+    {
+      "draft_note": "morning_scan_template"
+    }
+  ],
+  "outputs": {
+    "ledger_session": true,
+    "obsidian_path_template": "Routines/Morning Scan {{date}}.md"
+  },
+  "source_candidate": {
+    "confidence": 0.9,
+    "evidence_count": 3,
+    "hosts": {
+      "finance.yahoo.com": 3
+    }
+  },
+  "created_at": "2026-07-16T02:32:35.880371Z",
+  "approved_at": "2026-07-16T02:32:35.881837Z"
+}

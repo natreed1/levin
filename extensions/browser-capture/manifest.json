@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Analyst Ledger — Yahoo Finance",
+  "version": "0.3.0",
+  "description": "Log Yahoo quote tabs + price scrape to Analyst Ledger. Outcome tags optional; notes not required.",
+  "permissions": ["storage", "tabs", "webNavigation"],
+  "host_permissions": [
+    "http://127.0.0.1:8788/*",
+    "http://localhost:8788/*",
+    "https://finance.yahoo.com/*",
+    "https://*.finance.yahoo.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://finance.yahoo.com/*", "https://*.finance.yahoo.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Yahoo → Analyst Ledger"
+  }
+}

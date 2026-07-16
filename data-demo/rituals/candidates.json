@@ -1,0 +1,68 @@
+[
+  {
+    "ritual_id": "morning_yahoo_scan",
+    "confidence": 0.9,
+    "slot": "morning",
+    "host_family": "yahoo",
+    "when": {
+      "slot": "morning",
+      "hour_label": "05-11",
+      "weekdays": [
+        0,
+        1,
+        4
+      ],
+      "weekday_only": true
+    },
+    "sequence": [
+      {
+        "type": "url_focus",
+        "host": "finance.yahoo.com",
+        "path_pattern": "/quote/*"
+      },
+      {
+        "type": "sections",
+        "values": [
+          "news"
+        ]
+      },
+      {
+        "type": "symbol_set",
+        "symbols": [
+          "NVDA",
+          "AAPL",
+          "SPY"
+        ]
+      },
+      {
+        "type": "note",
+        "template_hints": [
+          "% change",
+          "earnings",
+          "news"
+        ]
+      }
+    ],
+    "watchlist": [
+      "NVDA",
+      "AAPL",
+      "SPY"
+    ],
+    "sections": [
+      "news"
+    ],
+    "hosts": {
+      "finance.yahoo.com": 3
+    },
+    "note_hints": [
+      "change"
+    ],
+    "evidence_sessions": [
+      "sess_694510249981",
+      "sess_c45cf35efbe4",
+      "sess_0ad0e5d0671f"
+    ],
+    "evidence_count": 3,
+    "mined_at": "2026-07-16T02:32:35.879105Z"
+  }
+]
