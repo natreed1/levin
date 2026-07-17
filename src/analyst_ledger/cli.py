@@ -275,7 +275,7 @@ def cmd_ingest_browser(args: argparse.Namespace) -> int:
 
     ledger = Ledger()
     url = args.url
-    parsed = parse_url(url)
+    parsed = parse_url(url, allow_any=bool(args.any))
     if args.title:
         parsed["title"] = args.title
     sid = args.session_id or ledger.get_active_session_id()
@@ -573,11 +573,16 @@ def build_parser() -> argparse.ArgumentParser:
     tv.set_defaults(func=cmd_ingest_tv)
 
     # browser ingest
-    br = sub.add_parser("ingest-browser", help="Ingest allowlisted browser URL focus")
-    br.add_argument("url", help="Full URL (must be allowlisted host)")
+    br = sub.add_parser("ingest-browser", help="Ingest browser URL focus")
+    br.add_argument("url", help="Full URL")
     br.add_argument("--title", default=None)
     br.add_argument("--session-id", default=None)
     br.add_argument("--auto-session", action="store_true")
+    br.add_argument(
+        "--any",
+        action="store_true",
+        help="Allow any http(s) host except denylist (deep research)",
+    )
     br.add_argument(
         "--sensitivity",
         default=Sensitivity.INTERNAL.value,

@@ -1,4 +1,4 @@
-"""Allowlisted browser URL capture helpers."""
+"""Browser URL capture helpers (allowlist + deep-research any-site)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-# Hosts we are willing to record (research surfaces only).
+# Default research surfaces (auto-capture when site toggle is on).
 ALLOWED_HOST_SUFFIXES = (
     "finance.yahoo.com",
     "yahoo.com",
@@ -27,6 +27,29 @@ ALLOWED_HOST_SUFFIXES = (
     "www.cnbc.com",
 )
 
+# Never capture these (privacy / noise), even in deep research.
+DENIED_HOST_SUFFIXES = (
+    "accounts.google.com",
+    "mail.google.com",
+    "gmail.com",
+    "outlook.live.com",
+    "outlook.office.com",
+    "login.microsoftonline.com",
+    "appleid.apple.com",
+    "icloud.com",
+    "chase.com",
+    "bankofamerica.com",
+    "wellsfargo.com",
+    "paypal.com",
+    "venmo.com",
+    "stripe.com",
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+)
+
+DENIED_SCHEMES = ("chrome:", "chrome-extension:", "about:", "edge:", "brave:", "devtools:")
+
 _YF_QUOTE_RE = re.compile(
     r"/quote/(?:[A-Z]{1,4}:)?([A-Z][A-Z0-9.\-]{0,15})(?:/|$|\?)",
     re.I,
@@ -34,14 +57,26 @@ _YF_QUOTE_RE = re.compile(
 _TV_SYMBOL_RE = re.compile(r"/chart/(?:[^/]+/)?([A-Z0-9.\-_]+)", re.I)
 
 
-def host_allowed(host: str) -> bool:
+def _suffix_match(host: str, suffixes: tuple) -> bool:
     host = (host or "").lower().strip().rstrip(".")
     if not host:
         return False
-    for suffix in ALLOWED_HOST_SUFFIXES:
-        if host == suffix or host.endswith("." + suffix):
+    for suffix in suffixes:
+        s = suffix.lower()
+        if host == s or host.endswith("." + s):
             return True
     return False
+
+
+def host_denied(host: str) -> bool:
+    return _suffix_match(host, DENIED_HOST_SUFFIXES)
+
+
+def host_allowed(host: str) -> bool:
+    """True if host is on the default research allowlist (and not denied)."""
+    if host_denied(host):
+        return False
+    return _suffix_match(host, ALLOWED_HOST_SUFFIXES)
 
 
 def normalize_url_key(url: str) -> str:
@@ -58,14 +93,33 @@ def normalize_url_key(url: str) -> str:
     return f"{scheme}://{host}{path}"
 
 
-def parse_url(url: str) -> Dict[str, Any]:
-    """Normalize a URL into an allowlisted url_focus payload (or raise)."""
+def parse_url(url: str, *, allow_any: bool = False) -> Dict[str, Any]:
+    """
+    Normalize a URL into a url_focus payload.
+
+    By default only allowlisted research hosts are accepted.
+    With allow_any=True (deep research / manual), any http(s) host is
+    accepted except the denylist.
+    """
     raw = (url or "").strip()
     if not raw:
         raise ValueError("empty url")
+    lower = raw.lower()
+    for scheme in DENIED_SCHEMES:
+        if lower.startswith(scheme):
+            raise ValueError(f"scheme not allowed: {scheme.rstrip(':')}")
+
     parsed = urlparse(raw if "://" in raw else "https://" + raw)
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"scheme not allowed: {scheme}")
+
     host = (parsed.hostname or "").lower()
-    if not host_allowed(host):
+    if not host:
+        raise ValueError("missing host")
+    if host_denied(host):
+        raise ValueError(f"host denied: {host}")
+    if not allow_any and not host_allowed(host):
         raise ValueError(f"host not allowlisted: {host}")
 
     path = parsed.path or "/"
@@ -74,7 +128,7 @@ def parse_url(url: str) -> Dict[str, Any]:
     title = ""
     symbol = _extract_symbol(host, path, parsed.query)
     section = _guess_section(host, path)
-    canon = f"{(parsed.scheme or 'https').lower()}://{host}{path}"
+    canon = f"{scheme}://{host}{path}"
 
     return {
         "url": canon,
@@ -84,6 +138,7 @@ def parse_url(url: str) -> Dict[str, Any]:
         "section": section,
         "title": title,
         "query_keys": sorted(parse_qs(parsed.query).keys())[:20],
+        "capture_mode": "any" if allow_any and not host_allowed(host) else "allowlist",
     }
 
 
@@ -103,7 +158,6 @@ def _extract_symbol(host: str, path: str, query: str) -> Optional[str]:
             return m.group(1).upper()
         qs = parse_qs(query)
         if "symbol" in qs and qs["symbol"]:
-            # Often EXCHANGE:TICKER
             raw = qs["symbol"][0]
             return raw.split(":")[-1].upper()
     return None
@@ -129,7 +183,6 @@ def _guess_section(host: str, path: str) -> Optional[str]:
     if not parts:
         return "home"
     if "yahoo" in host:
-        # /quote/NVDA, /quote/NVDA/key-statistics, /quote/NVDA/analysis, …
         if len(parts) >= 3 and parts[0] == "quote":
             raw = parts[2].lower()
             return _YF_SECTION_ALIASES.get(raw, raw)

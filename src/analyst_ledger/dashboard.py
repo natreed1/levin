@@ -1316,7 +1316,13 @@ def _ingest_browser(ledger: Ledger, data: dict) -> dict:
     url = data.get("url") or (data.get("payload") or {}).get("url")
     if not url:
         raise ValueError("url required")
-    parsed = parse_url(url)
+    # Deep research / explicit manual capture may leave the research allowlist
+    allow_any = bool(
+        data.get("allow_any")
+        or data.get("deep_research")
+        or data.get("manual")
+    )
+    parsed = parse_url(url, allow_any=allow_any)
     # Allow client to attach title without overriding parse
     title = data.get("title") or (data.get("payload") or {}).get("title")
     if title:

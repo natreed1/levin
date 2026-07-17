@@ -1,4 +1,5 @@
-from analyst_ledger.browser import merge_quote_scrape, parse_url
+from analyst_ledger.browser import host_denied, merge_quote_scrape, parse_url
+import pytest
 
 
 def test_yahoo_subtab_sections():
@@ -28,3 +29,19 @@ def test_merge_quote_scrape():
     assert out["quote"]["price"] == 419.48
     assert out["quote"]["change_pct"] == -0.22
     assert "earnings" in out["quote"]["earnings"].lower()
+
+
+def test_allow_any_and_denylist():
+    with pytest.raises(ValueError, match="allowlisted"):
+        parse_url("https://arxiv.org/abs/1234.5678")
+    any_page = parse_url("https://arxiv.org/abs/1234.5678", allow_any=True)
+    assert any_page["host"] == "arxiv.org"
+    assert any_page["capture_mode"] == "any"
+
+    assert host_denied("mail.google.com")
+    with pytest.raises(ValueError, match="denied"):
+        parse_url("https://mail.google.com/mail/u/0/", allow_any=True)
+    with pytest.raises(ValueError, match="denied"):
+        parse_url("http://127.0.0.1:8788/", allow_any=True)
+    with pytest.raises(ValueError, match="scheme"):
+        parse_url("chrome://extensions", allow_any=True)
