@@ -43,6 +43,11 @@ def run_morning_yf_scan(
                 f"Spec '{ritual_id}' is not approved. Run: analyst rituals approve {ritual_id}"
             )
         watchlist = watchlist or list(spec.get("watchlist") or [])
+    elif require_approved:
+        raise RuntimeError(
+            f"No approved spec for '{ritual_id}'. "
+            f"Run: analyst rituals suggest {ritual_id} && analyst rituals approve {ritual_id}"
+        )
 
     symbols = [s.upper() for s in (watchlist or DEFAULT_WATCHLIST) if s]
     if not symbols:

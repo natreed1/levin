@@ -154,7 +154,7 @@ def _call_anthropic(prompt: str) -> str:
             "or use --destination local_stub"
         ) from exc
 
-    model = os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-4-20250514").strip()
+    model = os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-5").strip()
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=model,
