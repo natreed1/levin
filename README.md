@@ -3,6 +3,9 @@
 Local-first workflow capture for hedge-fund research sessions.  
 **The local store is the system of record.** Claude (API / Bedrock) is only called on explicit, redacted synthesis jobs.
 
+> **New to the project?** Start with [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) —
+> current state, recent changes, setup on a new machine, and the roadmap.
+
 ## Capture timeline
 
 | Phase | What happens |
