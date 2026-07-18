@@ -86,7 +86,8 @@ def summarize_session_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         elif et == "artifact_attach":
             path = payload.get("path")
             if path:
-                notes.append(f"Artifact: {str(path).rsplit('/', 1)[-1]}")
+                name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+                notes.append(f"Artifact: {name}")
 
     # Newest pages first
     page_list = sorted(

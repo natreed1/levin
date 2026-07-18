@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
+import subprocess
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +18,7 @@ from .browser import summarize_url_events
 from .ledger import Ledger
 from .paths import (
     claude_skills_dir,
+    data_dir,
     ritual_builds_dir,
     ritual_specs_dir,
     rituals_dir,
@@ -584,7 +588,14 @@ def _stub_narrative(candidate: Dict[str, Any], notes: List[str]) -> str:
 def _stub_spec(candidate: Dict[str, Any]) -> Dict[str, Any]:
     ritual_id = candidate["ritual_id"]
     host_family = candidate.get("host_family")
-    runner = "morning_yf_scan" if host_family == "yahoo" else "generic_watchlist_scan"
+    if host_family == "yahoo":
+        runner = "morning_yf_scan"
+    elif host_family == "sec":
+        runner = "sec_filings_check"
+    elif host_family == "notes":
+        runner = "note_digest"
+    else:
+        runner = "generic_watchlist_scan"
     return {
         "name": ritual_id,
         "version": 1,
@@ -676,12 +687,32 @@ def build_status(ritual_id: str) -> Dict[str, Any]:
     }
 
 
-def list_automations() -> List[Dict[str, Any]]:
+def last_runs(ledger: Ledger, limit: int = 300) -> Dict[str, Dict[str, Any]]:
+    """Newest ritual_run per ritual_id: {rid: {ts, stub, error_count, session_id}}."""
+    out: Dict[str, Dict[str, Any]] = {}
+    events = ledger.list_events(limit=limit, types=["ritual_run"])
+    for ev in events:  # newest-first; keep only the first per ritual
+        payload = ev.get("payload") or {}
+        rid = payload.get("ritual_id")
+        if not rid or rid in out:
+            continue
+        out[rid] = {
+            "ts": ev.get("ts"),
+            "stub": bool(payload.get("stub")),
+            "error_count": len(payload.get("errors") or []),
+            "session_id": ev.get("session_id"),
+        }
+    return out
+
+
+def list_automations(ledger: Optional[Ledger] = None) -> List[Dict[str, Any]]:
     """
     Merge mined candidates + specs into a dashboard-friendly list.
 
     Specs without a matching candidate still appear (e.g. demo fixtures).
+    Pass a ledger to include each ritual's most recent run outcome.
     """
+    runs = last_runs(ledger) if ledger is not None else {}
     by_id: Dict[str, Dict[str, Any]] = {}
     for c in load_candidates():
         rid = c.get("ritual_id")
@@ -722,6 +753,8 @@ def list_automations() -> List[Dict[str, Any]]:
         row["watchlist"] = s.get("watchlist") or row.get("watchlist") or []
         row["build"] = build_status(rid)
         by_id[rid] = row
+    for rid, row in by_id.items():
+        row["last_run"] = runs.get(rid)
     items = list(by_id.values())
     items.sort(
         key=lambda r: (
@@ -966,6 +999,25 @@ Build directory: `{build_dir}`
    analyst rituals integrate {ritual_id} --target local
    ```
 
+## Option C — Windows Task Scheduler
+
+1. Approve the spec, then register the scheduled task (translates the spec's
+   cron schedule automatically):
+
+   ```powershell
+   analyst rituals integrate {ritual_id} --target windows-task
+   ```
+
+2. Verify / remove:
+
+   ```powershell
+   schtasks /Query /TN "AnalystLedger_{ritual_id}"
+   schtasks /Delete /TN "AnalystLedger_{ritual_id}" /F
+   ```
+
+3. The task runs `runner.ps1` in this build directory, which calls the local
+   `analyst rituals run {ritual_id} --require-approved`.
+
 ## Runner notes
 
 - Spec runner: `{runner}`
@@ -975,9 +1027,13 @@ Build directory: `{build_dir}`
 
 
 def _runner_sh(ritual_id: str, spec: Dict[str, Any]) -> str:
+    # Pin the ledger dir at build time: cron/Task Scheduler environments do not
+    # inherit the shell's ANALYST_LEDGER_DATA, and the run must hit the same
+    # ledger that holds the approved spec.
     return f"""#!/usr/bin/env bash
 # Auto-generated launcher for ritual: {ritual_id}
 set -euo pipefail
+export ANALYST_LEDGER_DATA="${{ANALYST_LEDGER_DATA:-{data_dir()}}}"
 RITUAL_ID="{ritual_id}"
 EXTRA=("$@")
 if [[ ${{#EXTRA[@]}} -eq 0 ]]; then
@@ -985,6 +1041,85 @@ if [[ ${{#EXTRA[@]}} -eq 0 ]]; then
 fi
 exec analyst rituals run "$RITUAL_ID" "${{EXTRA[@]}}"
 """
+
+
+def _runner_ps1(ritual_id: str, spec: Dict[str, Any]) -> str:
+    """Windows launcher. Embeds the absolute Python path and ledger data dir
+    from build time so the script works from Task Scheduler, where no venv is
+    activated and no user environment variables are inherited."""
+    py = Path(sys.executable).resolve()
+    return f"""# Auto-generated Windows launcher for ritual: {ritual_id}
+$ErrorActionPreference = "Stop"
+if (-not $env:ANALYST_LEDGER_DATA) {{ $env:ANALYST_LEDGER_DATA = "{data_dir()}" }}
+$extra = @($args)
+if ($extra.Count -eq 0) {{ $extra = @("--require-approved") }}
+& "{py}" -m analyst_ledger.cli rituals run "{ritual_id}" @extra
+exit $LASTEXITCODE
+"""
+
+
+_CRON_DOW_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+
+
+def parse_cron_schedule(schedule: Optional[str]) -> Dict[str, Any]:
+    """
+    Translate a simple cron string ('minute hour dom month dow') into
+    Task-Scheduler-friendly fields: {"time": "HH:MM", "days": [...], "daily": bool}.
+
+    Only the minute/hour/day-of-week fields are honored (that is all the specs
+    generate). Anything unparseable falls back to weekdays at 07:00.
+    """
+    default = {
+        "time": "07:00",
+        "days": ["MON", "TUE", "WED", "THU", "FRI"],
+        "daily": False,
+    }
+    parts = str(schedule or "").split()
+    if len(parts) < 5:
+        return default
+    minute_s, hour_s, _dom, _month, dow = parts[:5]
+    try:
+        minute, hour = int(minute_s), int(hour_s)
+    except ValueError:
+        return default
+    if not (0 <= minute <= 59 and 0 <= hour <= 23):
+        return default
+    time = f"{hour:02d}:{minute:02d}"
+    if dow in {"*", "?"}:
+        return {"time": time, "days": [], "daily": True}
+    days: List[str] = []
+    for chunk in dow.split(","):
+        chunk = chunk.strip()
+        if "-" in chunk:
+            try:
+                a, b = (int(x) for x in chunk.split("-", 1))
+            except ValueError:
+                return {"time": time, "days": [], "daily": True}
+            if a > b:  # wrap-around ranges are rare; treat as daily
+                return {"time": time, "days": [], "daily": True}
+            days.extend(_CRON_DOW_NAMES[d % 7] for d in range(a, b + 1))
+        else:
+            try:
+                days.append(_CRON_DOW_NAMES[int(chunk) % 7])
+            except ValueError:
+                return {"time": time, "days": [], "daily": True}
+    seen = set()
+    days = [d for d in days if not (d in seen or seen.add(d))]
+    return {"time": time, "days": days, "daily": not days}
+
+
+def schtasks_create_args(
+    task_name: str, runner_ps1: Path, schedule: Optional[str]
+) -> List[str]:
+    """Build the schtasks.exe argument list for a ritual's scheduled task."""
+    sched = parse_cron_schedule(schedule)
+    tr = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{runner_ps1}"'
+    args = ["schtasks", "/Create", "/F", "/TN", task_name, "/TR", tr, "/ST", sched["time"]]
+    if sched["daily"]:
+        args += ["/SC", "DAILY"]
+    else:
+        args += ["/SC", "WEEKLY", "/D", ",".join(sched["days"])]
+    return args
 
 
 def build_ritual(
@@ -1033,6 +1168,7 @@ def build_ritual(
         "INTEGRATE.md": _integrate_md(rid, spec, bdir),
         "sample_context.json": json.dumps(sample, indent=2) + "\n",
         "runner.sh": _runner_sh(rid, spec),
+        "runner.ps1": _runner_ps1(rid, spec),
         "manifest.json": json.dumps(
             {
                 "ritual_id": rid,
@@ -1041,6 +1177,7 @@ def build_ritual(
                     "SKILL.md",
                     "workflow.json",
                     "runner.sh",
+                    "runner.ps1",
                     "INTEGRATE.md",
                     "sample_context.json",
                     "manifest.json",
@@ -1085,16 +1222,62 @@ def integrate_ritual(
     Targets:
       - claude-skill: copy SKILL.md (+ helpers) to ANALYST_CLAUDE_SKILLS_DIR
       - local: ensure runner + write local_launcher.sh under the build dir
+      - windows-task: register runner.ps1 with Windows Task Scheduler
     """
     ledger = ledger or Ledger()
     rid = _validate_ritual_id(ritual_id)
     target = (target or "").strip().lower().replace("_", "-")
-    if target not in {"claude-skill", "local"}:
-        raise ValueError("target must be 'claude-skill' or 'local'")
+    if target not in {"claude-skill", "local", "windows-task"}:
+        raise ValueError("target must be 'claude-skill', 'local', or 'windows-task'")
 
     bdir = build_dir_for(rid)
-    if not (bdir / "SKILL.md").exists():
+    # Rebuild if never built, or built before runner.ps1 existed
+    if not (bdir / "SKILL.md").exists() or not (bdir / "runner.ps1").exists():
         build_ritual(rid, ledger=ledger)
+
+    if target == "windows-task":
+        if platform.system() != "Windows":
+            return {
+                "status": "needs_config",
+                "ritual_id": rid,
+                "target": target,
+                "message": "windows-task requires Windows; use cron/OpenClaw here instead.",
+                "build_dir": str(bdir),
+            }
+        spec = load_spec(rid)
+        task_name = f"AnalystLedger_{rid}"
+        args = schtasks_create_args(task_name, bdir / "runner.ps1", spec.get("schedule"))
+        proc = subprocess.run(args, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            return {
+                "status": "error",
+                "ritual_id": rid,
+                "target": target,
+                "message": (proc.stderr or proc.stdout or "schtasks failed").strip(),
+            }
+        sched = parse_cron_schedule(spec.get("schedule"))
+        ledger.append_event(
+            Event(
+                type="ritual_integrate",
+                surface=Surface.RITUAL.value,
+                sensitivity=Sensitivity.INTERNAL.value,
+                payload={
+                    "ritual_id": rid,
+                    "target": target,
+                    "task_name": task_name,
+                    "schedule": sched,
+                },
+            )
+        )
+        return {
+            "status": "ok",
+            "ritual_id": rid,
+            "target": target,
+            "task_name": task_name,
+            "schedule": sched,
+            "verify_hint": f'schtasks /Query /TN "{task_name}"',
+            "remove_hint": f'schtasks /Delete /TN "{task_name}" /F',
+        }
 
     if target == "claude-skill":
         dest_root = claude_skills_dir()

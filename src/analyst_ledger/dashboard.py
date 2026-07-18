@@ -316,7 +316,7 @@ def _event_popup_script() -> str:
     }
     if (ev.type === 'note') return (p.text || '').slice(0, 280);
     if (ev.type === 'inbox_file') return p.name || p.path || '';
-    if (ev.type === 'artifact_attach') return (p.path || '').split('/').pop() || '';
+    if (ev.type === 'artifact_attach') return (p.path || '').split(/[\\/]/).pop() || '';
     try { return JSON.stringify(p).slice(0, 280); } catch (e) { return ''; }
   }
 
@@ -649,10 +649,10 @@ def _session_detail_page(ledger: Ledger, session_id: str) -> str:
     return _shell(f"{session.title} · Session", body + _event_popup_script(), active="home")
 
 
-def _automations_page(qs: str = "") -> str:
+def _automations_page(ledger: Ledger, qs: str = "") -> str:
     from .rituals import list_automations
 
-    items = list_automations()
+    items = list_automations(ledger)
     flash = _flash_from_qs(qs)
     rows = []
     for a in items:
@@ -668,6 +668,14 @@ def _automations_page(qs: str = "") -> str:
         if (a.get("build") or {}).get("built"):
             badges.append('<span class="badge ok">built</span>')
         wl = ", ".join((a.get("watchlist") or [])[:6]) or "—"
+        run = a.get("last_run")
+        if run:
+            run_label = str(run.get("ts") or "")[:16].replace("T", " ")
+            run_label += " (stub)" if run.get("stub") else ""
+            if run.get("error_count"):
+                run_label += f" · {run['error_count']} err"
+        else:
+            run_label = "never"
         rid = a["ritual_id"]
         rows.append(
             f"<tr>"
@@ -677,6 +685,7 @@ def _automations_page(qs: str = "") -> str:
             f"<td>{_h(a.get('host_family') or '—')}</td>"
             f"<td>{_h(a.get('runner') or '—')}</td>"
             f"<td><code>{_h(wl)}</code></td>"
+            f"<td class='muted'>{_h(run_label)}</td>"
             f"<td>{''.join(badges)}</td>"
             f"</tr>"
         )
@@ -716,10 +725,10 @@ def _automations_page(qs: str = "") -> str:
     <thead>
       <tr>
         <th>Ritual</th><th>Conf.</th><th>Evidence</th><th>Host</th>
-        <th>Runner</th><th>Watchlist</th><th>Status</th>
+        <th>Runner</th><th>Watchlist</th><th>Last run</th><th>Status</th>
       </tr>
     </thead>
-    <tbody>{''.join(rows) or '<tr><td colspan="7">—</td></tr>'}</tbody>
+    <tbody>{''.join(rows) or '<tr><td colspan="8">—</td></tr>'}</tbody>
   </table>
   <script>
   document.getElementById('btn-mine').addEventListener('click', async function () {{
@@ -886,6 +895,7 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     <select id="integrate-target">
       <option value="claude-skill">Claude Skill</option>
       <option value="local">Local environment</option>
+      <option value="windows-task">Windows Task Scheduler</option>
     </select>
     <button type="button" data-act="integrate">5. Integrate</button>
   </div>
@@ -974,9 +984,15 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
         buttons.forEach(b => b.disabled = false);
         return;
       }}
+      if (data.status === 'error' || data.status === 'needs_config') {{
+        status.textContent = data.message || data.status;
+        buttons.forEach(b => b.disabled = false);
+        return;
+      }}
       let msg = 'Done: ' + action;
       if (action === 'build' && data.build_dir) msg = 'Built at ' + data.build_dir;
       if (action === 'integrate' && data.dest) msg = 'Integrated → ' + data.dest;
+      if (action === 'integrate' && data.task_name) msg = 'Scheduled task registered: ' + data.task_name;
       if (action === 'run' && data.session_id) msg = 'Ran stub scan → session ' + data.session_id;
       if (action === 'suggest') msg = 'Suggestion written. Review the narrative below.';
       if (action === 'approve') msg = 'Approved. You can Build now.';
@@ -1243,11 +1259,10 @@ def _parse_json_body(environ) -> dict:
 
 
 def _cors_headers() -> list:
-    return [
-        ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-        ("Access-Control-Allow-Headers", "Content-Type"),
-    ]
+    # Intentionally no CORS headers: the Chrome extensions reach this server
+    # through their manifest host_permissions (exempt from CORS), and ordinary
+    # websites must NOT be able to read or write the ledger from the browser.
+    return []
 
 
 def _json_response(
@@ -1375,7 +1390,7 @@ def _require_ritual_id(data: dict) -> str:
 
 def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
     from . import rituals as rituals_mod
-    from .morning_yf import run_morning_yf_scan
+    from .runners import resolve_runner
 
     if action == "mine":
         days = int(data.get("days") or 21)
@@ -1424,29 +1439,18 @@ def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
             watchlist = [str(s).strip().upper() for s in symbols if str(s).strip()]
         elif isinstance(symbols, str) and symbols.strip():
             watchlist = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-        use_yf = "yahoo" in ritual_id or ritual_id == "morning_yf_scan"
-        runner = (data.get("runner") or "").strip()
-        if runner == "morning_yf_scan":
-            use_yf = True
-        if not use_yf:
-            # Try spec runner
-            try:
-                spec = rituals_mod.load_spec(ritual_id)
-                if spec.get("runner") == "morning_yf_scan":
-                    use_yf = True
-            except RuntimeError:
-                pass
-        if not use_yf:
-            raise ValueError(
-                f"no live runner for '{ritual_id}' yet; use a yahoo ritual or stub build"
-            )
-        return run_morning_yf_scan(
+        runner_name, runner_fn = resolve_runner(
+            ritual_id, explicit=(data.get("runner") or "").strip() or None
+        )
+        result = runner_fn(
             ledger=ledger,
             watchlist=watchlist,
             ritual_id=ritual_id,
             stub=stub,
             require_approved=bool(data.get("require_approved")),
         )
+        result.setdefault("runner", runner_name)
+        return result
     raise ValueError(f"unknown action: {action}")
 
 
@@ -1464,7 +1468,7 @@ def make_app(ledger: Optional[Ledger] = None):
         # --- Automations UI ---
         if path == "/automations" and method == "GET":
             qs = environ.get("QUERY_STRING") or ""
-            return _html_response(start_response, _automations_page(qs))
+            return _html_response(start_response, _automations_page(ledger, qs))
 
         if path == "/tracking" and method == "GET":
             qs = environ.get("QUERY_STRING") or ""
@@ -1508,7 +1512,7 @@ def make_app(ledger: Optional[Ledger] = None):
         if path == "/api/automations" and method == "GET":
             from .rituals import list_automations
 
-            return _json_response(start_response, list_automations())
+            return _json_response(start_response, list_automations(ledger))
 
         if path.startswith("/api/automations/") and method == "POST":
             action = path.rsplit("/", 1)[-1]

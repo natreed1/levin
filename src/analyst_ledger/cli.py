@@ -300,7 +300,6 @@ def cmd_ingest_browser(args: argparse.Namespace) -> int:
 
 def cmd_rituals(args: argparse.Namespace) -> int:
     from . import rituals as rituals_mod
-    from .morning_yf import run_morning_yf_scan
 
     action = args.rituals_cmd
     if action == "mine":
@@ -345,29 +344,21 @@ def cmd_rituals(args: argparse.Namespace) -> int:
         _print_json(result)
         return 0 if result.get("status") in {"ok", "needs_config"} else 1
     if action == "run":
+        from .runners import resolve_runner
+
         ritual_id = args.ritual_id
         watchlist = None
         if args.symbols:
             watchlist = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-        use_yf = (
-            args.runner == "morning_yf_scan"
-            or ritual_id == "morning_yf_scan"
-            or "yahoo" in ritual_id
-        )
-        if not use_yf:
-            print(
-                f"error: no runner for ritual '{ritual_id}'. "
-                "Use a yahoo-family ritual or --runner morning_yf_scan",
-                file=sys.stderr,
-            )
-            return 1
-        result = run_morning_yf_scan(
+        runner_name, runner_fn = resolve_runner(ritual_id, explicit=args.runner)
+        result = runner_fn(
             watchlist=watchlist,
             ritual_id=ritual_id,
             stub=args.stub,
             require_approved=args.require_approved,
             write_obsidian=Path(args.obsidian) if args.obsidian else None,
         )
+        result.setdefault("runner", runner_name)
         _print_json(result)
         return 0 if result.get("status") == "ok" else 1
     print(f"error: unknown rituals action {action}", file=sys.stderr)
@@ -641,8 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
     integ.add_argument(
         "--target",
         default="claude-skill",
-        choices=["claude-skill", "local"],
-        help="claude-skill copies to ANALYST_CLAUDE_SKILLS_DIR; local writes launcher",
+        choices=["claude-skill", "local", "windows-task"],
+        help=(
+            "claude-skill copies to ANALYST_CLAUDE_SKILLS_DIR; local writes launcher; "
+            "windows-task registers a Windows Task Scheduler job"
+        ),
     )
     integ.set_defaults(func=cmd_rituals)
 
@@ -652,8 +646,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--runner",
         default=None,
-        choices=["morning_yf_scan"],
-        help="Force a runner",
+        choices=["morning_yf_scan", "generic_watchlist_scan", "sec_filings_check", "note_digest"],
+        help="Force a runner (default: spec's runner, else guessed from the ritual name)",
     )
     run.add_argument("--stub", action="store_true", help="Offline stub quotes")
     run.add_argument(

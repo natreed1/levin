@@ -3,6 +3,9 @@
 Local-first workflow capture for hedge-fund research sessions.  
 **The local store is the system of record.** Claude (API / Bedrock) is only called on explicit, redacted synthesis jobs.
 
+> **New to the project?** Start with [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) —
+> current state, recent changes, setup on a new machine, and the roadmap.
+
 ## Capture timeline
 
 | Phase | What happens |
@@ -18,12 +21,24 @@ Local-first workflow capture for hedge-fund research sessions.
 ## Quick start
 
 ```bash
-cd "/Users/natreed/.cursor/projects/Finance Work Enviroment"
+# macOS / Linux
+cd path/to/levin
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-
 export ANALYST_LEDGER_DATA="$PWD/data"
+```
+
+```powershell
+# Windows (PowerShell)
+cd path\to\levin
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+$env:ANALYST_LEDGER_DATA = "$PWD\data"
+```
+
+```bash
 
 analyst session start "AM research — NVDA" --surface notes --desk-tag tech
 analyst note "Checking earnings revision vs QQQ"
@@ -80,7 +95,7 @@ analyst watch-inbox
 export ANALYST_OBSIDIAN_VAULT="$HOME/path/to/vault"
 analyst sync obsidian --once
 
-# Apple Notes — folder "AnalystLedger" in Notes.app
+# Apple Notes (macOS only) — folder "AnalystLedger" in Notes.app
 analyst sync apple-notes --once
 
 # Google Docs — drop .md/.txt/.docx exports into ~/AnalystGDocs
@@ -157,6 +172,32 @@ analyst rituals run morning_yahoo_scan --require-approved --stub
 analyst rituals run morning_yf_scan --stub \
   --obsidian "$HOME/Obsidian/Vault/Routines/Morning Scan.md"
 ```
+
+Available runners (`--runner` or the spec's `runner` field): `morning_yf_scan`,
+`generic_watchlist_scan`, `sec_filings_check` (EDGAR filings for the watchlist;
+set `ANALYST_SEC_CONTACT` to your email — SEC asks automated clients to identify
+themselves), `note_digest` (digests your last week of notes; add
+`--destination anthropic` style flags via the API for a model-written summary).
+
+### Schedule on Windows
+
+```powershell
+analyst rituals integrate morning_yahoo_scan --target windows-task
+# verify / remove:
+schtasks /Query /TN "AnalystLedger_morning_yahoo_scan"
+schtasks /Delete /TN "AnalystLedger_morning_yahoo_scan" /F
+```
+
+This registers the build's `runner.ps1` with Task Scheduler, translating the
+spec's cron schedule (e.g. `0 7 * * 1-5` → weekdays 07:00).
+
+## Claude review agent
+
+`CLAUDE.md` teaches Claude Code the ledger's schema, CLI, and sensitivity rules.
+The repo skill `.claude/skills/ledger-review` runs a weekly-style review: it
+reads recent sessions and run outcomes, critiques existing automations, writes
+new **unapproved** draft specs into `data/rituals/specs/`, and leaves a memo in
+`data/reviews/`. You stay the approval gate.
 
 Build packages never include restricted/confidential raw notes — only allowlisted fields and redacted sample context. See each package’s `INTEGRATE.md`.
 
