@@ -231,6 +231,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    from .review import run_review
+
+    result = run_review(
+        Ledger(),
+        days=args.days,
+        destination=args.destination,
+        dry_run=args.dry_run,
+    )
+    _print_json(result)
+    return 0 if result.get("status") in {"ok", "dry_run"} else 1
+
+
 def cmd_sft_export(args: argparse.Namespace) -> int:
     from .sft_export import export_pairs
 
@@ -547,6 +560,21 @@ def build_parser() -> argparse.ArgumentParser:
     sall.add_argument("--dir", default=None)
     sall.add_argument("--all-notes", action="store_true")
     sall.set_defaults(func=cmd_sync)
+
+    # review
+    rev = sub.add_parser(
+        "review",
+        help="Run the Claude reviewer: judge automations + propose new draft specs",
+    )
+    rev.add_argument("--days", type=int, default=14)
+    rev.add_argument(
+        "--destination",
+        default=None,
+        choices=["local_stub", "anthropic", "bedrock"],
+        help="Default: anthropic if ANTHROPIC_API_KEY set, else local_stub",
+    )
+    rev.add_argument("--dry-run", action="store_true", help="Show the prompt, write nothing")
+    rev.set_defaults(func=cmd_review)
 
     # sft
     sft = sub.add_parser("sft-export", help="Export (context→memo) pairs from feedback")

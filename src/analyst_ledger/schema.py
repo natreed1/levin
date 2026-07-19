@@ -68,6 +68,7 @@ EVENT_TYPES = frozenset(
         "ritual_build",
         "ritual_integrate",
         "external_note",
+        "review_run",
     }
 )
 

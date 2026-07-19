@@ -139,7 +139,7 @@ def _stub_completion(context: Dict[str, Any], instruction: str) -> str:
     )
 
 
-def _call_anthropic(prompt: str) -> str:
+def _call_anthropic(prompt: str, max_tokens: int = 2048) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
@@ -158,7 +158,7 @@ def _call_anthropic(prompt: str) -> str:
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=model,
-        max_tokens=2048,
+        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     parts = []

@@ -207,6 +207,7 @@ def _nav(active: str = "home") -> str:
     links = [
         ("/", "Timeline", "home"),
         ("/automations", "Automations", "automations"),
+        ("/review", "Claude review", "review"),
         ("/tracking", "Turn on tracking", "tracking"),
     ]
     parts = []
@@ -1011,6 +1012,130 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     return _shell(f"{ritual_id} · Automations", body, active="automations")
 
 
+def _review_page(ledger: Ledger, qs: str = "") -> str:
+    import os as _os
+
+    from .review import list_reviews, read_review
+    from .rituals import list_specs
+
+    flash = _flash_from_qs(qs)
+    params = parse_qs(qs or "")
+    memos = list_reviews()
+    selected = (params.get("memo") or [""])[0] or (memos[0]["name"] if memos else "")
+    memo_text = read_review(selected) if selected else None
+
+    has_key = bool(_os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    mode_note = (
+        "Reviews run with <strong>Claude</strong> (ANTHROPIC_API_KEY is set)."
+        if has_key
+        else "No ANTHROPIC_API_KEY — reviews run with a <strong>local stub</strong> "
+        "so you can test the flow; set the key for a real Claude review."
+    )
+
+    proposal_rows = []
+    for s in list_specs():
+        spec = s.get("spec") or {}
+        if spec.get("proposed_by") != "claude_review" or s.get("approved"):
+            continue
+        rid = s["ritual_id"]
+        proposal_rows.append(
+            f"<tr>"
+            f"<td><a href='/automations/{_h(rid)}'><code>{_h(rid)}</code></a></td>"
+            f"<td>{_h(spec.get('runner') or '—')}</td>"
+            f"<td><code>{_h(', '.join((spec.get('watchlist') or [])[:6]) or '—')}</code></td>"
+            f"<td class='muted'>{_h(spec.get('rationale') or '')}</td>"
+            f"<td><button type='button' class='approve-btn primary' data-rid='{_h(rid)}'>Approve</button></td>"
+            f"</tr>"
+        )
+
+    memo_links = []
+    for m in memos[:12]:
+        cls = " style='font-weight:600'" if m["name"] == selected else ""
+        memo_links.append(
+            f"<li><a href='/review?memo={_h(m['name'])}'{cls}>{_h(m['name'])}</a></li>"
+        )
+
+    body = f"""
+  {flash}
+  <p class="sub">The review agent reads your recent sessions and run outcomes, judges the
+    existing automations, and proposes new ones — as <strong>drafts you approve</strong>.
+    Nothing restricted or confidential is included; every model call is egress-audited.</p>
+  <div class="panel">
+    <p class="muted">{mode_note}</p>
+    <div class="actions">
+      <label class="muted">Look back
+        <select id="review-days">
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+        </select>
+      </label>
+      <button class="primary" type="button" id="btn-review">Run review now</button>
+    </div>
+    <div id="status" class="muted"></div>
+  </div>
+
+  <h2>Proposed automations (awaiting your approval)</h2>
+  <table>
+    <thead><tr><th>Ritual</th><th>Runner</th><th>Watchlist</th><th>Why</th><th></th></tr></thead>
+    <tbody>{''.join(proposal_rows) or '<tr><td colspan="5" class="muted">No open proposals — run a review.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Review memo</h2>
+  <div class="panel review">{_h(memo_text or '(no reviews yet — click Run review now)')}</div>
+  {f'<h3>Past reviews</h3><ul>{"".join(memo_links)}</ul>' if memo_links else ''}
+  <script>
+  document.getElementById('btn-review').addEventListener('click', async function () {{
+    const btn = this;
+    const status = document.getElementById('status');
+    const days = parseInt(document.getElementById('review-days').value, 10) || 14;
+    btn.disabled = true;
+    status.textContent = 'Reviewing the ledger… (this can take a minute with Claude)';
+    try {{
+      const res = await fetch('/api/review/run', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ days }}),
+      }});
+      const data = await res.json();
+      if (!res.ok) {{
+        status.textContent = 'Error: ' + (data.error || res.status);
+        btn.disabled = false;
+        return;
+      }}
+      const n = (data.proposals_written || []).length;
+      const msg = 'Review done via ' + data.destination + ' — ' + n + ' new proposal(s).';
+      location.href = '/review?msg=' + encodeURIComponent(msg) + '&kind=ok';
+    }} catch (e) {{
+      status.textContent = String(e);
+      btn.disabled = false;
+    }}
+  }});
+  document.querySelectorAll('.approve-btn').forEach(btn => {{
+    btn.addEventListener('click', async () => {{
+      const rid = btn.getAttribute('data-rid');
+      btn.disabled = true;
+      try {{
+        const res = await fetch('/api/automations/approve', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ ritual_id: rid }}),
+        }});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        location.href = '/review?msg=' + encodeURIComponent('Approved ' + rid +
+          ' — open Automations to build & schedule it.') + '&kind=ok';
+      }} catch (e) {{
+        btn.disabled = false;
+        document.getElementById('status').textContent = String(e);
+      }}
+    }});
+  }});
+  </script>
+"""
+    return _shell("Claude review · Analyst Ledger", body, active="review")
+
+
 def _tracking_page(ledger: Ledger, qs: str = "") -> str:
     flash = _flash_from_qs(qs)
     active_id = ledger.get_active_session_id()
@@ -1467,6 +1592,26 @@ def make_app(ledger: Optional[Ledger] = None):
         if path == "/tracking" and method == "GET":
             qs = environ.get("QUERY_STRING") or ""
             return _html_response(start_response, _tracking_page(ledger, qs))
+
+        if path == "/review" and method == "GET":
+            qs = environ.get("QUERY_STRING") or ""
+            return _html_response(start_response, _review_page(ledger, qs))
+
+        if path == "/api/review/run" and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                from .review import run_review
+
+                result = run_review(
+                    ledger,
+                    days=int(data.get("days") or 14),
+                    destination=data.get("destination"),
+                )
+                return _json_response(start_response, result)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
 
         if path.startswith("/api/session/") and method == "POST":
             action = path.rsplit("/", 1)[-1]

@@ -193,11 +193,18 @@ spec's cron schedule (e.g. `0 7 * * 1-5` → weekdays 07:00).
 
 ## Claude review agent
 
-`CLAUDE.md` teaches Claude Code the ledger's schema, CLI, and sensitivity rules.
-The repo skill `.claude/skills/ledger-review` runs a weekly-style review: it
-reads recent sessions and run outcomes, critiques existing automations, writes
-new **unapproved** draft specs into `data/rituals/specs/`, and leaves a memo in
-`data/reviews/`. You stay the approval gate.
+Three ways to run the reviewer — all write a memo to `data/reviews/` and
+**unapproved** draft specs to `data/rituals/specs/`; you stay the approval gate:
+
+- **Dashboard (recommended):** `analyst dashboard` → **Claude review** →
+  *Run review now*. Proposals appear with one-click Approve; then build /
+  schedule them from Automations. Uses Claude when `ANTHROPIC_API_KEY` is set,
+  else a local heuristic stub (so the flow is testable offline).
+- **CLI:** `analyst review --days 14` (`--destination local_stub` to force offline,
+  `--dry-run` to preview the redacted prompt).
+- **Claude Code:** the repo skill `.claude/skills/ledger-review` does the same
+  job interactively; `CLAUDE.md` teaches any Claude session the schema and the
+  hard sensitivity rules.
 
 Build packages never include restricted/confidential raw notes — only allowlisted fields and redacted sample context. See each package’s `INTEGRATE.md`.
 
