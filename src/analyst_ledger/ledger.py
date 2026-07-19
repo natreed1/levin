@@ -239,6 +239,174 @@ class Ledger:
         self.set_active_session_id(sid)
         return session
 
+    def start_background_session(
+        self,
+        title: str,
+        surface: str = Surface.SYSTEM.value,
+        sensitivity: str = Sensitivity.INTERNAL.value,
+        desk_tag: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Session:
+        """Create a session without replacing the analyst's active capture session."""
+        parse_surface(surface)
+        parse_sensitivity(sensitivity)
+        sid = session_id or new_id("sess")
+        session = Session(
+            session_id=sid,
+            title=title,
+            surface=surface,
+            sensitivity=sensitivity,
+            desk_tag=desk_tag,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions
+                (session_id, title, surface, sensitivity, desk_tag, started_at, ended_at, tags_json, status)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'open')
+                """,
+                (
+                    session.session_id,
+                    session.title,
+                    session.surface,
+                    session.sensitivity,
+                    session.desk_tag,
+                    session.started_at,
+                ),
+            )
+        self.append_event(
+            Event(
+                type="session_start",
+                surface=surface,
+                session_id=sid,
+                sensitivity=sensitivity,
+                payload={"title": title, "desk_tag": desk_tag, "background": True},
+            )
+        )
+        return session
+
+    def get_or_create_chat_thread(
+        self, ritual_id: Optional[str] = None, *, master: bool = False
+    ) -> Session:
+        """Return the persistent master or per-workflow chat thread."""
+        desk_tag = "chat:master" if master else f"chat:{ritual_id or ''}"
+        if not master and not ritual_id:
+            raise ValueError("ritual_id is required for a workflow chat")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT session_id FROM sessions
+                WHERE surface = ? AND desk_tag = ? AND status = 'open'
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (Surface.CHAT.value, desk_tag),
+            ).fetchone()
+        if row:
+            existing = self.get_session(row["session_id"])
+            if existing:
+                return existing
+        title = "Master workflows" if master else str(ritual_id).replace("_", " ").title()
+        return self.start_background_session(
+            title=title,
+            surface=Surface.CHAT.value,
+            sensitivity=Sensitivity.INTERNAL.value,
+            desk_tag=desk_tag,
+        )
+
+    def create_arena_thread(
+        self, ritual_id: str, trial_id: str, lane: str
+    ) -> Session:
+        """Ephemeral chat lane for dual-run arena (hidden from normal Chats list)."""
+        if not ritual_id:
+            raise ValueError("ritual_id is required for an arena thread")
+        lane_key = str(lane).strip().lower()
+        if lane_key not in {"a", "b"}:
+            raise ValueError("arena lane must be 'a' or 'b'")
+        desk_tag = f"arena:{trial_id}:{lane_key}"
+        title = f"Arena {lane_key.upper()} · {str(ritual_id).replace('_', ' ').title()}"
+        return self.start_background_session(
+            title=title,
+            surface=Surface.CHAT.value,
+            sensitivity=Sensitivity.INTERNAL.value,
+            desk_tag=desk_tag,
+        )
+
+    def append_chat_message(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        kind: str = "message",
+        metadata: Optional[Dict[str, Any]] = None,
+        sensitivity: str = Sensitivity.INTERNAL.value,
+    ) -> Event:
+        """Append one persistent chat message through the canonical ledger path."""
+        session = self.get_session(session_id)
+        if not session or session.surface != Surface.CHAT.value:
+            raise RuntimeError(f"Chat thread '{session_id}' not found.")
+        if role not in {"user", "assistant", "system", "tool"}:
+            raise ValueError(f"invalid chat role: {role}")
+        parse_sensitivity(sensitivity)
+        return self.append_event(
+            Event(
+                type="chat_message",
+                surface=Surface.CHAT.value,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload={
+                    "role": role,
+                    "content": str(content),
+                    "kind": kind,
+                    "metadata": metadata or {},
+                },
+            )
+        )
+
+    def list_chat_messages(self, session_id: str, limit: int = 300) -> List[Dict[str, Any]]:
+        """Return chronological chat messages; restricted content is never read."""
+        events = self.list_events(
+            session_id=session_id, limit=max(1, min(limit, 1000)), types=["chat_message"]
+        )
+        out = [
+            ev
+            for ev in reversed(events)
+            if ev.get("sensitivity") != Sensitivity.RESTRICTED.value
+        ]
+        return out
+
+    def list_chat_threads(self) -> List[Dict[str, Any]]:
+        """List the master thread first, followed by workflow chats.
+
+        Arena lanes (desk_tag ``arena:…``) are evaluation sandboxes and are
+        intentionally omitted so they do not clutter the coding/chat sidebar.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE surface = ? AND status = 'open'
+                  AND desk_tag LIKE 'chat:%'
+                ORDER BY CASE WHEN desk_tag = 'chat:master' THEN 0 ELSE 1 END, started_at DESC
+                """,
+                (Surface.CHAT.value,),
+            ).fetchall()
+        return [
+            {
+                "session_id": row["session_id"],
+                "title": row["title"],
+                "desk_tag": row["desk_tag"],
+                "ritual_id": (
+                    None
+                    if row["desk_tag"] == "chat:master"
+                    else str(row["desk_tag"] or "").removeprefix("chat:")
+                ),
+                "master": row["desk_tag"] == "chat:master",
+                "started_at": row["started_at"],
+            }
+            for row in rows
+        ]
+
     def end_session(
         self,
         session_id: Optional[str] = None,

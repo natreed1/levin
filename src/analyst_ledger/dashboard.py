@@ -200,6 +200,146 @@ def _css() -> str:
       color: var(--muted); cursor: pointer; padding: 0.25rem 0.55rem;
     }
     .modal-close:hover { color: var(--accent); border-color: var(--accent); }
+    .chat-layout {
+      display: grid; grid-template-columns: 16rem minmax(0, 1fr);
+      min-height: 68vh; border: 1px solid var(--border); background: #0c1015;
+    }
+    .chat-layout.friend-research {
+      grid-template-columns: 16rem minmax(0, 1fr) 15rem;
+    }
+    .chat-sidebar { border-right: 1px solid var(--border); padding: 0.75rem; }
+    .qwen-activity {
+      border-left: 1px solid var(--border); padding: 0.9rem 1rem;
+      background: #0a0e13; display: flex; flex-direction: column; gap: 0.65rem;
+    }
+    .qwen-activity h3 {
+      margin: 0; font-size: 0.78rem; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted); font-weight: 600;
+    }
+    .qwen-activity .act-status {
+      font-size: 0.95rem; color: var(--text); line-height: 1.35;
+    }
+    .qwen-activity .act-status.researching { color: var(--accent); }
+    .qwen-activity .act-status.failed { color: #f07178; }
+    .qwen-activity .act-status.researching::before {
+      content: ""; display: inline-block; width: 0.55rem; height: 0.55rem;
+      border-radius: 50%; background: var(--accent); margin-right: 0.4rem;
+      vertical-align: middle; animation: qwen-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes qwen-pulse {
+      0%, 100% { opacity: 0.35; }
+      50% { opacity: 1; }
+    }
+    .qwen-activity .act-meta {
+      color: var(--muted); font-size: 0.82rem; line-height: 1.4;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .chat-link {
+      display: block; padding: 0.7rem; margin-bottom: 0.35rem; text-decoration: none;
+      color: var(--text); border: 1px solid transparent; border-radius: 4px;
+    }
+    .chat-link:hover, .chat-link.active { background: var(--panel); border-color: var(--border); }
+    .chat-main { display: flex; flex-direction: column; min-width: 0; }
+    .chat-title { padding: 0.9rem 1.1rem; border-bottom: 1px solid var(--border); }
+    .chat-messages { flex: 1; overflow: auto; padding: 1rem; }
+    .message { max-width: 52rem; padding: 0.8rem 1rem; margin: 0 auto 0.8rem; white-space: pre-wrap; line-height: 1.45; }
+    .message.user { background: #1e3a55; margin-right: 0; max-width: 75%; border-radius: 8px; }
+    .message.assistant { background: var(--panel); border: 1px solid var(--border); }
+    .message.tool, .message.system { color: var(--muted); font-size: 0.86rem; border-left: 2px solid var(--border); }
+    .chat-compose { padding: 0.9rem; border-top: 1px solid var(--border); display: flex; gap: 0.6rem; flex-wrap: wrap; position: relative; }
+    .chat-compose textarea { min-height: 3rem; margin: 0; flex: 1 1 16rem; }
+    .mention-autofill {
+      position: absolute; left: 0.9rem; bottom: calc(100% - 0.45rem); z-index: 20;
+      min-width: 15rem; padding: 0.3rem; background: #111820;
+      border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px #0008;
+    }
+    .mention-autofill[hidden] { display: none; }
+    .mention-autofill button {
+      display: block; width: 100%; padding: 0.5rem 0.65rem; text-align: left;
+      color: var(--text); background: transparent; border: 0;
+    }
+    .mention-autofill button:hover, .mention-autofill button.active { background: #1e3a55; }
+    .arena-opt {
+      width: 100%; border: 1px solid var(--border); background: #0a0e13;
+      padding: 0.65rem 0.8rem; border-radius: 4px;
+    }
+    .arena-opt summary {
+      cursor: pointer; color: var(--muted); font-size: 0.9rem; list-style: none;
+    }
+    .arena-opt summary::-webkit-details-marker { display: none; }
+    .arena-opt[open] summary { color: var(--accent); margin-bottom: 0.55rem; }
+    .arena-opt .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; }
+    .arena-opt label { color: var(--muted); font-size: 0.82rem; display: block; }
+    .arena-opt select {
+      display: block; margin-top: 0.25rem; background: #1a222c;
+      border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.5rem;
+    }
+    .arena-opt .hint { color: var(--muted); font-size: 0.8rem; margin: 0.45rem 0 0; }
+    .arena-shell { border: 1px solid var(--border); background: #0c1015; min-height: 72vh; }
+    .arena-bar {
+      display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
+      justify-content: space-between; padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .arena-split {
+      display: grid; grid-template-columns: 1fr 1fr; min-height: 48vh;
+    }
+    .arena-pane {
+      display: flex; flex-direction: column; min-width: 0;
+      border-right: 1px solid var(--border);
+    }
+    .arena-pane:last-child { border-right: 0; }
+    .arena-pane-title {
+      padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; gap: 0.5rem; align-items: baseline;
+    }
+    .arena-pane .chat-messages { flex: 1; }
+    .grade-panel {
+      display: none; border-top: 1px solid var(--border); padding: 1rem 1.1rem;
+      background: #0a0e13;
+    }
+    .grade-panel.open { display: block; }
+    .grade-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.75rem;
+    }
+    .grade-grid label { display: block; color: var(--muted); font-size: 0.82rem; margin-top: 0.45rem; }
+    .grade-grid input[type=range] { width: 100%; }
+    .winner-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.5rem; }
+    .winner-row label { color: var(--text); font-size: 0.9rem; }
+    .chat-group {
+      color: var(--muted); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.06em; padding: 0.85rem 0.9rem 0.35rem;
+    }
+    .chat-group:first-child { padding-top: 0.35rem; }
+    .chat-link.friend { border-left: 2px solid var(--accent); }
+    .chat-title-row {
+      display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: center;
+      justify-content: space-between;
+    }
+    .chat-title-row .chat-title { border-bottom: 0; flex: 1; }
+    .qwen-room-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; }
+    .qwen-room-actions button {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer; font: inherit;
+    }
+    .qwen-room-actions button.primary {
+      background: var(--accent); color: #061018; border-color: var(--accent); font-weight: 600;
+    }
+    .qwen-room-actions button.danger {
+      color: #f07178; border-color: color-mix(in srgb, #f07178 45%, var(--border));
+    }
+    .qwen-room-actions .pill {
+      color: var(--muted); font-size: 0.8rem; border: 1px solid var(--border);
+      border-radius: 999px; padding: 0.2rem 0.55rem;
+    }
+    .qwen-room-actions .pill.on { color: var(--open); border-color: color-mix(in srgb, var(--open) 50%, var(--border)); }
+    @media (max-width: 760px) {
+      .chat-layout, .chat-layout.friend-research { grid-template-columns: 1fr; }
+      .chat-sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
+      .qwen-activity { border-left: 0; border-top: 1px solid var(--border); }
+      .arena-split, .grade-grid { grid-template-columns: 1fr; }
+      .arena-pane { border-right: 0; border-bottom: 1px solid var(--border); }
+    }
     """
 
 
@@ -208,6 +348,7 @@ def _nav(active: str = "home") -> str:
         ("/", "Timeline", "home"),
         ("/automations", "Automations", "automations"),
         ("/review", "Claude review", "review"),
+        ("/chats", "Chats", "chats"),
         ("/tracking", "Turn on tracking", "tracking"),
     ]
     parts = []
@@ -678,6 +819,26 @@ def _automations_page(ledger: Ledger, qs: str = "") -> str:
         else:
             run_label = "never"
         rid = a["ritual_id"]
+        can_run = bool(a.get("approved") and a.get("enabled", True))
+        has_model = bool(a.get("model"))
+        if can_run and has_model:
+            run_button = (
+                f"<button type='button' onclick='runAutomation({json.dumps(rid)})'>Run</button>"
+            )
+        elif can_run:
+            run_button = (
+                f"<a href='/automations/{_h(rid)}'><button type='button' "
+                f"title='Choose Claude or Qwen before first run'>Choose model</button></a>"
+            )
+        else:
+            run_button = (
+                "<button type='button' disabled title='Approve and enable before running'>Run</button>"
+            )
+        model_label = a.get("model") or "—"
+        if model_label in {"qwen3-8b", "qwen2.5-7b"}:
+            model_label = "Qwen3 8B"
+        elif model_label == "claude":
+            model_label = "Claude"
         rows.append(
             f"<tr>"
             f"<td><a href='/automations/{_h(rid)}'><code>{_h(rid)}</code></a></td>"
@@ -685,9 +846,11 @@ def _automations_page(ledger: Ledger, qs: str = "") -> str:
             f"<td>{_h(a.get('evidence_count'))}</td>"
             f"<td>{_h(a.get('host_family') or '—')}</td>"
             f"<td>{_h(a.get('runner') or '—')}</td>"
+            f"<td>{_h(model_label)}</td>"
             f"<td><code>{_h(wl)}</code></td>"
             f"<td class='muted'>{_h(run_label)}</td>"
             f"<td>{''.join(badges)}</td>"
+            f"<td>{run_button}</td>"
             f"</tr>"
         )
 
@@ -718,6 +881,7 @@ def _automations_page(ledger: Ledger, qs: str = "") -> str:
         style="width:3.5rem;margin-left:0.35rem;background:#1a222c;border:1px solid #2a3542;color:#e7ecf1;padding:0.35rem;" />
     </label>
     <button class="primary" id="btn-mine" type="button">Mine rituals</button>
+    <button class="primary" id="btn-create" type="button">Create new automation</button>
   </div>
   <div id="status" class="muted"></div>
   {empty}
@@ -726,10 +890,11 @@ def _automations_page(ledger: Ledger, qs: str = "") -> str:
     <thead>
       <tr>
         <th>Ritual</th><th>Conf.</th><th>Evidence</th><th>Host</th>
-        <th>Runner</th><th>Watchlist</th><th>Last run</th><th>Status</th>
+        <th>Runner</th><th>Model</th><th>Watchlist</th><th>Last run</th><th>Status</th>
+        <th>Actions</th>
       </tr>
     </thead>
-    <tbody>{''.join(rows) or '<tr><td colspan="8">—</td></tr>'}</tbody>
+    <tbody>{''.join(rows) or '<tr><td colspan="10">—</td></tr>'}</tbody>
   </table>
   <script>
   document.getElementById('btn-mine').addEventListener('click', async function () {{
@@ -761,12 +926,70 @@ def _automations_page(ledger: Ledger, qs: str = "") -> str:
       btn.disabled = false;
     }}
   }});
+
+  async function pollJob(jobId, done) {{
+    for (;;) {{
+      const res = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+      const job = await res.json();
+      document.getElementById('status').textContent = job.progress || job.status;
+      if (['completed', 'failed', 'cancelled'].includes(job.status)) {{
+        if (job.status !== 'completed') throw new Error(job.error || job.status);
+        done(job);
+        return;
+      }}
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }}
+  }}
+
+  document.getElementById('btn-create').addEventListener('click', async function () {{
+    const btn = this;
+    const status = document.getElementById('status');
+    btn.disabled = true;
+    status.textContent = 'Claude is reviewing recent redacted research…';
+    try {{
+      const res = await fetch('/api/automations/create', {{
+        method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: '{{}}'
+      }});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.status);
+      await pollJob(data.job_id, () => {{
+        location.href = '/automations?msg=' + encodeURIComponent(
+          'Claude created draft automation(s). Review and approve before running.'
+        ) + '&kind=ok';
+      }});
+    }} catch (e) {{
+      status.textContent = 'Error: ' + e;
+      btn.disabled = false;
+    }}
+  }});
+
+  async function runAutomation(ritualId) {{
+    const status = document.getElementById('status');
+    status.textContent = 'Starting research…';
+    try {{
+      const res = await fetch('/api/automations/run', {{
+        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{ritual_id: ritualId, stub: false}})
+      }});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.status);
+      if (data.status === 'needs_config') {{
+        location.href = '/automations/' + encodeURIComponent(ritualId)
+          + '?msg=' + encodeURIComponent(data.message || 'Choose an agent model first')
+          + '&kind=warn';
+        return;
+      }}
+      location.href = '/chats?ritual_id=' + encodeURIComponent(ritualId)
+        + '&job_id=' + encodeURIComponent(data.job_id);
+    }} catch (e) {{ status.textContent = 'Error: ' + e; }}
+  }}
   </script>
 """
     return _shell("Automations · Analyst Ledger", body, active="automations")
 
 
 def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
+    from .models import list_agent_models, model_label, normalize_agent_model
     from .rituals import get_automation_detail
 
     flash = _flash_from_qs(qs)
@@ -788,6 +1011,23 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     ev_count = len(detail.get("active_evidence_sessions") or [])
     enabled = bool(detail.get("enabled", True))
     approved = bool(detail.get("approved"))
+    agent_model = normalize_agent_model(spec.get("model"))
+    model_options = []
+    model_options.append(
+        f'<option value="" {"selected" if not agent_model else ""}>'
+        "Choose before first run…</option>"
+    )
+    for m in list_agent_models():
+        sel = "selected" if agent_model == m["id"] else ""
+        model_options.append(
+            f'<option value="{_h(m["id"])}" {sel}>{_h(m["label"])} — {_h(m["description"])}</option>'
+        )
+    model_hint = (
+        f"Using <strong>{_h(model_label(agent_model))}</strong> for research runs. "
+        "Change anytime and Save."
+        if agent_model
+        else "Pick <strong>Claude</strong> or <strong>Qwen3 8B</strong> before the first run."
+    )
 
     badges = []
     badges.append(
@@ -800,6 +1040,10 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
         if approved
         else '<span class="badge warn">unapproved</span>'
     )
+    if agent_model:
+        badges.append(f'<span class="badge ok">{_h(model_label(agent_model))}</span>')
+    else:
+        badges.append('<span class="badge warn">model unset</span>')
     if build.get("built"):
         badges.append('<span class="badge ok">built</span>')
 
@@ -864,7 +1108,13 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     <h3>Edit automation</h3>
     <div class="edit-grid">
       <div>
-        <label class="muted">Watchlist (comma-separated)
+        <label class="muted">Agent model
+          <select id="agent-model" style="display:block;width:100%;margin-top:0.35rem;background:#1a222c;border:1px solid #2a3542;color:#e7ecf1;padding:0.45rem;">
+            {''.join(model_options)}
+          </select>
+        </label>
+        <p class="muted" style="margin-top:0.5rem">{model_hint}</p>
+        <label class="muted" style="display:block;margin-top:0.85rem">Watchlist (comma-separated)
           <input id="watchlist" type="text" value="{_h(wl_text)}" />
         </label>
         <div class="toggle-row" style="margin-top:0.85rem">
@@ -892,10 +1142,10 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     <button type="button" data-act="suggest">1. Suggest</button>
     <button type="button" data-act="approve">2. Approve</button>
     <button class="primary" type="button" data-act="build">3. Build</button>
-    <button type="button" data-act="run">4. Run (stub)</button>
+    <button type="button" data-act="run" {"disabled" if not approved or not enabled else ""}>4. Run with agent</button>
     <select id="integrate-target">
       <option value="claude-skill">Claude Skill</option>
-      <option value="local">Local environment</option>
+      <option value="local">Local (cron / OpenClaw / launchd)</option>
       <option value="windows-task">Windows Task Scheduler</option>
     </select>
     <button type="button" data-act="integrate">5. Integrate</button>
@@ -925,6 +1175,7 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
       excluded_event_ids,
       enabled: document.getElementById('enabled').checked,
       approved: document.getElementById('approved').checked,
+      model: document.getElementById('agent-model').value,
     }};
   }}
 
@@ -963,13 +1214,29 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
     }});
   }});
 
+  const AGENT_MODEL = {json.dumps(agent_model)};
+
   async function act(action) {{
     const status = document.getElementById('status');
     const buttons = document.querySelectorAll('[data-act]');
     buttons.forEach(b => b.disabled = true);
     status.textContent = 'Working on ' + action + '…';
     const body = {{ ritual_id: RITUAL_ID }};
-    if (action === 'run') body.stub = true;
+    if (action === 'run') {{
+      body.stub = false;
+      const chosen = document.getElementById('agent-model').value;
+      if (!chosen && !AGENT_MODEL) {{
+        status.textContent = 'Choose Claude or Qwen3 8B above, then Save, before the first run.';
+        document.getElementById('agent-model').focus();
+        buttons.forEach(b => b.disabled = false);
+        return;
+      }}
+      if (chosen && chosen !== AGENT_MODEL) {{
+        status.textContent = 'Save the agent model choice first, then Run.';
+        buttons.forEach(b => b.disabled = false);
+        return;
+      }}
+    }}
     if (action === 'integrate') {{
       body.target = document.getElementById('integrate-target').value;
     }}
@@ -988,6 +1255,14 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
       if (data.status === 'error' || data.status === 'needs_config') {{
         status.textContent = data.message || data.status;
         buttons.forEach(b => b.disabled = false);
+        if (data.status === 'needs_config') {{
+          document.getElementById('agent-model').focus();
+        }}
+        return;
+      }}
+      if (action === 'run' && data.job_id) {{
+        location.href = '/chats?ritual_id=' + encodeURIComponent(RITUAL_ID)
+          + '&job_id=' + encodeURIComponent(data.job_id);
         return;
       }}
       let msg = 'Done: ' + action;
@@ -996,7 +1271,7 @@ def _automation_detail_page(ritual_id: str, qs: str = "") -> str:
       if (action === 'integrate' && data.task_name) msg = 'Scheduled task registered: ' + data.task_name;
       if (action === 'run' && data.session_id) msg = 'Ran stub scan → session ' + data.session_id;
       if (action === 'suggest') msg = 'Suggestion written. Review the narrative below.';
-      if (action === 'approve') msg = 'Approved. You can Build now.';
+      if (action === 'approve') msg = 'Approved. Choose an agent model, then Build / Run.';
       location.href = '/automations/' + encodeURIComponent(RITUAL_ID)
         + '?msg=' + encodeURIComponent(msg) + '&kind=ok';
     }} catch (e) {{
@@ -1134,6 +1409,863 @@ def _review_page(ledger: Ledger, qs: str = "") -> str:
   </script>
 """
     return _shell("Claude review · Analyst Ledger", body, active="review")
+
+
+def _render_chat_bubbles(messages: list) -> str:
+    rendered = []
+    for event in messages:
+        payload = event.get("payload") or {}
+        role = str(payload.get("role") or "assistant")
+        content = str(payload.get("content") or "")
+        rendered.append(
+            f"<div class='message {_h(role)}'><div>{_h(content)}</div></div>"
+        )
+    return "".join(rendered)
+
+
+def _qwen_panel_html() -> str:
+    from .friend_qwen import qwen_status
+
+    st = qwen_status()
+    enabled = bool(st.get("enabled"))
+    personalities = st.get("personalities") or []
+    mentions = ", ".join(
+        f"<code>{_h(str(p.get('mention') or ''))}</code>"
+        for p in personalities
+        if p.get("mention")
+    )
+    status_line = (
+        f"In the Friend conversation — call {mentions}. Add "
+        "<code>research …</code> after a mention for background research."
+        if enabled
+        else "Not in the conversation yet."
+    )
+    btn = "Remove from conversation" if enabled else "Add to Friend conversation"
+    return f"""
+      <div class="chat-title"><strong>Qwen personalities</strong>
+        <span id="job-status" class="muted"></span>
+      </div>
+      <div class="chat-messages" id="chat-messages" style="padding:1.25rem">
+        <div class="message system">
+          <p style="margin:0 0 0.75rem">Add your local Qwen model as distinct voices in
+            <a href="/chats?thread_id=friend">Friend</a>. Use <code>@Qwen</code> for a
+            balanced answer or <code>@Qwen-Contrarian</code> to challenge assumptions.
+            Either personality can run background research.</p>
+          <p style="margin:0 0 0.75rem" id="qwen-status-line">{status_line}</p>
+          <p class="hint" style="margin:0 0 1rem;color:var(--muted);font-size:0.85rem">
+            Requires Ollama/vLLM (<code>ANALYST_QWEN_BASE_URL</code>) and Friend messenger
+            env vars. Research uses public web search from room context only — not the ledger.</p>
+          <button type="button" class="primary" id="qwen-toggle"
+            data-enabled="{1 if enabled else 0}" data-stay="qwen">{_h(btn)}</button>
+        </div>
+      </div>
+      <form class="chat-compose" id="chat-form" style="display:none"></form>
+"""
+
+
+def _chats_page(ledger: Ledger, qs: str = "") -> str:
+    from .friend_qwen import QWEN_THREAD_ID, qwen_status
+    from .messenger_bridge import (
+        FRIEND_THREAD_ID,
+        MessengerBridgeError,
+        friend_thread_meta,
+        list_friend_messages,
+        messenger_configured,
+    )
+    from .rituals import list_automations
+
+    params = parse_qs(qs or "")
+    master = ledger.get_or_create_chat_thread(master=True)
+    for automation in list_automations(ledger):
+        if automation.get("has_spec"):
+            ledger.get_or_create_chat_thread(automation["ritual_id"])
+    agent_threads = ledger.list_chat_threads()
+    friend = friend_thread_meta()
+    qwen_meta = {"session_id": QWEN_THREAD_ID, "title": "Qwen", "qwen": True}
+    requested_thread = (params.get("thread_id") or [""])[0]
+    requested_ritual = (params.get("ritual_id") or [""])[0]
+    is_friend = requested_thread == FRIEND_THREAD_ID
+    is_qwen = requested_thread == QWEN_THREAD_ID
+    selected: dict
+    if is_friend:
+        selected = friend
+    elif is_qwen:
+        selected = qwen_meta
+    else:
+        selected = next(
+            (
+                t
+                for t in agent_threads
+                if t["session_id"] == requested_thread
+                or (requested_ritual and t.get("ritual_id") == requested_ritual)
+            ),
+            next((t for t in agent_threads if t.get("master")), None),
+        ) or {
+            "session_id": master.session_id,
+            "title": master.title,
+            "master": True,
+            "ritual_id": None,
+        }
+
+    qwen_state = qwen_status()
+    qwen_on = bool(qwen_state.get("enabled"))
+    friend_active = " active" if is_friend else ""
+    qwen_active = " active" if is_qwen else ""
+    qwen_label = "Qwen personalities · in chat" if qwen_on else "Qwen personalities"
+    people_links = [
+        f"<div class='chat-group'>People</div>"
+        f"<a class='chat-link friend{friend_active}' "
+        f"href='/chats?thread_id={_h(FRIEND_THREAD_ID)}'>Friend</a>"
+        f"<a class='chat-link{qwen_active}' "
+        f"href='/chats?thread_id={_h(QWEN_THREAD_ID)}'>{_h(qwen_label)}</a>"
+    ]
+    agent_links = ["<div class='chat-group'>Agents</div>"]
+    for thread in agent_threads:
+        active = (
+            " active"
+            if (
+                not is_friend
+                and not is_qwen
+                and thread["session_id"] == selected["session_id"]
+            )
+            else ""
+        )
+        pin = "Master · " if thread.get("master") else ""
+        agent_links.append(
+            f"<a class='chat-link{active}' href='/chats?thread_id={_h(thread['session_id'])}'>"
+            f"{_h(pin + thread['title'])}</a>"
+        )
+    links = people_links + agent_links
+
+    friend_error = ""
+    messages: list = []
+    activity_aside = ""
+    if is_qwen:
+        empty_hint = ""
+        main_inner = _qwen_panel_html()
+    elif is_friend:
+        if not messenger_configured():
+            friend_error = (
+                "Friend chat needs ANALYST_MESSENGER_URL and ANALYST_MESSENGER_INVITE "
+                "in the environment (invite = Fly MESSENGER_INVITE_TOKEN)."
+            )
+        else:
+            try:
+                messages = list_friend_messages()
+            except MessengerBridgeError as exc:
+                friend_error = str(exc)
+        empty_hint = (
+            friend_error
+            or "No messages yet. Try @Qwen or @Qwen-Contrarian."
+        )
+        bubbles = _render_chat_bubbles(messages)
+        if not bubbles:
+            bubbles = f"<div class='message system'>{_h(empty_hint)}</div>"
+        qwen_btn = (
+            "Remove Qwen"
+            if qwen_on
+            else "Add Qwen to room"
+        )
+        qwen_pill = (
+            '<span class="pill on" id="qwen-room-pill">Qwen voices · @Qwen / @Qwen-Contrarian</span>'
+            if qwen_on
+            else '<span class="pill" id="qwen-room-pill">Qwen off</span>'
+        )
+        qwen_st = qwen_state
+        act_status = str(qwen_st.get("research_status") or "idle")
+        act_progress = str(qwen_st.get("research_progress") or "")
+        act_query = str(qwen_st.get("research_query") or "")
+        act_error = str(qwen_st.get("research_error") or "")
+        main_inner = f"""
+      <div class="chat-title-row">
+        <div class="chat-title"><strong>Friend</strong>
+          <span id="job-status" class="muted"></span>
+        </div>
+        <div class="qwen-room-actions">
+          {qwen_pill}
+          <button type="button" class="{'primary' if not qwen_on else ''}" id="qwen-toggle"
+            data-enabled="{1 if qwen_on else 0}" data-stay="friend">{_h(qwen_btn)}</button>
+          <button type="button" id="friend-clear-chat" class="danger">Delete chat</button>
+        </div>
+      </div>
+      <div class="chat-messages" id="chat-messages">{bubbles}</div>
+      <form class="chat-compose" id="chat-form">
+        <textarea id="chat-input" placeholder="Message your friend… @Qwen or @Qwen-Contrarian"
+          required></textarea>
+        <button class="primary" type="submit">Send</button>
+        <button id="cancel-job" type="button" style="display:none">Cancel</button>
+      </form>
+"""
+        activity_aside = f"""
+    <aside class="qwen-activity" id="qwen-activity"
+      data-status="{_h(act_status)}"
+      data-progress="{_h(act_progress)}"
+      data-query="{_h(act_query)}"
+      data-error="{_h(act_error)}">
+      <h3>Qwen personality activity</h3>
+      <div class="act-status {_h(act_status)}" id="qwen-act-status">Loading…</div>
+      <div class="act-meta" id="qwen-act-meta"></div>
+    </aside>
+"""
+    else:
+        messages = ledger.list_chat_messages(selected["session_id"])
+        empty_hint = "No messages yet. Ask a question or run this workflow."
+        bubbles = _render_chat_bubbles(messages)
+        if not bubbles:
+            bubbles = f"<div class='message system'>{_h(empty_hint)}</div>"
+        is_master = bool(selected.get("master"))
+        ritual_id = selected.get("ritual_id")
+        placeholder = (
+            "Ask the master to coordinate approved workflows…"
+            if is_master
+            else f"Ask {_h(ritual_id)} to research…"
+        )
+        from .models import list_agent_models
+
+        model_opts = "".join(
+            f'<option value="{_h(m["id"])}">{_h(m["label"])}</option>'
+            for m in list_agent_models()
+        )
+        arena_block = ""
+        if not is_master and ritual_id:
+            arena_block = f"""
+        <details class="arena-opt" id="arena-opt">
+          <summary>Compare two agents (run simultaneously → split view → grade)</summary>
+          <div class="row">
+            <label>Lane A
+              <select id="arena-model-a">{model_opts}</select>
+            </label>
+            <label>Lane B
+              <select id="arena-model-b">{model_opts}</select>
+            </label>
+            <button type="button" class="primary" id="arena-run">Run simultaneously</button>
+          </div>
+          <p class="hint">Opt-in evaluation only. Uses disposable arena lanes — does not write into
+            this workflow chat, the coding environment, or master handoffs.</p>
+        </details>
+"""
+        main_inner = f"""
+      <div class="chat-title"><strong>{_h(selected['title'])}</strong>
+        <span id="job-status" class="muted"></span>
+      </div>
+      <div class="chat-messages" id="chat-messages">{bubbles}</div>
+      <form class="chat-compose" id="chat-form">
+        <textarea id="chat-input" placeholder="{placeholder}" required></textarea>
+        <button class="primary" type="submit">Send</button>
+        <button id="cancel-job" type="button" style="display:none">Cancel</button>
+        {arena_block}
+      </form>
+"""
+
+    job_id = (params.get("job_id") or [""])[0]
+    is_master = bool(selected.get("master")) and not is_friend and not is_qwen
+    ritual_id = selected.get("ritual_id") if not is_friend and not is_qwen else None
+    layout_class = "chat-layout friend-research" if is_friend else "chat-layout"
+
+    body = f"""
+  <p class="sub">Chat with your friend, call a Qwen personality, or talk to workflow agents.
+    Friend/Qwen traffic stays on the cloud messenger; agent threads stay local.
+    Try <code>@Qwen</code> or <code>@Qwen-Contrarian</code>; add
+    <code>research …</code> for background web research.</p>
+  <div class="{layout_class}">
+    <aside class="chat-sidebar">{''.join(links)}</aside>
+    <section class="chat-main">
+      {main_inner}
+    </section>
+    {activity_aside}
+  </div>
+  <script>
+  const THREAD_ID = {json.dumps(selected["session_id"])};
+  const RITUAL_ID = {json.dumps(ritual_id)};
+  const IS_MASTER = {json.dumps(is_master)};
+  const IS_FRIEND = {json.dumps(is_friend)};
+  const IS_QWEN = {json.dumps(is_qwen)};
+  const QWEN_MENTIONS = {json.dumps([p.get("mention") for p in qwen_state.get("personalities", []) if p.get("mention")])};
+  let activeJob = {json.dumps(job_id)};
+  let lastFriendSig = '';
+  let lastResearchSig = '';
+
+  function escapeHtml(s) {{
+    return String(s).replace(/[&<>"']/g, (c) => ({{
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }})[c]);
+  }}
+
+  function renderMessages(list, emptyHint) {{
+    const el = document.getElementById('chat-messages');
+    if (!el) return;
+    if (!list || !list.length) {{
+      el.innerHTML = '<div class="message system">' + escapeHtml(emptyHint || 'No messages yet.') + '</div>';
+      return;
+    }}
+    el.innerHTML = list.map((event) => {{
+      const payload = event.payload || {{}};
+      const role = payload.role || 'assistant';
+      const content = payload.content || '';
+      return '<div class="message ' + escapeHtml(role) + '"><div>' + escapeHtml(content) + '</div></div>';
+    }}).join('');
+    el.scrollTop = el.scrollHeight;
+  }}
+
+  async function tickQwen() {{
+    try {{
+      await fetch('/api/chats/friend/qwen/tick', {{method: 'POST'}});
+    }} catch (e) {{ /* ignore */ }}
+  }}
+
+  function renderQwenActivity(st) {{
+    const statusEl = document.getElementById('qwen-act-status');
+    const metaEl = document.getElementById('qwen-act-meta');
+    if (!statusEl || !metaEl) return;
+    const status = (st && st.research_status) || 'idle';
+    const progress = (st && st.research_progress) || '';
+    const query = (st && st.research_query) || '';
+    const error = (st && st.research_error) || '';
+    statusEl.className = 'act-status ' + status;
+    if (status === 'researching') {{
+      statusEl.textContent = 'A Qwen personality is researching';
+      metaEl.textContent = [query ? ('Topic: ' + query) : '', progress].filter(Boolean).join('\\n');
+    }} else if (status === 'failed') {{
+      statusEl.textContent = 'Research failed';
+      metaEl.textContent = error || 'Try @Qwen research … again.';
+    }} else {{
+      statusEl.textContent = 'Qwen personalities idle';
+      metaEl.textContent = 'Mention @Qwen or @Qwen-Contrarian.';
+    }}
+  }}
+
+  async function pollQwenActivity() {{
+    if (!IS_FRIEND) return;
+    try {{
+      const res = await fetch('/api/chats/friend/qwen');
+      const data = await res.json();
+      if (!res.ok) return;
+      const sig = JSON.stringify([
+        data.research_status, data.research_progress,
+        data.research_query, data.research_error
+      ]);
+      if (sig !== lastResearchSig) {{
+        lastResearchSig = sig;
+        renderQwenActivity(data);
+      }}
+    }} catch (e) {{ /* ignore */ }}
+  }}
+
+  async function pollFriend() {{
+    if (!IS_FRIEND) return;
+    try {{
+      await tickQwen();
+      await pollQwenActivity();
+      const res = await fetch('/api/chats/messages?thread_id=' + encodeURIComponent(THREAD_ID));
+      const data = await res.json();
+      if (!res.ok) {{
+        document.getElementById('job-status').textContent = ' · ' + (data.error || res.status);
+        return;
+      }}
+      const sig = JSON.stringify((data || []).map((m) => m.event_id));
+      if (sig !== lastFriendSig) {{
+        lastFriendSig = sig;
+        renderMessages(data, 'No messages yet. Try @Qwen or @Qwen-Contrarian.');
+        document.getElementById('job-status').textContent = '';
+      }}
+    }} catch (e) {{
+      document.getElementById('job-status').textContent = ' · ' + e;
+    }}
+  }}
+
+  async function pollJob() {{
+    if (!activeJob) return;
+    const status = document.getElementById('job-status');
+    const cancel = document.getElementById('cancel-job');
+    if (cancel) cancel.style.display = '';
+    for (;;) {{
+      const res = await fetch('/api/jobs/' + encodeURIComponent(activeJob));
+      const job = await res.json();
+      if (status) status.textContent = ' · ' + (job.progress || job.status);
+      if (['completed', 'failed', 'cancelled'].includes(job.status)) {{
+        if (cancel) cancel.style.display = 'none';
+        if (job.status === 'completed') {{
+          location.href = '/chats?thread_id=' + encodeURIComponent(THREAD_ID);
+        }} else if (status) {{
+          status.textContent = ' · ' + (job.error || job.status);
+        }}
+        return;
+      }}
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }}
+  }}
+
+  function addMentionAutofill(input) {{
+    if (!input || !IS_FRIEND || !QWEN_MENTIONS.length) return;
+    const menu = document.createElement('div');
+    menu.className = 'mention-autofill';
+    menu.hidden = true;
+    input.parentElement.appendChild(menu);
+    let matches = [];
+    let active = 0;
+    let tokenStart = -1;
+
+    function closeMenu() {{
+      menu.hidden = true;
+      matches = [];
+      tokenStart = -1;
+    }}
+
+    function choose(index) {{
+      const mention = matches[index];
+      if (!mention || tokenStart < 0) return;
+      const cursor = input.selectionStart;
+      input.value = input.value.slice(0, tokenStart) + mention + ' ' + input.value.slice(cursor);
+      const next = tokenStart + mention.length + 1;
+      input.setSelectionRange(next, next);
+      closeMenu();
+      input.focus();
+    }}
+
+    function refresh() {{
+      const cursor = input.selectionStart;
+      const before = input.value.slice(0, cursor);
+      const found = before.match(/(^|\\s)(@[\\w-]*)$/);
+      if (!found) {{
+        closeMenu();
+        return;
+      }}
+      const query = found[2].toLowerCase();
+      tokenStart = cursor - found[2].length;
+      matches = QWEN_MENTIONS.filter((mention) => mention.toLowerCase().startsWith(query));
+      if (!matches.length) {{
+        closeMenu();
+        return;
+      }}
+      active = Math.min(active, matches.length - 1);
+      menu.innerHTML = matches.map((mention, index) =>
+        '<button type="button" class="' + (index === active ? 'active' : '') +
+        '" data-index="' + index + '">' + escapeHtml(mention) + '</button>'
+      ).join('');
+      menu.hidden = false;
+    }}
+
+    input.addEventListener('input', refresh);
+    input.addEventListener('blur', () => setTimeout(closeMenu, 120));
+    input.addEventListener('keydown', (event) => {{
+      if (menu.hidden) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {{
+        event.preventDefault();
+        active = (active + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+        refresh();
+      }} else if (event.key === 'Enter' || event.key === 'Tab') {{
+        event.preventDefault();
+        choose(active);
+      }} else if (event.key === 'Escape') {{
+        event.preventDefault();
+        closeMenu();
+      }}
+    }});
+    menu.addEventListener('mousedown', (event) => {{
+      event.preventDefault();
+      const button = event.target.closest('button[data-index]');
+      if (button) choose(Number(button.dataset.index));
+    }});
+  }}
+
+  const chatForm = document.getElementById('chat-form');
+  if (chatForm && !IS_QWEN) {{
+    const chatInput = document.getElementById('chat-input');
+    if (chatInput) {{
+      addMentionAutofill(chatInput);
+      chatInput.addEventListener('keydown', (event) => {{
+        if (!event.defaultPrevented && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {{
+          event.preventDefault();
+          chatForm.requestSubmit();
+        }}
+      }});
+    }}
+    chatForm.addEventListener('submit', async (event) => {{
+      event.preventDefault();
+      const input = document.getElementById('chat-input');
+      const content = input.value.trim();
+      if (!content) return;
+      input.disabled = true;
+      try {{
+        const res = await fetch('/api/chats/message', {{
+          method: 'POST', headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{thread_id: THREAD_ID, content}})
+        }});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        input.value = '';
+        if (IS_FRIEND) {{
+          if (/@qwen\\b/i.test(content)) {{
+            document.getElementById('job-status').textContent = ' · Qwen personality thinking…';
+            await tickQwen();
+          }}
+          await pollFriend();
+          input.disabled = false;
+          input.focus();
+          return;
+        }}
+        activeJob = data.job_id;
+        await pollJob();
+      }} catch (e) {{
+        document.getElementById('job-status').textContent = ' · Error: ' + e;
+        input.disabled = false;
+      }}
+    }});
+  }}
+
+  const cancelBtn = document.getElementById('cancel-job');
+  if (cancelBtn) {{
+    cancelBtn.addEventListener('click', async () => {{
+      if (!activeJob) return;
+      await fetch('/api/jobs/' + encodeURIComponent(activeJob) + '/cancel', {{method:'POST'}});
+    }});
+  }}
+
+  const arenaBtn = document.getElementById('arena-run');
+  if (arenaBtn) {{
+    const modelB = document.getElementById('arena-model-b');
+    if (modelB && modelB.options.length > 1) modelB.selectedIndex = 1;
+    arenaBtn.addEventListener('click', async () => {{
+      const input = document.getElementById('chat-input');
+      const content = input.value.trim();
+      if (!content) {{
+        document.getElementById('job-status').textContent = ' · Enter a research request first';
+        return;
+      }}
+      const modelA = document.getElementById('arena-model-a').value;
+      const modelBVal = document.getElementById('arena-model-b').value;
+      arenaBtn.disabled = true;
+      input.disabled = true;
+      try {{
+        const res = await fetch('/api/arena/start', {{
+          method: 'POST', headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{
+            ritual_id: RITUAL_ID,
+            request: content,
+            model_a: modelA,
+            model_b: modelBVal,
+            source_thread_id: THREAD_ID,
+          }})
+        }});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        location.href = '/chats/arena?trial_id=' + encodeURIComponent(data.trial_id);
+      }} catch (e) {{
+        document.getElementById('job-status').textContent = ' · Arena error: ' + e;
+        arenaBtn.disabled = false;
+        input.disabled = false;
+      }}
+    }});
+  }}
+
+  const qwenToggle = document.getElementById('qwen-toggle');
+  if (qwenToggle) {{
+    qwenToggle.addEventListener('click', async () => {{
+      const enabled = qwenToggle.dataset.enabled !== '1';
+      const stay = qwenToggle.dataset.stay || 'qwen';
+      qwenToggle.disabled = true;
+      const status = document.getElementById('job-status');
+      if (status) status.textContent = enabled ? ' · Adding Qwen personalities…' : ' · Removing…';
+      try {{
+        const res = await fetch('/api/chats/friend/qwen', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{enabled}})
+        }});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        location.href = '/chats?thread_id=' + encodeURIComponent(stay);
+      }} catch (e) {{
+        if (status) status.textContent = ' · ' + e;
+        qwenToggle.disabled = false;
+      }}
+    }});
+  }}
+
+  const friendClear = document.getElementById('friend-clear-chat');
+  if (friendClear) {{
+    friendClear.addEventListener('click', async () => {{
+      if (!confirm('Delete the entire Friend room chat for everyone? This cannot be undone.')) {{
+        return;
+      }}
+      friendClear.disabled = true;
+      const status = document.getElementById('job-status');
+      if (status) status.textContent = ' · Deleting chat…';
+      try {{
+        const res = await fetch('/api/chats/friend/clear', {{method: 'POST'}});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        renderMessages([], 'No messages yet. Try @Qwen or @Qwen-Contrarian.');
+        lastFriendSig = '[]';
+        if (status) status.textContent = ' · Chat deleted';
+      }} catch (e) {{
+        if (status) status.textContent = ' · ' + e;
+      }} finally {{
+        friendClear.disabled = false;
+      }}
+    }});
+  }}
+
+  if (IS_FRIEND) {{
+    lastFriendSig = {json.dumps(json.dumps([m.get("event_id") for m in messages]))};
+    const actPanel = document.getElementById('qwen-activity');
+    if (actPanel) {{
+      renderQwenActivity({{
+        research_status: actPanel.dataset.status || 'idle',
+        research_progress: actPanel.dataset.progress || '',
+        research_query: actPanel.dataset.query || '',
+        research_error: actPanel.dataset.error || ''
+      }});
+    }}
+    setInterval(pollFriend, 2500);
+  }} else if (!IS_QWEN) {{
+    pollJob();
+  }}
+  const messagesEl = document.getElementById('chat-messages');
+  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  </script>
+"""
+    return _shell("Chats · Analyst Ledger", body, active="chats")
+
+
+def _render_arena_messages(ledger: Ledger, thread_id: str) -> str:
+    messages = ledger.list_chat_messages(thread_id)
+    rendered = []
+    for event in messages:
+        payload = event.get("payload") or {}
+        role = str(payload.get("role") or "assistant")
+        content = str(payload.get("content") or "")
+        rendered.append(
+            f"<div class='message {_h(role)}'><div>{_h(content)}</div></div>"
+        )
+    if not rendered:
+        rendered.append(
+            "<div class='message system'>Waiting for this lane to start…</div>"
+        )
+    return "".join(rendered)
+
+
+def _score_sliders(prefix: str) -> str:
+    dims = [
+        ("helpfulness", "Helpfulness"),
+        ("correctness", "Correctness"),
+        ("research_quality", "Research quality"),
+        ("concision", "Concision"),
+    ]
+    parts = []
+    for key, label in dims:
+        parts.append(
+            f"<label>{_h(label)} <span id='{prefix}-{key}-val'>3</span>"
+            f"<input type='range' id='{prefix}-{key}' min='1' max='5' step='1' value='3' "
+            f"oninput=\"document.getElementById('{prefix}-{key}-val').textContent=this.value\"/>"
+            f"</label>"
+        )
+    return "".join(parts)
+
+
+def _arena_page(ledger: Ledger, qs: str = "") -> str:
+    from .arena import load_trial
+
+    params = parse_qs(qs or "")
+    trial_id = (params.get("trial_id") or [""])[0].strip()
+    if not trial_id:
+        body = """
+  <p class="sub">No arena trial selected.</p>
+  <p><a href="/chats">← Back to Chats</a></p>
+"""
+        return _shell("Arena · Analyst Ledger", body, active="chats")
+    try:
+        trial = load_trial(trial_id)
+    except RuntimeError as exc:
+        body = f"""
+  <p class="sub">{_h(str(exc))}</p>
+  <p><a href="/chats">← Back to Chats</a></p>
+"""
+        return _shell("Arena · Analyst Ledger", body, active="chats")
+
+    lane_a = trial.lanes["a"]
+    lane_b = trial.lanes["b"]
+    msgs_a = _render_arena_messages(ledger, lane_a.thread_id)
+    msgs_b = _render_arena_messages(ledger, lane_b.thread_id)
+    back = (
+        f"/chats?thread_id={_h(trial.source_thread_id)}"
+        if trial.source_thread_id
+        else f"/chats?ritual_id={_h(trial.ritual_id)}"
+    )
+    grade_open = " open" if trial.grade else ""
+    grade_saved = ""
+    if trial.grade:
+        grade_saved = (
+            f"<p class='muted'>Grade saved · winner "
+            f"<strong>{_h(trial.grade.get('winner'))}</strong> · "
+            f"{_h(trial.grade.get('rated_at'))}</p>"
+        )
+    body = f"""
+  <p class="sub">Disposable dual-run arena for <strong>{_h(trial.ritual_id)}</strong>.
+    Isolated from the durable workflow chat — grade here to tune which agent config wins.</p>
+  <div class="arena-shell">
+    <div class="arena-bar">
+      <div>
+        <strong>Arena trial</strong>
+        <span class="muted"> · {_h(trial_id)}</span>
+        <div class="muted" style="margin-top:0.25rem;max-width:48rem">{_h(trial.request)}</div>
+      </div>
+      <div class="actions">
+        <span id="arena-status" class="muted"></span>
+        <button type="button" id="btn-grade">Open grading</button>
+        <a href="{back}"><button type="button">Exit arena</button></a>
+      </div>
+    </div>
+    <div class="arena-split">
+      <section class="arena-pane" id="pane-a">
+        <div class="arena-pane-title">
+          <strong>A · {_h(lane_a.model_label)}</strong>
+          <span class="muted" id="status-a">{_h(lane_a.status)}</span>
+        </div>
+        <div class="chat-messages" id="msgs-a">{msgs_a}</div>
+      </section>
+      <section class="arena-pane" id="pane-b">
+        <div class="arena-pane-title">
+          <strong>B · {_h(lane_b.model_label)}</strong>
+          <span class="muted" id="status-b">{_h(lane_b.status)}</span>
+        </div>
+        <div class="chat-messages" id="msgs-b">{msgs_b}</div>
+      </section>
+    </div>
+    <div class="grade-panel{grade_open}" id="grade-panel">
+      <h3 style="margin-top:0">Grading mode</h3>
+      <p class="muted">Score both lanes, pick a winner, and save. Writes to
+        <code>data/arena/comparisons.jsonl</code> for later agent tuning — not into the coding workspace.</p>
+      {grade_saved}
+      <div class="winner-row">
+        <span class="muted">Winner:</span>
+        <label><input type="radio" name="winner" value="a"/> A · {_h(lane_a.model_label)}</label>
+        <label><input type="radio" name="winner" value="b"/> B · {_h(lane_b.model_label)}</label>
+        <label><input type="radio" name="winner" value="tie" checked/> Tie</label>
+        <label><input type="radio" name="winner" value="neither"/> Neither</label>
+      </div>
+      <div class="grade-grid">
+        <div>
+          <strong>Lane A scores</strong>
+          {_score_sliders("sa")}
+          <label>Notes A<textarea id="notes-a" rows="3" placeholder="What worked or failed…"></textarea></label>
+        </div>
+        <div>
+          <strong>Lane B scores</strong>
+          {_score_sliders("sb")}
+          <label>Notes B<textarea id="notes-b" rows="3" placeholder="What worked or failed…"></textarea></label>
+        </div>
+      </div>
+      <label class="muted" style="display:block;margin-top:0.75rem">Training note
+        <textarea id="training-note" rows="2"
+          placeholder="What should future agent config learn from this comparison?"></textarea>
+      </label>
+      <div class="actions" style="margin-top:0.85rem">
+        <button class="primary" type="button" id="btn-save-grade">Save grades</button>
+        <span id="grade-status" class="muted"></span>
+      </div>
+    </div>
+  </div>
+  <script>
+  const TRIAL_ID = {json.dumps(trial_id)};
+  const JOB_A = {json.dumps(lane_a.job_id)};
+  const JOB_B = {json.dumps(lane_b.job_id)};
+
+  function renderMessages(events) {{
+    if (!events || !events.length) {{
+      return "<div class='message system'>No messages yet.</div>";
+    }}
+    return events.map(ev => {{
+      const p = ev.payload || {{}};
+      const role = p.role || 'assistant';
+      const content = (p.content || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<div class="message ${{role}}"><div>${{content}}</div></div>`;
+    }}).join('');
+  }}
+
+  async function refreshLane(lane, threadId, statusEl, msgsEl) {{
+    const res = await fetch('/api/chats/messages?thread_id=' + encodeURIComponent(threadId));
+    if (!res.ok) return;
+    const events = await res.json();
+    msgsEl.innerHTML = renderMessages(events);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  }}
+
+  async function pollJob(jobId, statusEl) {{
+    if (!jobId) return 'completed';
+    const res = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+    const job = await res.json();
+    statusEl.textContent = job.progress || job.status;
+    return job.status;
+  }}
+
+  async function pollArena() {{
+    const status = document.getElementById('arena-status');
+    const gradeBtn = document.getElementById('btn-grade');
+    for (;;) {{
+      const [sa, sb] = await Promise.all([
+        pollJob(JOB_A, document.getElementById('status-a')),
+        pollJob(JOB_B, document.getElementById('status-b')),
+      ]);
+      await Promise.all([
+        refreshLane('a', {json.dumps(lane_a.thread_id)},
+          document.getElementById('status-a'), document.getElementById('msgs-a')),
+        refreshLane('b', {json.dumps(lane_b.thread_id)},
+          document.getElementById('status-b'), document.getElementById('msgs-b')),
+      ]);
+      const done = ['completed','failed','cancelled'];
+      const aDone = done.includes(sa);
+      const bDone = done.includes(sb);
+      status.textContent = aDone && bDone
+        ? 'Both lanes finished — open grading when ready'
+        : 'Running both agents…';
+      if (aDone && bDone) {{
+        gradeBtn.classList.add('primary');
+        return;
+      }}
+      await new Promise(r => setTimeout(r, 900));
+    }}
+  }}
+
+  document.getElementById('btn-grade').addEventListener('click', () => {{
+    document.getElementById('grade-panel').classList.add('open');
+    document.getElementById('grade-panel').scrollIntoView({{behavior:'smooth'}});
+  }});
+
+  document.getElementById('btn-save-grade').addEventListener('click', async () => {{
+    const winner = (document.querySelector('input[name=winner]:checked') || {{}}).value || 'tie';
+    const dims = ['helpfulness','correctness','research_quality','concision'];
+    const scores_a = {{}}, scores_b = {{}};
+    dims.forEach(d => {{
+      scores_a[d] = Number(document.getElementById('sa-' + d).value);
+      scores_b[d] = Number(document.getElementById('sb-' + d).value);
+    }});
+    const statusEl = document.getElementById('grade-status');
+    statusEl.textContent = 'Saving…';
+    try {{
+      const res = await fetch('/api/arena/' + encodeURIComponent(TRIAL_ID) + '/grade', {{
+        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          winner,
+          scores_a,
+          scores_b,
+          notes_a: document.getElementById('notes-a').value,
+          notes_b: document.getElementById('notes-b').value,
+          training_note: document.getElementById('training-note').value,
+        }})
+      }});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.status);
+      statusEl.textContent = 'Saved · winner ' + winner;
+    }} catch (e) {{
+      statusEl.textContent = 'Error: ' + e;
+    }}
+  }});
+
+  pollArena();
+  </script>
+"""
+    return _shell("Arena · Analyst Ledger", body, active="chats")
 
 
 def _tracking_page(ledger: Ledger, qs: str = "") -> str:
@@ -1456,7 +2588,13 @@ def _ingest_browser(ledger: Ledger, data: dict) -> dict:
     url = data.get("url") or (data.get("payload") or {}).get("url")
     if not url:
         raise ValueError("url required")
-    parsed = parse_url(url)
+    # Deep research / explicit manual capture may leave the research allowlist
+    allow_any = bool(
+        data.get("allow_any")
+        or data.get("deep_research")
+        or data.get("manual")
+    )
+    parsed = parse_url(url, allow_any=allow_any)
     # Allow client to attach title without overriding parse
     title = data.get("title") or (data.get("payload") or {}).get("title")
     if title:
@@ -1507,9 +2645,12 @@ def _require_ritual_id(data: dict) -> str:
     return _validate_ritual_id(str(data.get("ritual_id") or ""))
 
 
-def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
+def _api_automations_action(
+    ledger: Ledger, action: str, data: dict, jobs: Any = None
+) -> dict:
     from . import rituals as rituals_mod
     from .runners import resolve_runner
+    from .workflow_engine import WorkflowEngine
 
     if action == "mine":
         days = int(data.get("days") or 21)
@@ -1518,6 +2659,18 @@ def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
             ledger=ledger, days=days, min_sessions=min_sessions
         )
         return {"status": "ok", "count": len(candidates), "candidates": candidates}
+
+    if action == "create":
+        if jobs is None:
+            return rituals_mod.create_automations_with_claude(ledger=ledger)
+
+        def create(job):
+            job.update("Reviewing recent redacted sessions with Claude")
+            result = rituals_mod.create_automations_with_claude(ledger=ledger)
+            job.update(f"Created {result['count']} draft automation(s)")
+            return result
+
+        return jobs.start("automation:create", "automation_create", create).public()
 
     ritual_id = _require_ritual_id(data)
 
@@ -1540,6 +2693,7 @@ def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
             approved=data.get("approved") if "approved" in data else None,
             enabled=data.get("enabled") if "enabled" in data else None,
             note_hints=data.get("note_hints"),
+            model=data.get("model") if "model" in data else None,
         )
     if action == "build":
         return rituals_mod.build_ritual(
@@ -1552,6 +2706,38 @@ def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
         return rituals_mod.integrate_ritual(ritual_id, target=target, ledger=ledger)
     if action == "run":
         stub = bool(data.get("stub", True))
+        if not stub:
+            from .models import normalize_agent_model
+            from .rituals import load_spec
+
+            try:
+                spec = load_spec(ritual_id)
+            except RuntimeError as exc:
+                return {"status": "needs_config", "message": str(exc)}
+            if not normalize_agent_model(spec.get("model")):
+                return {
+                    "status": "needs_config",
+                    "message": (
+                        "Choose Claude or Qwen3 8B in Edit automation, "
+                        "then Save, before the first run."
+                    ),
+                }
+            if jobs is None:
+                return WorkflowEngine(ledger).run(
+                    ritual_id, request=str(data.get("request") or ""), stub=False
+                )
+
+            def run(job):
+                return WorkflowEngine(ledger).run(
+                    ritual_id,
+                    request=str(data.get("request") or ""),
+                    stub=False,
+                    job=job,
+                )
+
+            return jobs.start(
+                f"workflow:{ritual_id}", "workflow_run", run
+            ).public()
         symbols = data.get("symbols")
         watchlist = None
         if isinstance(symbols, list):
@@ -1573,8 +2759,126 @@ def _api_automations_action(ledger: Ledger, action: str, data: dict) -> dict:
     raise ValueError(f"unknown action: {action}")
 
 
+def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
+    from .messenger_bridge import FRIEND_THREAD_ID, send_friend_message
+    from .workflow_engine import MasterCoordinator, WorkflowEngine
+
+    thread_id = str(data.get("thread_id") or "")
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise ValueError("message content is required")
+    if thread_id == FRIEND_THREAD_ID:
+        return send_friend_message(content)
+    session = ledger.get_session(thread_id)
+    if not session or session.surface != "chat":
+        raise RuntimeError(f"Chat thread '{thread_id}' not found.")
+    ledger.append_chat_message(thread_id, role="user", content=content)
+    if session.desk_tag == "chat:master":
+        return jobs.start(
+            "chat:master",
+            "master_chat",
+            lambda job: MasterCoordinator(ledger).run(content, job=job),
+        ).public()
+    ritual_id = str(session.desk_tag or "").removeprefix("chat:")
+    return jobs.start(
+        f"workflow:{ritual_id}",
+        "workflow_chat",
+        lambda job: WorkflowEngine(ledger).run(
+            ritual_id, request=content, stub=False, job=job
+        ),
+    ).public()
+
+
+def _api_arena_start(ledger: Ledger, jobs: Any, data: dict) -> dict:
+    """Start two simultaneous isolated workflow runs for side-by-side grading."""
+    from .arena import attach_jobs, create_trial, sync_lane_from_job
+    from .orchestration import ClaudeGateway
+    from .rituals import _validate_ritual_id
+    from .workflow_engine import WorkflowEngine
+
+    ritual_id = _validate_ritual_id(str(data.get("ritual_id") or ""))
+    request = str(data.get("request") or "").strip()
+    model_a = str(data.get("model_a") or "")
+    model_b = str(data.get("model_b") or "")
+    source_thread_id = (data.get("source_thread_id") or None) or None
+    stub = bool(data.get("stub", False))
+
+    trial = create_trial(
+        ledger,
+        ritual_id=ritual_id,
+        request=request,
+        model_a=model_a,
+        model_b=model_b,
+        source_thread_id=str(source_thread_id) if source_thread_id else None,
+    )
+
+    def make_runner(lane_key: str):
+        lane = trial.lanes[lane_key]
+
+        def run(job):
+            sync_lane_from_job(trial, lane_key, job_status="running")
+            try:
+                # Fresh gateway per lane so model overrides do not race.
+                engine = WorkflowEngine(
+                    ledger, ClaudeGateway(ledger, model=lane.model)
+                )
+                result = engine.run(
+                    ritual_id,
+                    request=request,
+                    stub=stub,
+                    job=job,
+                    model_override=lane.model,
+                    thread_id=lane.thread_id,
+                    handoff=False,
+                )
+                sync_lane_from_job(
+                    trial, lane_key, job_status="completed", result=result
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                sync_lane_from_job(
+                    trial, lane_key, job_status="failed", error=str(exc)
+                )
+                raise
+
+        return run
+
+    job_a = jobs.start(
+        f"arena:{trial.trial_id}:a", "arena_run", make_runner("a")
+    )
+    job_b = jobs.start(
+        f"arena:{trial.trial_id}:b", "arena_run", make_runner("b")
+    )
+    attach_jobs(trial, job_a=job_a.job_id, job_b=job_b.job_id)
+    return {
+        "status": "ok",
+        "trial_id": trial.trial_id,
+        "job_a": job_a.job_id,
+        "job_b": job_b.job_id,
+        "trial": trial.public(),
+    }
+
+
+def _api_arena_grade(ledger: Ledger, trial_id: str, data: dict) -> dict:
+    from .arena import save_grade
+
+    return save_grade(
+        ledger,
+        trial_id,
+        winner=str(data.get("winner") or ""),
+        scores_a=data.get("scores_a") if isinstance(data.get("scores_a"), dict) else {},
+        scores_b=data.get("scores_b") if isinstance(data.get("scores_b"), dict) else {},
+        notes_a=str(data.get("notes_a") or ""),
+        notes_b=str(data.get("notes_b") or ""),
+        training_note=str(data.get("training_note") or ""),
+    )
+
+
 def make_app(ledger: Optional[Ledger] = None):
+    from .workflow_engine import JobManager
+
     ledger = ledger or Ledger()
+    jobs = JobManager()
 
     def app(environ, start_response):
         path = environ.get("PATH_INFO") or "/"
@@ -1588,6 +2892,14 @@ def make_app(ledger: Optional[Ledger] = None):
         if path == "/automations" and method == "GET":
             qs = environ.get("QUERY_STRING") or ""
             return _html_response(start_response, _automations_page(ledger, qs))
+
+        if path == "/chats" and method == "GET":
+            qs = environ.get("QUERY_STRING") or ""
+            return _html_response(start_response, _chats_page(ledger, qs))
+
+        if path == "/chats/arena" and method == "GET":
+            qs = environ.get("QUERY_STRING") or ""
+            return _html_response(start_response, _arena_page(ledger, qs))
 
         if path == "/tracking" and method == "GET":
             qs = environ.get("QUERY_STRING") or ""
@@ -1657,12 +2969,202 @@ def make_app(ledger: Optional[Ledger] = None):
             action = path.rsplit("/", 1)[-1]
             try:
                 data = _parse_json_body(environ)
-                result = _api_automations_action(ledger, action, data)
+                result = _api_automations_action(ledger, action, data, jobs=jobs)
                 return _json_response(start_response, result)
             except Exception as exc:  # noqa: BLE001
                 return _json_response(
                     start_response, {"error": str(exc)}, status="400 Bad Request"
                 )
+
+        if path == "/api/chats" and method == "GET":
+            from .friend_qwen import qwen_thread_meta
+            from .messenger_bridge import friend_thread_meta
+
+            ledger.get_or_create_chat_thread(master=True)
+            threads = [
+                friend_thread_meta(),
+                qwen_thread_meta(),
+                *ledger.list_chat_threads(),
+            ]
+            return _json_response(start_response, threads)
+
+        if path == "/api/chats/friend/qwen" and method == "GET":
+            from .friend_qwen import qwen_status
+
+            return _json_response(start_response, qwen_status())
+
+        if path == "/api/chats/friend/qwen" and method == "POST":
+            from .friend_qwen import set_qwen_in_conversation
+            from .messenger_bridge import MessengerBridgeError
+
+            try:
+                data = _parse_json_body(environ)
+                enabled = bool(data.get("enabled"))
+                return _json_response(
+                    start_response, set_qwen_in_conversation(enabled)
+                )
+            except MessengerBridgeError as exc:
+                return _json_response(
+                    start_response,
+                    {"error": str(exc)},
+                    status=f"{exc.status} Error",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/chats/friend/qwen/tick" and method == "POST":
+            from .friend_qwen import tick_qwen
+            from .messenger_bridge import MessengerBridgeError
+
+            try:
+                return _json_response(start_response, tick_qwen())
+            except MessengerBridgeError as exc:
+                return _json_response(
+                    start_response,
+                    {"error": str(exc), "replied": False},
+                    status=f"{exc.status} Error",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response,
+                    {"error": str(exc), "replied": False},
+                    status="400 Bad Request",
+                )
+
+        if path == "/api/chats/friend/clear" and method == "POST":
+            from .messenger_bridge import MessengerBridgeError, clear_friend_messages
+
+            try:
+                return _json_response(start_response, clear_friend_messages())
+            except MessengerBridgeError as exc:
+                return _json_response(
+                    start_response,
+                    {"error": str(exc)},
+                    status=f"{exc.status} Error",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/chats/messages" and method == "GET":
+            from .messenger_bridge import (
+                FRIEND_THREAD_ID,
+                MessengerBridgeError,
+                list_friend_messages,
+            )
+
+            qs = parse_qs(environ.get("QUERY_STRING") or "")
+            thread_id = str((qs.get("thread_id") or [""])[0])
+            try:
+                if thread_id == FRIEND_THREAD_ID:
+                    return _json_response(start_response, list_friend_messages())
+                return _json_response(
+                    start_response, ledger.list_chat_messages(thread_id)
+                )
+            except MessengerBridgeError as exc:
+                return _json_response(
+                    start_response,
+                    {"error": str(exc)},
+                    status=f"{exc.status} Error",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/chats/message" and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                return _json_response(
+                    start_response, _api_chat_message(ledger, jobs, data)
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/arena/start" and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                return _json_response(
+                    start_response, _api_arena_start(ledger, jobs, data)
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        arena_get = re.match(r"^/api/arena/(arena_[a-zA-Z0-9]+)$", path or "")
+        if arena_get and method == "GET":
+            try:
+                from .arena import load_trial
+
+                trial = load_trial(arena_get.group(1))
+                # Refresh lane status from live jobs when available.
+                for key, lane in trial.lanes.items():
+                    if not lane.job_id:
+                        continue
+                    job = jobs.get(lane.job_id)
+                    if not job:
+                        continue
+                    from .arena import sync_lane_from_job
+
+                    sync_lane_from_job(
+                        trial,
+                        key,
+                        job_status=job.status,
+                        result=job.result if isinstance(job.result, dict) else None,
+                        error=job.error,
+                    )
+                trial = load_trial(arena_get.group(1))
+                return _json_response(start_response, trial.public())
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        arena_grade = re.match(
+            r"^/api/arena/(arena_[a-zA-Z0-9]+)/grade$", path or ""
+        )
+        if arena_grade and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                return _json_response(
+                    start_response,
+                    _api_arena_grade(ledger, arena_grade.group(1), data),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/chats/run" and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                data["stub"] = False
+                return _json_response(
+                    start_response,
+                    _api_automations_action(ledger, "run", data, jobs=jobs),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        job_match = re.match(r"^/api/jobs/(job_[a-zA-Z0-9]+)(/cancel)?$", path or "")
+        if job_match:
+            job = jobs.get(job_match.group(1))
+            if not job:
+                return _json_response(
+                    start_response, {"error": "job not found"}, status="404 Not Found"
+                )
+            if method == "GET" and not job_match.group(2):
+                return _json_response(start_response, job.public())
+            if method == "POST" and job_match.group(2):
+                return _json_response(start_response, jobs.cancel(job.job_id).public())
 
         if path == "/api/ingest-tv" and method == "POST":
             try:

@@ -24,7 +24,14 @@ from .paths import (
     rituals_dir,
 )
 from .redact import redact_text
-from .schema import Event, Sensitivity, Surface, utc_now_iso
+from .schema import (
+    Event,
+    Sensitivity,
+    Surface,
+    parse_sensitivity,
+    sensitivity_allows_egress,
+    utc_now_iso,
+)
 
 
 def _parse_ts(ts: str) -> Optional[datetime]:
@@ -393,9 +400,10 @@ def update_automation(
     approved: Optional[bool] = None,
     enabled: Optional[bool] = None,
     note_hints: Optional[List[str]] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Edit automation fields (watchlist, evidence toggles, approve/enable).
+    Edit automation fields (watchlist, evidence toggles, approve/enable, model).
 
     Persists to candidates.json and/or the workflow spec when present.
     """
@@ -442,6 +450,15 @@ def update_automation(
                 spec["approved_at"] = utc_now_iso()
         if enabled is not None:
             spec["enabled"] = bool(enabled)
+        if model is not None:
+            from .models import normalize_agent_model
+
+            mid = normalize_agent_model(model)
+            if model and not mid:
+                raise RuntimeError(
+                    f"Unknown agent model {model!r}. Choose 'claude' or 'qwen3-8b'."
+                )
+            spec["model"] = mid
         path = ritual_specs_dir() / f"{rid}.json"
         path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
 
@@ -542,6 +559,132 @@ def suggest_ritual(
         "narrative_path": str(narrative_path),
         "spec": spec,
     }
+
+
+def _recent_planner_context(ledger: Ledger, limit: int = 20) -> List[Dict[str, Any]]:
+    """Build an allowlisted recent-session summary for automation planning."""
+    out: List[Dict[str, Any]] = []
+    for session in ledger.list_sessions(limit=max(limit * 3, 40)):
+        if len(out) >= limit:
+            break
+        if session.get("surface") in {Surface.RITUAL.value, "chat"}:
+            continue
+        level = parse_sensitivity(session.get("sensitivity"))
+        if not sensitivity_allows_egress(level, Sensitivity.INTERNAL):
+            continue
+        context = ledger.session_context_for_synthesis(
+            str(session["session_id"]), max_sensitivity=Sensitivity.INTERNAL
+        )
+        events: List[Dict[str, Any]] = []
+        for ev in context.get("events") or []:
+            payload = ev.get("payload") or {}
+            kind = ev.get("type")
+            safe: Dict[str, Any] = {}
+            if kind == "note":
+                safe["text"] = redact_text(str(payload.get("text") or ""))[:500]
+            elif kind == "url_focus":
+                for key in ("host", "path", "symbol", "section"):
+                    if payload.get(key) is not None:
+                        safe[key] = str(payload[key])[:200]
+            elif kind in {"symbol_focus", "interval_change", "tag"}:
+                for key in ("symbol", "interval", "tag"):
+                    if payload.get(key) is not None:
+                        safe[key] = str(payload[key])[:80]
+            else:
+                continue
+            events.append({"type": kind, "ts": ev.get("ts"), "payload": safe})
+        out.append(
+            {
+                "session_id": session["session_id"],
+                "title": redact_text(str(session.get("title") or ""))[:200],
+                "started_at": session.get("started_at"),
+                "tags": list(session.get("tags") or []),
+                "events": events[-40:],
+            }
+        )
+    return out
+
+
+def create_automations_with_claude(
+    ledger: Optional[Ledger] = None,
+    *,
+    gateway: Any = None,
+    recent_limit: int = 20,
+) -> Dict[str, Any]:
+    """Ask Claude for governed workflow drafts based on recent ledger activity."""
+    from .orchestration import ClaudeGateway, validate_workflow_spec
+
+    ledger = ledger or Ledger()
+    context = _recent_planner_context(ledger, limit=recent_limit)
+    if not context:
+        raise RuntimeError("No eligible recent sessions found. Capture research first.")
+    gateway = gateway or ClaudeGateway(ledger)
+    prompt = (
+        "Review the redacted analyst workflow history below and propose up to three useful "
+        "repeatable automations. Return JSON only as {\"automations\":[...]}. Each automation "
+        "must include name, description, runner, schedule, watchlist, steps, and budget. "
+        "Allowed runners: morning_yf_scan, generic_watchlist_scan, sec_filings_check, "
+        "note_digest. Each step must contain exactly one allowed action: fetch_quote, "
+        "fetch_calendar, fetch_headlines, sec_filings, recent_notes. Do not invent tools, "
+        "shell commands, code, trades, or market facts. Names must use letters, digits, "
+        "underscore, or dash.\n\nRecent history:\n"
+        + json.dumps(context, ensure_ascii=False)
+    )
+    payload = gateway.complete_json(
+        [{"role": "user", "content": prompt}],
+        kind="automation_create",
+        max_tokens=4096,
+        system="You design conservative, auditable buy-side research workflows.",
+    )
+    proposals = payload.get("automations") if isinstance(payload, dict) else None
+    if not isinstance(proposals, list) or not proposals:
+        raise RuntimeError("Claude did not return any automation proposals.")
+    written: List[Dict[str, Any]] = []
+    source_ids = [str(s["session_id"]) for s in context]
+    for raw in proposals[:3]:
+        spec = validate_workflow_spec(raw)
+        rid = _validate_ritual_id(spec["name"])
+        path = ritual_specs_dir() / f"{rid}.json"
+        if path.exists():
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if existing.get("approved"):
+                continue
+        spec.update(
+            {
+                "approved": False,
+                "proposed_by": "claude_api",
+                "created_at": utc_now_iso(),
+                "source_candidate": {
+                    "confidence": None,
+                    "evidence_count": len(source_ids),
+                    "session_ids": source_ids,
+                },
+            }
+        )
+        path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+        review_path = ritual_specs_dir() / f"{rid}_review.md"
+        review_path.write_text(
+            f"# {rid}\n\n{spec.get('description') or 'Claude-generated workflow draft.'}\n\n"
+            "**Status:** Unapproved — review the steps and approve in the dashboard before running.\n",
+            encoding="utf-8",
+        )
+        ledger.append_event(
+            Event(
+                type="ritual_suggest",
+                surface=Surface.RITUAL.value,
+                sensitivity=Sensitivity.INTERNAL.value,
+                payload={
+                    "ritual_id": rid,
+                    "spec_path": str(path),
+                    "destination": "anthropic",
+                    "proposed_by": "claude_api",
+                },
+            )
+        )
+        written.append(spec)
+    if not written:
+        raise RuntimeError("Claude proposals matched existing approved automations; nothing changed.")
+    return {"status": "ok", "count": len(written), "automations": written}
 
 
 def _suggest_prompt(candidate: Dict[str, Any], notes: List[str]) -> str:
@@ -749,7 +892,9 @@ def list_automations(ledger: Optional[Ledger] = None) -> List[Dict[str, Any]]:
         }
         row["has_spec"] = True
         row["approved"] = s["approved"]
+        row["enabled"] = bool(s["spec"].get("enabled", True))
         row["runner"] = s.get("runner")
+        row["model"] = s["spec"].get("model")
         row["watchlist"] = s.get("watchlist") or row.get("watchlist") or []
         row["build"] = build_status(rid)
         by_id[rid] = row
@@ -1027,11 +1172,11 @@ Build directory: `{build_dir}`
 
 
 def _runner_sh(ritual_id: str, spec: Dict[str, Any]) -> str:
-    # Pin the ledger dir at build time: cron/Task Scheduler environments do not
-    # inherit the shell's ANALYST_LEDGER_DATA, and the run must hit the same
-    # ledger that holds the approved spec.
+    # Pin Python + ledger dir at build time: cron/launchd inherit neither the
+    # interactive shell's PATH/venv nor ANALYST_LEDGER_DATA.
+    py = Path(sys.executable).resolve()
     return f"""#!/usr/bin/env bash
-# Auto-generated launcher for ritual: {ritual_id}
+# Auto-generated launcher for ritual: {ritual_id} (macOS / Linux)
 set -euo pipefail
 export ANALYST_LEDGER_DATA="${{ANALYST_LEDGER_DATA:-{data_dir()}}}"
 RITUAL_ID="{ritual_id}"
@@ -1039,7 +1184,7 @@ EXTRA=("$@")
 if [[ ${{#EXTRA[@]}} -eq 0 ]]; then
   EXTRA=(--require-approved)
 fi
-exec analyst rituals run "$RITUAL_ID" "${{EXTRA[@]}}"
+exec "{py}" -m analyst_ledger.cli rituals run "$RITUAL_ID" "${{EXTRA[@]}}"
 """
 
 
@@ -1231,19 +1376,26 @@ def integrate_ritual(
         raise ValueError("target must be 'claude-skill', 'local', or 'windows-task'")
 
     bdir = build_dir_for(rid)
+
+    # Fail fast on the wrong OS so we don't force a build just to return guidance.
+    if target == "windows-task" and platform.system() != "Windows":
+        return {
+            "status": "needs_config",
+            "ritual_id": rid,
+            "target": target,
+            "message": (
+                "windows-task requires Windows. On macOS/Linux use "
+                "`--target local` and point cron/OpenClaw at runner.sh "
+                "(see docs/openclaw-cron-morning-yf.md)."
+            ),
+            "build_dir": str(bdir),
+        }
+
     # Rebuild if never built, or built before runner.ps1 existed
     if not (bdir / "SKILL.md").exists() or not (bdir / "runner.ps1").exists():
         build_ritual(rid, ledger=ledger)
 
     if target == "windows-task":
-        if platform.system() != "Windows":
-            return {
-                "status": "needs_config",
-                "ritual_id": rid,
-                "target": target,
-                "message": "windows-task requires Windows; use cron/OpenClaw here instead.",
-                "build_dir": str(bdir),
-            }
         spec = load_spec(rid)
         task_name = f"AnalystLedger_{rid}"
         args = schtasks_create_args(task_name, bdir / "runner.ps1", spec.get("schedule"))

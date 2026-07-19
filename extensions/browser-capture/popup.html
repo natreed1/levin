@@ -2,54 +2,105 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Yahoo → Ledger</title>
+  <title>Ledger Capture</title>
   <style>
     body {
-      font-family: system-ui, sans-serif; margin: 0; padding: 12px; width: 300px;
+      font-family: system-ui, sans-serif; margin: 0; padding: 12px; width: 320px;
       background: #0f1419; color: #e7ecf1;
     }
-    h1 { font-size: 14px; margin: 0 0 6px; }
-    p { font-size: 12px; color: #8b9aab; margin: 0 0 10px; line-height: 1.35; }
-    label { display: block; font-size: 11px; color: #8b9aab; margin-top: 8px; }
+    h1 { font-size: 14px; margin: 0 0 4px; }
+    h2 { font-size: 12px; margin: 14px 0 6px; color: #e7ecf1; font-weight: 600; }
+    p { font-size: 11px; color: #8b9aab; margin: 0 0 8px; line-height: 1.35; }
+    label { display: block; font-size: 11px; color: #8b9aab; margin-top: 6px; }
+    label.row {
+      display: flex; align-items: center; gap: 8px; margin-top: 4px;
+      color: #e7ecf1; font-size: 12px;
+    }
+    label.row input { margin: 0; }
     input[type=text] {
       width: 100%; box-sizing: border-box; margin-top: 4px;
       background: #1a222c; border: 1px solid #2a3542; color: #e7ecf1; padding: 6px;
     }
     button {
-      margin-top: 10px; width: 100%; padding: 8px; border: 0;
+      margin-top: 8px; width: 100%; padding: 8px; border: 0; border-radius: 4px;
       background: #3d9cf0; color: #0f1419; font-weight: 600; cursor: pointer;
     }
     button.secondary { background: #2a3542; color: #e7ecf1; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
-    .row button { margin-top: 0; font-size: 11px; padding: 7px 4px; }
+    button.tiny { width: auto; margin: 0; padding: 3px 8px; font-size: 10px; font-weight: 500; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+    .row2 button { margin-top: 0; font-size: 11px; padding: 7px 4px; }
     #status { font-size: 12px; margin-top: 10px; min-height: 1.4em; white-space: pre-wrap; }
     .ok { color: #2ecc71; }
     .err { color: #e74c3c; }
-    ol { margin: 0 0 8px 1.1rem; padding: 0; font-size: 11px; color: #8b9aab; }
+    .panel {
+      background: #1a222c; border: 1px solid #2a3542; border-radius: 6px;
+      padding: 8px; margin-top: 6px; max-height: 130px; overflow: auto;
+    }
+    .site-row, .ex-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 6px; padding: 3px 0; font-size: 12px;
+    }
+    .site-row label { margin: 0; color: #e7ecf1; display: flex; align-items: center; gap: 6px; }
+    .add-row { display: flex; gap: 6px; margin-top: 6px; }
+    .add-row input { margin: 0; flex: 1; }
+    .add-row button { margin: 0; width: auto; white-space: nowrap; }
+    .hint { font-size: 10px; color: #6b7a8a; margin-top: 4px; }
+
+    /* This-tab card */
+    .tab-card {
+      background: #1a222c; border: 1px solid #2a3542; border-radius: 6px;
+      padding: 10px; margin-top: 6px;
+    }
+    .tab-host { font-size: 13px; font-weight: 600; word-break: break-all; }
+    .tab-state { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+    .dot.on { background: #2ecc71; }
+    .dot.off { background: #6b7a8a; }
+    .dot.deny { background: #e74c3c; }
+    .tab-actions { margin-top: 8px; }
+    .tab-actions button { margin-top: 0; }
   </style>
 </head>
 <body>
-  <h1>Yahoo Finance → Ledger</h1>
-  <p>Logs quote pages + tabs (statistics, news, …) and optional price scrape. Notes not required.</p>
-  <label><input id="enabled" type="checkbox" checked /> Capture enabled</label>
-  <label><input id="autoSession" type="checkbox" checked /> Auto-start session</label>
-  <label>Endpoint <input id="endpoint" type="text" /></label>
-  <button id="capture" type="button">Capture this tab now</button>
-  <p style="margin:12px 0 0">Outcome (optional)</p>
-  <div class="row">
+  <h1>Analyst Ledger Capture</h1>
+
+  <label class="row"><input id="enabled" type="checkbox" /> Capture enabled</label>
+  <label class="row"><input id="deepResearch" type="checkbox" /> Deep research (any website)</label>
+  <label class="row"><input id="autoSession" type="checkbox" /> Auto-start session</label>
+
+  <h2>This tab</h2>
+  <div class="tab-card">
+    <div class="tab-host" id="activeHost">—</div>
+    <div class="tab-state"><span class="dot off" id="tabDot"></span><span id="tabState">Checking…</span></div>
+    <div class="tab-actions">
+      <button id="capture" type="button">Capture this tab now</button>
+      <button class="secondary" id="tabToggle" type="button">Exclude this site</button>
+    </div>
+  </div>
+
+  <h2>Research sites (auto)</h2>
+  <p class="hint">Off = skip auto-capture for that family. Manual Capture still works unless excluded/denied.</p>
+  <div class="panel" id="siteList"></div>
+
+  <h2>Excluded hosts</h2>
+  <div class="panel" id="excludeList"><div class="hint">None</div></div>
+  <div class="add-row">
+    <input id="excludeInput" type="text" placeholder="example.com" />
+    <button class="secondary" type="button" id="addExclude">Exclude</button>
+  </div>
+  <p class="hint">Denylist always blocks mail/login/bank/localhost — not editable.</p>
+
+  <h2>Outcome (optional)</h2>
+  <div class="row2">
     <button class="secondary" type="button" data-tag="idea">idea</button>
     <button class="secondary" type="button" data-tag="followup">followup</button>
     <button class="secondary" type="button" data-tag="reject">reject</button>
     <button class="secondary" type="button" data-tag="neutral">neutral</button>
   </div>
+
+  <label>Endpoint <input id="endpoint" type="text" /></label>
   <button id="openDash" class="secondary" type="button">Open Timeline</button>
   <div id="status"></div>
-  <p style="margin-top:12px">Setup</p>
-  <ol>
-    <li>Dashboard at http://127.0.0.1:8788</li>
-    <li>Open a Yahoo quote / Statistics / News tab</li>
-    <li>Reload extension after updates</li>
-  </ol>
   <script src="popup.js"></script>
 </body>
 </html>

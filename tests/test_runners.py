@@ -80,8 +80,12 @@ def test_build_includes_runner_ps1(ledger: Ledger, tmp_path):
     ps1 = (bdir / "runner.ps1").read_text(encoding="utf-8")
     assert "test_yahoo_scan" in ps1
     assert "-m analyst_ledger.cli" in ps1
+    sh = (bdir / "runner.sh").read_text(encoding="utf-8")
+    assert "-m analyst_ledger.cli" in sh
+    assert "ANALYST_LEDGER_DATA" in sh
     manifest = json.loads((bdir / "manifest.json").read_text(encoding="utf-8"))
     assert "runner.ps1" in manifest["files"]
+    assert "runner.sh" in manifest["files"]
 
 
 def test_resolve_runner_explicit_and_spec(ledger: Ledger, tmp_path):

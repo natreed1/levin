@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional
+import urllib.error
+import urllib.request
+from typing import Any, Dict, List, Optional
 
 from .ledger import Ledger
 from .redact import build_synthesis_prompt
@@ -63,6 +65,11 @@ def run_synthesis(
         elif destination == "bedrock":
             output = _call_bedrock(prompt)
             dest_label = "bedrock"
+        elif destination == "qwen":
+            output = _call_openai_compatible_messages(
+                [{"role": "user", "content": prompt}]
+            )
+            dest_label = "qwen"
         else:
             output = _call_anthropic(prompt)
             dest_label = "anthropic"
@@ -139,7 +146,13 @@ def _stub_completion(context: Dict[str, Any], instruction: str) -> str:
     )
 
 
-def _call_anthropic(prompt: str, max_tokens: int = 2048) -> str:
+def _call_anthropic_messages(
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: int = 2048,
+    system: Optional[str] = None,
+) -> str:
+    """Call Claude with an explicit multi-turn message list."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
@@ -154,12 +167,18 @@ def _call_anthropic(prompt: str, max_tokens: int = 2048) -> str:
             "or use --destination local_stub"
         ) from exc
 
-    model = os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-5").strip()
+    # Prefer an explicit dated model id; override with ANALYST_CLAUDE_MODEL.
+    model = os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-4-20250514").strip()
     client = anthropic.Anthropic(api_key=api_key)
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max(1, int(max_tokens)),
+        "messages": messages,
+    }
+    if system:
+        kwargs["system"] = system
     message = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
+        **kwargs,
     )
     parts = []
     for block in message.content:
@@ -167,6 +186,87 @@ def _call_anthropic(prompt: str, max_tokens: int = 2048) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts).strip()
+
+
+def _call_anthropic(prompt: str, max_tokens: int = 2048) -> str:
+    return _call_anthropic_messages(
+        [{"role": "user", "content": prompt}], max_tokens=max_tokens
+    )
+
+
+def _call_openai_compatible_messages(
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: int = 2048,
+    system: Optional[str] = None,
+    temperature: float = 0.0,
+) -> str:
+    """
+    Call an OpenAI-compatible chat endpoint (Ollama, vLLM, MLX server, etc.).
+
+    Defaults target a local Qwen3 8B deployment:
+      ANALYST_QWEN_BASE_URL  (default http://127.0.0.1:11434/v1)
+      ANALYST_QWEN_MODEL     (default qwen3:8b)
+      ANALYST_QWEN_API_KEY   (optional; many local servers ignore auth)
+    """
+    base_url = (
+        os.environ.get("ANALYST_QWEN_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "http://127.0.0.1:11434/v1"
+    ).rstrip("/")
+    model = (
+        os.environ.get("ANALYST_QWEN_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or "qwen3:8b"
+    ).strip()
+    if model.lower() in {"qwen2.5:7b", "qwen2.5-7b"}:
+        model = "qwen3:8b"
+    api_key = (
+        os.environ.get("ANALYST_QWEN_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or "local"
+    ).strip()
+    chat_messages: List[Dict[str, str]] = []
+    if system:
+        chat_messages.append({"role": "system", "content": system})
+    chat_messages.extend(messages)
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": chat_messages,
+        "max_tokens": max(1, int(max_tokens)),
+        "temperature": float(temperature),
+    }
+    # Qwen3 defaults to a reasoning mode in Ollama's OpenAI-compatible API.
+    # Short chat calls can otherwise spend the whole token budget reasoning and
+    # return an empty ``content`` field.
+    if model.lower().startswith("qwen3"):
+        payload["reasoning_effort"] = "none"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"Qwen endpoint HTTP {exc.code}: {err}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Qwen endpoint unreachable at {base_url}. "
+            "Start Ollama/vLLM (or set ANALYST_QWEN_BASE_URL) and retry."
+        ) from exc
+    choices = body.get("choices") or []
+    if not choices:
+        raise RuntimeError("Qwen endpoint returned no choices.")
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "").strip()
 
 
 def _call_bedrock(prompt: str) -> str:

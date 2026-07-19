@@ -52,6 +52,19 @@ analyst summary
 analyst dashboard   # http://127.0.0.1:8788/
 ```
 
+Optional: Friend chat inside **Chats** (People → Friend), proxied to the cloud
+messenger — see [messenger/README.md](messenger/README.md):
+
+```bash
+export ANALYST_MESSENGER_URL='https://levin.fly.dev'
+export ANALYST_MESSENGER_INVITE='your-fly-invite-token'
+export ANALYST_MESSENGER_NAME='Nat'   # optional display name
+# optional: let local Qwen join Friend when you Add it under Chats → Qwen
+export ANALYST_QWEN_BASE_URL=http://127.0.0.1:11434/v1
+export ANALYST_QWEN_MODEL=qwen3:8b
+analyst dashboard   # Chats → Qwen → Add, then in Friend mention @Qwen
+```
+
 Dry-run a redacted Claude prompt without calling the API:
 
 ```bash
@@ -66,6 +79,18 @@ pip install -e ".[anthropic]"
 analyst synthesize --destination anthropic
 # or
 analyst synthesize --destination bedrock   # needs boto3 + AWS creds
+```
+
+Workflow agents can also use **Qwen3 8B** via any OpenAI-compatible server
+(Ollama, vLLM, MLX). Choose Claude or Qwen on each automation before the first
+run (change later under Edit automation):
+
+```bash
+# Example: Ollama serving qwen3:8b
+export ANALYST_QWEN_BASE_URL=http://127.0.0.1:11434/v1
+export ANALYST_QWEN_MODEL=qwen3:8b
+# optional if your server requires auth:
+# export ANALYST_QWEN_API_KEY=...
 ```
 
 ## Cursor hooks
@@ -144,6 +169,21 @@ analyst dashboard   # http://127.0.0.1:8788/automations
 
 From **Automations**: mine candidates → open a ritual → **Suggest** → **Approve** → **Build** → **Integrate** (Claude Skill or Local) → **Run (stub)**.
 
+With `ANTHROPIC_API_KEY` configured, **Create new automation** asks Claude to
+review recent redacted sessions and writes unapproved declarative drafts. After
+human approval, **Run** starts a bounded research loop and records progress in
+the workflow's persistent **Chats** thread. The pinned master chat can route a
+request across approved workflows and consolidate their redacted handoffs.
+
+### Compare two agents (arena)
+
+From a **workflow** chat (not the master), expand **Compare two agents**, pick two
+models (e.g. Claude vs Qwen), and click **Run simultaneously**. That opens a
+disposable split-view arena at `/chats/arena` — both lanes run at once, then
+**Open grading** scores the pair and appends to `data/arena/comparisons.jsonl`.
+Arena lanes stay out of the normal Chats sidebar and do not write master handoffs,
+so evaluation does not pollute the durable workflow thread.
+
 CLI equivalent:
 
 ```bash
@@ -178,6 +218,18 @@ Available runners (`--runner` or the spec's `runner` field): `morning_yf_scan`,
 set `ANALYST_SEC_CONTACT` to your email — SEC asks automated clients to identify
 themselves), `note_digest` (digests your last week of notes; add
 `--destination anthropic` style flags via the API for a model-written summary).
+
+### Schedule on macOS / Linux
+
+```bash
+analyst rituals integrate morning_yahoo_scan --target local
+# then point cron / OpenClaw / launchd at the pinned launcher:
+#   data/rituals/builds/morning_yahoo_scan/runner.sh
+```
+
+`runner.sh` embeds the absolute Python path and `ANALYST_LEDGER_DATA` from build
+time (same idea as Windows `runner.ps1`), so cron works without an activated venv.
+Details: [docs/openclaw-cron-morning-yf.md](docs/openclaw-cron-morning-yf.md).
 
 ### Schedule on Windows
 
