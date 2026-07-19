@@ -3,12 +3,12 @@
   "hooks": {
     "stop": [
       {
-        "command": "python .cursor/hooks/analyst_hook_stop.py"
+        "command": "bash .cursor/hooks/run_hook.sh .cursor/hooks/analyst_hook_stop.py"
       }
     ],
     "afterShellExecution": [
       {
-        "command": "python .cursor/hooks/analyst_hook_after_shell.py"
+        "command": "bash .cursor/hooks/run_hook.sh .cursor/hooks/analyst_hook_after_shell.py"
       }
     ]
   }

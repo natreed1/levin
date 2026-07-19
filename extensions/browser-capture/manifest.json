@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Analyst Ledger Capture",
-  "version": "0.4.1",
-  "description": "Capture research browsing to Analyst Ledger. Toggle sites, deep research (any https), excludes, and denylist.",
+  "version": "0.4.3",
+  "description": "Capture research browsing to Analyst Ledger. Deep research, Verge/Xinhua/Google News presets, denylist, excludes.",
   "permissions": ["storage", "tabs", "webNavigation"],
   "host_permissions": [
     "http://127.0.0.1:8788/*",

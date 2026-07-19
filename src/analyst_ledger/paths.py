@@ -118,3 +118,16 @@ def sync_state_dir() -> Path:
     path = data_dir() / "sync_state"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def arena_dir() -> Path:
+    """Disposable dual-run arena trials (isolated from workflow chats)."""
+    path = data_dir() / "arena"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def arena_trials_dir() -> Path:
+    path = arena_dir() / "trials"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

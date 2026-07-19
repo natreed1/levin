@@ -15,6 +15,9 @@ const SITE_PRESETS = [
   { id: "ft.com", label: "FT" },
   { id: "reuters.com", label: "Reuters" },
   { id: "cnbc.com", label: "CNBC" },
+  { id: "theverge.com", label: "The Verge" },
+  { id: "news.cn", label: "Xinhua / news.cn" },
+  { id: "news.google.com", label: "Google News" },
 ];
 
 /** Always blocked (privacy / noise) — cannot be overridden */
@@ -22,6 +25,7 @@ const DENY_SUFFIXES = [
   "accounts.google.com",
   "mail.google.com",
   "gmail.com",
+  "consent.google.com",
   "outlook.live.com",
   "outlook.office.com",
   "login.microsoftonline.com",
@@ -33,6 +37,10 @@ const DENY_SUFFIXES = [
   "paypal.com",
   "venmo.com",
   "stripe.com",
+  "consent.yahoo.com",
+  "guce.yahoo.com",
+  "login.yahoo.com",
+  "api.login.yahoo.com",
   "localhost",
   "127.0.0.1",
 ];
@@ -90,14 +98,23 @@ function sitePresetEnabled(hostname, siteEnabled) {
   if (h === "yahoo.com" || h.endsWith(".yahoo.com")) {
     return map["finance.yahoo.com"] !== false;
   }
+  // Xinhua English mirrors
+  if (h === "xinhuanet.com" || h.endsWith(".xinhuanet.com") || h.endsWith(".news.cn")) {
+    return map["news.cn"] !== false;
+  }
   return false;
 }
 
 function isPresetHost(hostname) {
   const h = (hostname || "").toLowerCase();
-  return SITE_PRESETS.some((s) => h === s.id || h.endsWith("." + s.id)) ||
+  return (
+    SITE_PRESETS.some((s) => h === s.id || h.endsWith("." + s.id)) ||
     h === "yahoo.com" ||
-    h.endsWith(".yahoo.com");
+    h.endsWith(".yahoo.com") ||
+    h === "xinhuanet.com" ||
+    h.endsWith(".xinhuanet.com") ||
+    h.endsWith(".news.cn")
+  );
 }
 
 function normalizeKey(u) {

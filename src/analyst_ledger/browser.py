@@ -25,6 +25,14 @@ ALLOWED_HOST_SUFFIXES = (
     "www.reuters.com",
     "cnbc.com",
     "www.cnbc.com",
+    # Deep-research pubs (toggleable in extension; also allowlisted for auto)
+    "theverge.com",
+    "www.theverge.com",
+    "news.cn",
+    "english.news.cn",
+    "xinhuanet.com",
+    "www.xinhuanet.com",
+    "news.google.com",
 )
 
 # Never capture these (privacy / noise), even in deep research.
@@ -43,6 +51,11 @@ DENIED_HOST_SUFFIXES = (
     "paypal.com",
     "venmo.com",
     "stripe.com",
+    "consent.yahoo.com",
+    "guce.yahoo.com",
+    "login.yahoo.com",
+    "api.login.yahoo.com",
+    "consent.google.com",
     "localhost",
     "127.0.0.1",
     "0.0.0.0",
@@ -117,6 +130,14 @@ def parse_url(url: str, *, allow_any: bool = False) -> Dict[str, Any]:
     host = (parsed.hostname or "").lower()
     if not host:
         raise ValueError("missing host")
+
+    # Unwrap Google redirector → destination publication
+    if host in {"www.google.com", "google.com"} and parsed.path.startswith("/url"):
+        qs = parse_qs(parsed.query)
+        dest = (qs.get("q") or qs.get("url") or [None])[0]
+        if dest:
+            return parse_url(dest, allow_any=allow_any)
+
     if host_denied(host):
         raise ValueError(f"host denied: {host}")
     if not allow_any and not host_allowed(host):

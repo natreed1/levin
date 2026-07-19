@@ -23,12 +23,16 @@ const SITE_PRESETS = [
   { id: "ft.com", label: "FT" },
   { id: "reuters.com", label: "Reuters" },
   { id: "cnbc.com", label: "CNBC" },
+  { id: "theverge.com", label: "The Verge" },
+  { id: "news.cn", label: "Xinhua / news.cn" },
+  { id: "news.google.com", label: "Google News" },
 ];
 const DENY_SUFFIXES = [
-  "accounts.google.com", "mail.google.com", "gmail.com",
+  "accounts.google.com", "mail.google.com", "gmail.com", "consent.google.com",
   "outlook.live.com", "outlook.office.com", "login.microsoftonline.com",
   "appleid.apple.com", "icloud.com", "chase.com", "bankofamerica.com",
   "wellsfargo.com", "paypal.com", "venmo.com", "stripe.com",
+  "consent.yahoo.com", "guce.yahoo.com", "login.yahoo.com", "api.login.yahoo.com",
   "localhost", "127.0.0.1",
 ];
 const DENIED_SCHEMES = ["chrome:", "chrome-extension:", "about:", "edge:", "brave:", "devtools:"];
@@ -79,7 +83,10 @@ function isPresetHost(host) {
   return (
     SITE_PRESETS.some((s) => h === s.id || h.endsWith("." + s.id)) ||
     h === "yahoo.com" ||
-    h.endsWith(".yahoo.com")
+    h.endsWith(".yahoo.com") ||
+    h === "xinhuanet.com" ||
+    h.endsWith(".xinhuanet.com") ||
+    h.endsWith(".news.cn")
   );
 }
 
@@ -90,6 +97,9 @@ function presetEnabled(host) {
   }
   if (h === "yahoo.com" || h.endsWith(".yahoo.com")) {
     return siteEnabled["finance.yahoo.com"] !== false;
+  }
+  if (h === "xinhuanet.com" || h.endsWith(".xinhuanet.com") || h.endsWith(".news.cn")) {
+    return siteEnabled["news.cn"] !== false;
   }
   return false;
 }

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Messenger</title>
+  <link rel="stylesheet" href="/static/style.css?v=4" />
+</head>
+<body>
+  <div id="app">
+    <section id="join-panel" class="panel hidden">
+      <h1>Messenger</h1>
+      <p class="sub">Join a shared room, or create a new room and send its link to a friend.</p>
+      <div class="room-tabs">
+        <button type="button" id="show-join" class="active">Join room</button>
+        <button type="button" id="show-create" class="ghost">Create room</button>
+      </div>
+      <form id="join-form">
+        <label>
+          Invite token
+          <input id="invite" name="invite" type="password" autocomplete="off" required />
+        </label>
+        <label>
+          Display name
+          <input id="name" name="name" type="text" maxlength="40" autocomplete="nickname" required />
+        </label>
+        <p id="join-error" class="error" hidden></p>
+        <button type="submit">Join</button>
+      </form>
+      <form id="create-form" class="hidden">
+        <label>
+          Room name
+          <input id="room-title" type="text" maxlength="80" placeholder="Research chat" required />
+        </label>
+        <label>
+          Creator key
+          <input id="creator-invite" type="password" autocomplete="off" required />
+        </label>
+        <label>
+          Your display name
+          <input id="creator-name" type="text" maxlength="40" autocomplete="nickname" required />
+        </label>
+        <p class="sub">The creator key is the server invite. Your friend only receives the generated room link.</p>
+        <p id="create-error" class="error" hidden></p>
+        <button type="submit">Create room</button>
+      </form>
+    </section>
+
+    <section id="chat-panel" class="panel hidden">
+      <header class="chat-header">
+        <div>
+          <h1>Messenger</h1>
+          <p class="sub"><strong id="room-name">Private room</strong> · signed in as <strong id="who"></strong></p>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="clear-chat" class="ghost danger">Delete chat</button>
+          <button type="button" id="logout" class="ghost">Leave</button>
+        </div>
+      </header>
+      <div id="share-box" class="share-box hidden">
+        <label for="share-url">Send this private room link to your friend</label>
+        <div class="share-row">
+          <input id="share-url" type="text" readonly />
+          <button type="button" id="copy-share">Copy link</button>
+        </div>
+      </div>
+      <div id="messages" class="messages" aria-live="polite"></div>
+      <form id="send-form" class="composer">
+        <input id="body" type="text" maxlength="2000" placeholder="Message… @Qwen or @Qwen-Contrarian" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+      <p id="chat-error" class="error" hidden></p>
+    </section>
+  </div>
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>

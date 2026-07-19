@@ -44,6 +44,9 @@ def summarize_session_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             key = normalize_url_key(raw_url) or raw_url
             if key:
                 existing = pages.get(key)
+                path = payload.get("path") or _path_from_key(key)
+                if path != "/" and str(path).endswith("/"):
+                    path = str(path).rstrip("/")
                 if existing:
                     existing["visits"] += 1
                     existing["last_ts"] = ev.get("ts") or existing.get("last_ts")
@@ -53,11 +56,12 @@ def summarize_session_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                         existing["quote"] = payload["quote"]
                     if payload.get("section"):
                         existing["section"] = payload.get("section")
+                    existing["path"] = path
                 else:
                     pages[key] = {
                         "url": key,
                         "host": host or "",
-                        "path": payload.get("path") or _path_from_key(key),
+                        "path": path,
                         "symbol": (str(payload["symbol"]).upper() if payload.get("symbol") else None),
                         "section": payload.get("section"),
                         "title": str(payload.get("title") or "")[:120],

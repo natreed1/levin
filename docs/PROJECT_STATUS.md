@@ -15,69 +15,89 @@ improvements, and run the repetitive parts of the workflow, with a human
 approving everything. **Nothing leaves your machine except explicit, redacted
 model calls, and each one is audit-logged.**
 
+## Two machines, one repo
+
+| | **macOS** (this stack) | **Windows** (other dev) |
+|--|--|--|
+| Activate venv | `source .venv/bin/activate` | `.venv\Scripts\Activate.ps1` |
+| CLI entry | `analyst` from venv | `.venv\Scripts\analyst.exe` |
+| Schedule rituals | `integrate --target local` + cron/OpenClaw/`runner.sh` | `integrate --target windows-task` + `runner.ps1` |
+| Apple Notes sync | yes | n/a |
+| Cursor hooks | `bash .cursor/hooks/run_hook.sh …` (finds `.venv`) | same if Git Bash available; else call `.venv\Scripts\python.exe` on the hook scripts |
+
+Each machine keeps its **own** private `data/` ledger (gitignored). Share code via git; do not sync SQLite between OS installs unless you intend to.
+
 ## Setup on a new machine
+
+**macOS / Linux**
+
+```bash
+git clone <this repo>
+cd levin
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+export ANALYST_LEDGER_DATA="$PWD/data"
+python -m pytest tests/ -q
+analyst dashboard   # http://127.0.0.1:8788/
+```
+
+**Windows (PowerShell)**
 
 ```powershell
 git clone <this repo>
 cd levin
 python -m venv .venv
-.venv\Scripts\Activate.ps1        # macOS/Linux: source .venv/bin/activate
+.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-python -m pytest tests/ -q        # should report 38 passed
-.venv\Scripts\analyst.exe dashboard   # UI at http://127.0.0.1:8788/
+$env:ANALYST_LEDGER_DATA = "$PWD\data"
+python -m pytest tests/ -q
+.venv\Scripts\analyst.exe dashboard
 ```
 
-Each machine has its own private ledger — `data/` is gitignored on purpose, so
-you start empty. To capture browsing, install the Chrome extension:
-`analyst install-extension`, then Chrome → Developer mode → Load unpacked.
+Expect ~40 passing tests.
+To capture browsing: `analyst install-extension`, then Chrome → Developer mode → Load unpacked.
 
 ## What works today
 
 - **Capture**: CLI notes/sessions, Yahoo Finance + TradingView Chrome
-  extensions, inbox folder watcher, Obsidian / Google Docs / Apple Notes
-  (macOS-only) sync, Cursor editor hooks (opt-in).
-- **Automation pipeline**: mine candidates from your sessions → suggest a spec
-  → human approves → build a package (Claude Skill + launchers) → run.
-- **Runners** (the "action agents"): `morning_yf_scan` (Yahoo quotes),
-  `sec_filings_check` (official SEC EDGAR — verified live), `note_digest`
-  (weekly roll-up of your notes), `generic_watchlist_scan`.
-- **Scheduling**: `analyst rituals integrate <id> --target windows-task`
-  registers a Windows Task Scheduler job (cron/OpenClaw on Mac — see
-  `docs/openclaw-cron-morning-yf.md`).
-- **Claude review agent**: with Claude Code, run the `ledger-review` skill —
-  it critiques your automations from real run outcomes and proposes new draft
-  specs. Drafts are never auto-approved; a human approves in the dashboard.
-- **Dashboard**: timeline, session detail, automations (with last-run status),
-  tracking toggle — all local at `127.0.0.1:8788`.
+  extensions (deep research / any-site toggle + denylist on macOS branch),
+  inbox folder watcher, Obsidian / Google Docs / Apple Notes (macOS-only) sync,
+  Cursor editor hooks (opt-in).
+- **Automation pipeline**: mine candidates → suggest a spec → human approves →
+  build a package (Claude Skill + `runner.sh` + `runner.ps1`) → run.
+- **Runners**: `morning_yf_scan`, `sec_filings_check` (SEC EDGAR),
+  `note_digest`, `generic_watchlist_scan`.
+- **Scheduling**: Windows Task Scheduler **or** macOS/Linux cron/OpenClaw via
+  the pinned `runner.sh` (see `docs/openclaw-cron-morning-yf.md`).
+- **Claude review agent**: `.claude/skills/ledger-review` (drafts stay unapproved).
+- **Dashboard**: timeline, session detail, automations (last-run status),
+  tracking — local at `127.0.0.1:8788`.
 
-## Recent changes (2026-07-16)
+## Recent changes (2026-07-17 merge)
 
-- Security: dashboard no longer sends wide-open CORS headers (websites could
-  previously read the ledger through your browser).
-- Windows support throughout: PowerShell launchers (`runner.ps1`), Task
-  Scheduler integration, README/hooks fixes. Launchers pin the Python path and
-  ledger folder at build time because scheduled tasks inherit no environment.
-- Runner registry replaced the hardcoded yahoo-only dispatch; added the SEC and
-  note-digest runners. `--require-approved` with a missing spec now refuses
-  instead of silently passing.
-- Added `CLAUDE.md` (rules + schema for AI assistants) and the
-  `.claude/skills/ledger-review` review-agent skill.
-- Test suite: 38 passing.
+From the Windows fork (`mattymitch499-sketch/Levin`), adapted for dual OS:
+
+- Security: dashboard no longer sends wide-open CORS (`*`); Chrome extensions
+  still work via `host_permissions`.
+- Runner registry + SEC / note-digest runners; `--require-approved` refuses
+  missing specs.
+- Dual launchers: `runner.ps1` (Windows) and Python-pinned `runner.sh` (macOS/Linux).
+- Onboarding: `docs/PROJECT_STATUS.md`, `CLAUDE.md`, ledger-review skill.
+- Kept macOS deep-research capture (`allow_any` / denylist / extension toggles).
 
 ## Known limitations
 
-- Yahoo's unofficial quote API often returns HTTP 401 now; the runner degrades
-  gracefully (errors logged per symbol). SEC EDGAR is the reliable live source.
+- Yahoo's unofficial quote API often returns HTTP 401; runner degrades
+  gracefully. SEC EDGAR is the reliable live source.
 - Apple Notes sync requires macOS.
-- Redaction is regex-based (emails, account numbers, SSNs) — treat it as a
-  seatbelt, not a guarantee; keep truly sensitive notes labeled
-  `confidential`/`restricted` so they never egress.
+- `windows-task` integrate returns `needs_config` on non-Windows (use `local` + cron).
+- Redaction is regex-based — seatbelt, not a guarantee; label sensitive notes
+  `confidential`/`restricted`.
 
 ## Next steps (roadmap)
 
-1. **Capture real sessions** for a few mornings, then mine → approve →
-   schedule (this proves the loop on real data).
-2. Run the `ledger-review` skill weekly; approve/reject its proposals.
-3. Add runners for whatever the review agent finds (earnings calendar, etc.).
-4. Deferred by choice: a local open-source model tier for summarizing
-  confidential notes before anything reaches a cloud model.
+1. Capture real morning sessions → mine → approve → schedule.
+2. Run the `ledger-review` skill weekly; approve/reject proposals.
+3. Add runners the review agent finds (earnings calendar, etc.).
+4. Deferred: local open-source model tier for confidential notes.

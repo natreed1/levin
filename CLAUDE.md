@@ -26,11 +26,15 @@ Read this before touching the ledger or proposing automations.
   - `dashboard.py` — local UI at http://127.0.0.1:8788/
 - `data/` (gitignored) — `ledger.sqlite3`, `events/*.jsonl`, `artifacts/`,
   `rituals/candidates.json`, `rituals/specs/*.json`, `rituals/builds/<id>/`
-- `tests/` — pytest; run with `.venv\Scripts\python.exe -m pytest tests/ -q`
+- `tests/` — pytest; run with `python -m pytest tests/ -q`
+  (Windows: `.venv\Scripts\python.exe -m pytest tests/ -q`)
 
-## CLI cheat sheet (use `.venv\Scripts\analyst.exe` on Windows)
+## CLI cheat sheet
 
 ```
+# macOS/Linux: source .venv/bin/activate
+# Windows:     .venv\Scripts\Activate.ps1  (or call .venv\Scripts\analyst.exe)
+
 analyst summary                      # counts + active session
 analyst session list --limit 20
 analyst events --session-id <sid> --limit 200   # newest-first JSON
@@ -39,7 +43,8 @@ analyst rituals list                 # mined candidates
 analyst rituals mine --days 21 --min-sessions 3
 analyst rituals show <ritual_id>     # spec JSON
 analyst rituals run <ritual_id> --stub          # offline smoke run
-analyst rituals integrate <ritual_id> --target windows-task
+analyst rituals integrate <ritual_id> --target local          # macOS/Linux
+analyst rituals integrate <ritual_id> --target windows-task   # Windows only
 ```
 
 ## Reading the ledger for review work

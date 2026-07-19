@@ -28,6 +28,7 @@ class Surface(str, Enum):
     SYSTEM = "system"
     SYNTHESIS = "synthesis"
     RITUAL = "ritual"
+    CHAT = "chat"
 
 
 SENSITIVITY_LEVELS = {s.value: s for s in Sensitivity}
@@ -67,6 +68,14 @@ EVENT_TYPES = frozenset(
         "ritual_run",
         "ritual_build",
         "ritual_integrate",
+        "chat_message",
+        "workflow_run_started",
+        "workflow_step",
+        "workflow_handoff",
+        "workflow_run_completed",
+        "workflow_run_failed",
+        "arena_trial_started",
+        "arena_grade",
         "external_note",
     }
 )

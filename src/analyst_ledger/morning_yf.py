@@ -156,6 +156,23 @@ def fetch_yahoo_quote(symbol: str) -> Dict[str, Any]:
         with urllib.request.urlopen(req, timeout=12) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            from .web_search import fetch_yahoo_chart_snapshot
+
+            chart = fetch_yahoo_chart_snapshot(symbol)
+            return {
+                "symbol": symbol,
+                "name": chart.get("name") or symbol,
+                "price": chart.get("price"),
+                "pct_change": None,
+                "volume": chart.get("volume"),
+                "market_cap": None,
+                "prev_close": chart.get("previous_close"),
+                "trailing_pe": None,
+                "next_earnings": None,
+                "headlines": fetch_yahoo_headlines(symbol, limit=3),
+                "source": "yahoo_chart_fallback",
+            }
         raise RuntimeError(f"Yahoo HTTP {exc.code}") from exc
 
     results = (
