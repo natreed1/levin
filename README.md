@@ -5,6 +5,8 @@ Local-first workflow capture for hedge-fund research sessions.
 
 > **New to the project?** Start with [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) —
 > current state, recent changes, setup on a new machine, and the roadmap.
+> For the deterministic chat layer (router, file finder, chat mining) see
+> [docs/CHAT_AUTOMATION.md](docs/CHAT_AUTOMATION.md).
 
 ## Capture timeline
 
@@ -242,6 +244,21 @@ schtasks /Delete /TN "AnalystLedger_morning_yahoo_scan" /F
 
 This registers the build's `runner.ps1` with Task Scheduler, translating the
 spec's cron schedule (e.g. `0 7 * * 1-5` → weekdays 07:00).
+
+## Local file finder
+
+Ask the dashboard chat "where are the quarterly reports for TSLA?" and
+deterministic code searches your configured folders (no model call), posting
+ranked matches with paths relative to the root. Add "summarize" to have the
+top md/txt/docx match summarized by the **local** Qwen model (never Claude).
+Inert until you set the roots:
+
+```powershell
+$env:ANALYST_FILE_SEARCH_ROOTS = "C:\Users\you\Documents\Research;D:\Reports"
+```
+
+(`;`-separated on Windows, `:` on macOS/Linux.) Workflows can also use the
+governed `find_files` action in their steps.
 
 ## Claude review agent
 

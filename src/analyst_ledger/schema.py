@@ -78,6 +78,7 @@ EVENT_TYPES = frozenset(
         "arena_grade",
         "external_note",
         "review_run",
+        "file_search",
     }
 )
 

@@ -17,7 +17,14 @@ ALLOWED_RUNNERS = frozenset(
     {"morning_yf_scan", "generic_watchlist_scan", "sec_filings_check", "note_digest"}
 )
 ALLOWED_ACTIONS = frozenset(
-    {"fetch_quote", "fetch_calendar", "fetch_headlines", "sec_filings", "recent_notes"}
+    {
+        "fetch_quote",
+        "fetch_calendar",
+        "fetch_headlines",
+        "sec_filings",
+        "recent_notes",
+        "find_files",
+    }
 )
 
 

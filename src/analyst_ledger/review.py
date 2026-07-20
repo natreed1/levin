@@ -110,8 +110,24 @@ def gather_review_context(
         if label:
             feedback_counts[label] = feedback_counts.get(label, 0) + 1
 
+    try:
+        from . import chat_mining
+
+        chat = chat_mining.chat_context(ledger, days=days)
+    except Exception:  # noqa: BLE001 — chat mining must never break review
+        chat = {
+            "ask_count": 0,
+            "gap_count": 0,
+            "routed_count": 0,
+            "unanswered_count": 0,
+            "friend_included": False,
+            "clusters": [],
+        }
+
+    # "chat" sits second so prompt truncation trims session detail, not chat
     return {
         "window_days": days,
+        "chat": chat,
         "sessions": sessions_out,
         "ritual_session_count": ritual_session_count,
         "automations": [
@@ -142,7 +158,9 @@ def build_review_prompt(context: Dict[str, Any]) -> str:
         "   last_run outcomes and whether its pattern still appears in sessions.\n"
         "2. Find repeated manual patterns worth automating that the heuristic miner\n"
         "   missed (cross-surface intent, follow-ups never done, repeated checks).\n"
-        f"3. Propose new automations using ONLY these runners: {', '.join(context['available_runners'])}.\n\n"
+        f"3. Propose new automations using ONLY these runners: {', '.join(context['available_runners'])}.\n"
+        "The 'chat' block lists clusters of repeated chat asks; modeled_count > 0\n"
+        "means no deterministic route matched them — prime automation candidates.\n\n"
         "Respond with STRICT JSON only (no prose outside it):\n"
         "{\n"
         '  "memo_markdown": "the review memo a human will read",\n'
@@ -221,6 +239,29 @@ def _stub_review(context: Dict[str, Any]) -> Dict[str, Any]:
     lines += [f"- **{v['ritual_id']}**: {v['verdict']} — {v['reason']}" for v in verdicts] or ["- (none yet)"]
     lines += ["", "## Proposals"]
     lines += [f"- **{p['ritual_id']}** ({p['runner']}): {p['rationale']}" for p in proposals] or ["- (none)"]
+
+    # Annotate chat clusters (read-only; run_review is the single writer)
+    from .chat_mining import proposals_from_clusters
+
+    chat = context.get("chat") or {}
+    clusters = chat.get("clusters") or []
+    chat_props = proposals_from_clusters(clusters, context.get("automations") or [])
+    rid_by_label = {p.get("source_label"): p["ritual_id"] for p in chat_props}
+    lines += ["", "## Chat asks"]
+    if clusters:
+        for c in clusters:
+            suffix = (
+                f" -> proposing `{rid_by_label[c.get('label')]}`"
+                if c.get("label") in rid_by_label
+                else ""
+            )
+            lines.append(
+                f"- **{c.get('label')}** — {c.get('count')}x over "
+                f"{c.get('day_count')} day(s), {c.get('modeled_count')} modeled, "
+                f"{c.get('routed_count')} routed{suffix}"
+            )
+    else:
+        lines.append("- (none in window)")
     return {"memo_markdown": "\n".join(lines), "verdicts": verdicts, "proposals": proposals}
 
 
@@ -238,7 +279,9 @@ def _parse_model_json(raw: str) -> Dict[str, Any]:
     return {"memo_markdown": text, "verdicts": [], "proposals": []}
 
 
-def _write_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _write_proposals(
+    proposals: List[Dict[str, Any]], *, default_proposed_by: str = "claude_review"
+) -> List[Dict[str, Any]]:
     """Persist drafts (approved=false). Never touch approved or human-made specs."""
     written: List[Dict[str, Any]] = []
     for p in proposals:
@@ -249,13 +292,17 @@ def _write_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         runner = str(p.get("runner") or "")
         if runner not in RUNNERS:
             continue
+        tag = "chat_mining" if p.get("source") == "chat_mining" else default_proposed_by
         path = ritual_specs_dir() / f"{rid}.json"
         if path.exists():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 existing = {}
-            if existing.get("approved") or existing.get("proposed_by") != "claude_review":
+            if existing.get("approved") or existing.get("proposed_by") not in {
+                "claude_review",
+                "chat_mining",
+            }:
                 continue
         watchlist = [
             str(s).strip().upper() for s in (p.get("watchlist") or []) if str(s).strip()
@@ -269,12 +316,19 @@ def _write_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "watchlist": watchlist,
             "steps": _DEFAULT_STEPS.get(runner, [{"draft_note": "template"}]),
             "outputs": {"ledger_session": True},
-            "proposed_by": "claude_review",
+            "proposed_by": tag,
             "rationale": redact_text(str(p.get("rationale") or ""))[:500],
             "created_at": utc_now_iso(),
         }
         path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
-        written.append({"ritual_id": rid, "runner": runner, "spec_path": str(path)})
+        written.append(
+            {
+                "ritual_id": rid,
+                "runner": runner,
+                "spec_path": str(path),
+                "proposed_by": tag,
+            }
+        )
     return written
 
 
@@ -321,7 +375,20 @@ def run_review(
         detail={"kind": "review", "days": days},
     )
 
-    written = _write_proposals(review.get("proposals") or [])
+    try:
+        from .chat_mining import proposals_from_clusters
+
+        chat_props = proposals_from_clusters(
+            (context.get("chat") or {}).get("clusters") or [],
+            context.get("automations") or [],
+        )
+    except Exception:  # noqa: BLE001 — chat mining must never break review
+        chat_props = []
+    model_props = review.get("proposals") or []
+    model_rids = {str(p.get("ritual_id") or "") for p in model_props}
+    written = _write_proposals(
+        model_props + [p for p in chat_props if p["ritual_id"] not in model_rids]
+    )
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     memo_path = reviews_dir() / f"{stamp}_review.md"
@@ -347,9 +414,12 @@ def run_review(
                 "memo_path": str(memo_path),
                 "proposal_count": len(written),
                 "verdict_count": len(review.get("verdicts") or []),
+                "chat_ask_count": (context.get("chat") or {}).get("ask_count", 0),
+                "chat_gap_count": (context.get("chat") or {}).get("gap_count", 0),
             },
         )
     )
+    chat_block = context.get("chat") or {}
     return {
         "status": "ok",
         "destination": destination,
@@ -357,6 +427,14 @@ def run_review(
         "memo": str(review.get("memo_markdown") or ""),
         "verdicts": review.get("verdicts") or [],
         "proposals_written": written,
+        "chat": {
+            "ask_count": chat_block.get("ask_count", 0),
+            "gap_count": chat_block.get("gap_count", 0),
+            "cluster_count": len(chat_block.get("clusters") or []),
+            "chat_proposals": [
+                w["ritual_id"] for w in written if w.get("proposed_by") == "chat_mining"
+            ],
+        },
     }
 
 

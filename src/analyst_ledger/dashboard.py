@@ -1310,15 +1310,20 @@ def _review_page(ledger: Ledger, qs: str = "") -> str:
     proposal_rows = []
     for s in list_specs():
         spec = s.get("spec") or {}
-        if spec.get("proposed_by") != "claude_review" or s.get("approved"):
+        if spec.get("proposed_by") not in {"claude_review", "chat_mining"} or s.get(
+            "approved"
+        ):
             continue
         rid = s["ritual_id"]
+        why = ("[chat] " if spec.get("proposed_by") == "chat_mining" else "") + str(
+            spec.get("rationale") or ""
+        )
         proposal_rows.append(
             f"<tr>"
             f"<td><a href='/automations/{_h(rid)}'><code>{_h(rid)}</code></a></td>"
             f"<td>{_h(spec.get('runner') or '—')}</td>"
             f"<td><code>{_h(', '.join((spec.get('watchlist') or [])[:6]) or '—')}</code></td>"
-            f"<td class='muted'>{_h(spec.get('rationale') or '')}</td>"
+            f"<td class='muted'>{_h(why)}</td>"
             f"<td><button type='button' class='approve-btn primary' data-rid='{_h(rid)}'>Approve</button></td>"
             f"</tr>"
         )
@@ -2761,6 +2766,7 @@ def _api_automations_action(
 
 def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
     from .messenger_bridge import FRIEND_THREAD_ID, send_friend_message
+    from .router import execute_routed_run, route_message, router_enabled
     from .workflow_engine import MasterCoordinator, WorkflowEngine
 
     thread_id = str(data.get("thread_id") or "")
@@ -2773,6 +2779,41 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
     if not session or session.surface != "chat":
         raise RuntimeError(f"Chat thread '{thread_id}' not found.")
     ledger.append_chat_message(thread_id, role="user", content=content)
+    if router_enabled():
+        # File finder first: its gate (location verb + file noun) is stricter
+        # than ritual routing, so it only wins clearly file-flavored asks.
+        try:
+            from .file_search import execute_file_search, match_file_request
+            from .paths import file_search_roots
+
+            fquery = match_file_request(content)
+            roots = file_search_roots()
+        except Exception:  # noqa: BLE001 — file finder must never break chat
+            fquery, roots = None, []
+        if fquery is not None and roots:
+            fs_stub = bool(data.get("stub", False))
+            fq = fquery
+            return jobs.start(
+                "file_search",
+                "file_search",
+                lambda job: execute_file_search(ledger, thread_id, fq, stub=fs_stub),
+            ).public()
+        decision = None
+        try:
+            restrict = None
+            if session.desk_tag != "chat:master":
+                restrict = str(session.desk_tag or "").removeprefix("chat:")
+            decision = route_message(content, restrict_to=restrict)
+        except Exception:  # noqa: BLE001 — router must never break chat
+            decision = None
+        if decision is not None and decision.matched:
+            routed = decision
+            stub = bool(data.get("stub", False))
+            return jobs.start(
+                f"workflow:{routed.ritual_id}",
+                "workflow_run",
+                lambda job: execute_routed_run(ledger, thread_id, routed, stub=stub),
+            ).public()
     if session.desk_tag == "chat:master":
         return jobs.start(
             "chat:master",

@@ -360,6 +360,22 @@ class WorkflowEngine:
                 }
                 for symbol in symbols
             ]
+        if action == "find_files":
+            from .file_search import build_query, search_files, stub_matches
+
+            params: Dict[str, Any] = {}
+            for step in spec.get("steps") or []:
+                if isinstance(step, dict) and "find_files" in step:
+                    raw = step.get("find_files")
+                    if isinstance(raw, dict):
+                        params = raw
+                    break
+            limit = max(1, min(20, int(params.get("limit") or 5)))
+            fquery = build_query(str(params.get("query") or ""), extra_symbols=symbols)
+            found = stub_matches(fquery) if stub else search_files(fquery, limit=limit)
+            # public() carries relative paths only — absolute paths never
+            # enter observations, which are fed back to the model.
+            return [m.public() for m in found]
         if action == "recent_notes":
             picked: List[Dict[str, str]] = []
             for ev in self.ledger.list_events(limit=500, types=["note"]):

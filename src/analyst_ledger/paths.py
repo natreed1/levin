@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 def repo_root() -> Path:
@@ -112,6 +112,30 @@ def gdocs_export_dir() -> Path:
         path = Path.home() / "AnalystGDocs"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def file_search_roots() -> "List[Path]":
+    """Folders the local file finder may search (ANALYST_FILE_SEARCH_ROOTS).
+
+    Separated by os.pathsep (';' on Windows). Feature is inert when unset:
+    returns [] and nothing is ever created or scanned.
+    """
+    raw = os.environ.get("ANALYST_FILE_SEARCH_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots: List[Path] = []
+    for chunk in raw.split(os.pathsep):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        path = Path(chunk).expanduser()
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if path.is_dir() and path not in roots:
+            roots.append(path)
+    return roots
 
 
 def sync_state_dir() -> Path:
