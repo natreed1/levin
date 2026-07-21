@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from messenger.auth import normalize_name, normalize_title
+from messenger.auth import normalize_name, normalize_title, utc_expiry_iso
+from messenger.db import MessageStore
 from messenger.emailer import send_verification_email
 
 
@@ -193,3 +194,73 @@ def test_fly_signup_fails_closed_without_email_provider(tmp_path: Path, monkeypa
 
     assert result.status_code == 503
     assert result.json()["error"] == "email_delivery_unavailable"
+
+
+def test_account_settings_update_profile_and_password(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "account", monkeypatch)
+    created = _signup_and_login(
+        client, email="account@example.com", password="password12", name="Before"
+    )
+    store = MessageStore(db_path=tmp_path / "account" / "messages.sqlite3")
+    store.create_session(
+        sid="other-browser",
+        user_id=created["user_id"],
+        expires_at=utc_expiry_iso(hours=1),
+    )
+
+    bad_name = client.patch(
+        "/api/auth/profile", json={"display_name": "<script>bad</script>"}
+    )
+    assert bad_name.status_code == 400
+
+    profile = client.patch(
+        "/api/auth/profile", json={"display_name": "After"}
+    )
+    assert profile.status_code == 200, profile.text
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["display_name"] == "After"
+    assert me.json()["name"] == "After"
+    assert me.json()["session_count"] == 1
+    assert me.json()["created_at"]
+
+    wrong = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "wrong-password", "new_password": "newpassword99"},
+    )
+    assert wrong.status_code == 401
+    changed = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "password12", "new_password": "newpassword99"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert client.get("/api/auth/me").status_code == 200
+
+    assert client.post("/api/auth/logout").status_code == 200
+    old = client.post(
+        "/api/auth/login",
+        json={"email": "account@example.com", "password": "password12"},
+    )
+    assert old.status_code == 401
+    new = client.post(
+        "/api/auth/login",
+        json={"email": "account@example.com", "password": "newpassword99"},
+    )
+    assert new.status_code == 200
+
+
+def test_logout_other_sessions_keeps_current_session(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "sessions", monkeypatch)
+    created = _signup_and_login(client, email="sessions@example.com", name="Sessions")
+    store = MessageStore(db_path=tmp_path / "sessions" / "messages.sqlite3")
+    store.create_session(
+        sid="other-browser",
+        user_id=created["user_id"],
+        expires_at=utc_expiry_iso(hours=1),
+    )
+
+    result = client.post("/api/auth/logout-other-sessions")
+
+    assert result.status_code == 200
+    assert result.json()["revoked"] == 1
+    assert client.get("/api/auth/me").status_code == 200

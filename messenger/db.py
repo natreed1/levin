@@ -290,6 +290,18 @@ class MessageStore:
             finally:
                 conn.close()
 
+    def update_display_name(self, user_id: str, display_name: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE users SET display_name = ? WHERE user_id = ?",
+                    (display_name, user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
     # --- sessions --------------------------------------------------------------
 
     def create_session(
@@ -359,6 +371,32 @@ class MessageStore:
                 return int(cur.rowcount or 0)
             finally:
                 conn.close()
+
+    def delete_other_sessions_for_user(self, user_id: str, keep_sid: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ? AND sid != ?",
+                    (user_id, keep_sid),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
+            finally:
+                conn.close()
+
+    def count_sessions_for_user(self, user_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM sessions "
+                    "WHERE user_id = ? AND expires_at >= ?",
+                    (user_id, _utc_now()),
+                ).fetchone()
+            finally:
+                conn.close()
+        return int(row["count"] if row else 0)
 
     def create_auth_token(
         self,

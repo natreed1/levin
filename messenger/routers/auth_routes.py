@@ -24,6 +24,7 @@ from messenger.auth import (
 from messenger.db import MessageStore
 from messenger.deps import (
     clear_session_cookie,
+    current_user,
     current_user_optional,
     get_store,
     identity_optional,
@@ -292,6 +293,8 @@ def me(
                 "room_id": room_id,
                 "room_title": (room or {}).get("title") or "Private room",
                 "email_verified": bool(full.get("email_verified")),
+                "created_at": full.get("created_at"),
+                "session_count": store.count_sessions_for_user(user["user_id"]),
             }
         )
     if identity:
@@ -308,6 +311,124 @@ def me(
             }
         )
     return JSONResponse({"ok": False, "authenticated": False}, status_code=401)
+
+
+@router.patch("/profile")
+async def update_profile(
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    display_name = normalize_name(str(body.get("display_name") or ""))
+    if not display_name:
+        return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
+
+    store.update_display_name(user["user_id"], display_name)
+    store.delete_sessions_for_user(user["user_id"])
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "display_name": display_name,
+            "message": "Profile updated. Other sessions were signed out.",
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=display_name,
+        room_id=user.get("room_id") or "legacy",
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+    )
+    return resp
+
+
+@router.post("/change-password")
+async def change_password(
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    current_password = str(body.get("current_password") or "")
+    new_password = str(body.get("new_password") or "")
+    password_limiter = getattr(request.app.state, "login_limiter", None)
+    if password_limiter is not None and not password_limiter.allow(
+        f"change-password:{user['user_id']}"
+    ):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited"},
+            status_code=429,
+        )
+    full = store.user_by_id(user["user_id"]) or {}
+    password_hash = str(full.get("password_hash") or "")
+    if not verify_password(current_password, password_hash):
+        return JSONResponse(
+            {"ok": False, "error": "bad_current_password"},
+            status_code=401,
+        )
+    if verify_password(new_password, password_hash):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "password_unchanged",
+                "message": "Choose a password you are not already using.",
+            },
+            status_code=400,
+        )
+    try:
+        new_hash = hash_password(new_password)
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "error": "bad_password", "message": str(exc)},
+            status_code=400,
+        )
+
+    store.update_password(user["user_id"], new_hash)
+    store.delete_sessions_for_user(user["user_id"])
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "message": "Password changed. Other sessions were signed out.",
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=user["display_name"],
+        room_id=user.get("room_id") or "legacy",
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+    )
+    return resp
+
+
+@router.post("/logout-other-sessions")
+def logout_other_sessions(
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    revoked = store.delete_other_sessions_for_user(
+        user["user_id"], str(user.get("sid") or "")
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "revoked": revoked,
+            "message": (
+                f"Signed out {revoked} other session{'s' if revoked != 1 else ''}."
+            ),
+        }
+    )
 
 
 @router.post("/resend-verification")

@@ -16,6 +16,16 @@
   --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
 }
 
+html[data-theme="light"] {
+  --bg: #f6f8fb;
+  --bg-elev: #ffffff;
+  --bg-soft: #edf2f7;
+  --border: #cbd5e1;
+  --text: #152033;
+  --muted: #64748b;
+  --accent-soft: rgba(37, 99, 235, 0.12);
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -87,7 +97,7 @@ label {
   color: var(--muted);
   margin-bottom: 0.85rem;
 }
-input {
+input, select {
   font: inherit;
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
@@ -95,7 +105,7 @@ input {
   background: var(--bg);
   color: var(--text);
 }
-input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
 /* Auth */
 .auth-screen {
@@ -582,6 +592,92 @@ dialog::backdrop { background: rgba(0,0,0,0.55); }
   color: var(--muted);
 }
 
+/* Settings */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 720px);
+  gap: 1.5rem;
+  padding: 0 1.25rem 2rem;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-self: start;
+  position: sticky;
+  top: 1rem;
+}
+.settings-nav-btn {
+  text-align: left;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+}
+.settings-nav-btn:hover { color: var(--text); background: var(--bg-soft); }
+.settings-nav-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(61, 156, 240, 0.25);
+}
+.settings-nav-btn.danger { color: var(--danger); }
+.settings-content { min-width: 0; }
+.settings-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 1.25rem;
+}
+.settings-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.settings-panel-head h2 { margin: 0; font-size: 1.2rem; }
+.settings-panel-head p { margin: 0.25rem 0 0; color: var(--muted); }
+.settings-account-form { max-width: 30rem; margin-top: 1rem; }
+.settings-account-form input, .settings-account-form select { width: 100%; }
+.settings-inline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.1rem 0 1rem;
+  font-size: 0.82rem;
+}
+.status-pill {
+  display: inline-flex;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  color: var(--auto);
+  background: rgba(52, 211, 153, 0.12);
+  border: 1px solid rgba(52, 211, 153, 0.28);
+}
+.status-pill.unverified { color: var(--track); border-color: rgba(251,191,36,0.3); }
+.settings-subcard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+.settings-subcard.stacked { display: block; }
+.settings-subcard.stacked button { margin-top: 0.5rem; }
+.settings-subcard p { margin: 0.3rem 0 0; }
+.danger-zone { border-color: rgba(248,113,113,0.35); }
+.settings-panel .settings-block {
+  margin: 0;
+  padding: 1rem 0 0;
+}
+.settings-panel .settings-block + .settings-block { margin-top: 1rem; }
+.settings-block-head h3 { margin: 0; font-size: 0.95rem; }
+
 /* Settings → Models */
 .settings-block {
   margin: 0 1.25rem 1.5rem;
@@ -690,4 +786,12 @@ button.tiny, .ghost.tiny {
   .thread-rail { border-right: none; border-bottom: 1px solid var(--border); flex-direction: row; }
   .rooms-section { flex: 1; border: none; border-right: 1px solid var(--border); }
   .agent-dock { width: min(42%, 230px); overflow: auto; }
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  .settings-nav-btn { white-space: nowrap; }
 }
