@@ -120,6 +120,33 @@ async def post_message(
                     )
                     return JSONResponse({"ok": True, "job": job.public()})
 
+                # Layer 0.5 — actionable-ask TAGGING (framework only; the agent
+                # does NOT act yet). Record an explicit research ask's labels
+                # (intent:research / entity:<slug> / state:open) as a `label`
+                # event for later model training, then fall through to normal
+                # handling. Kill-switch: ANALYST_CHAT_ACTIONABLE=off.
+                try:
+                    from analyst_ledger.actionable import (
+                        actionable_enabled,
+                        detect_actionable,
+                    )
+
+                    adecision = (
+                        detect_actionable(content) if actionable_enabled() else None
+                    )
+                except Exception:  # noqa: BLE001 — tagging must never break chat
+                    adecision = None
+                if adecision is not None and adecision.matched:
+                    try:
+                        ledger.record_ask_labels(
+                            thread_id,
+                            adecision.labels,
+                            source="chat_actionable",
+                            meta={"actionable": adecision.public()},
+                        )
+                    except Exception:  # noqa: BLE001 — never block chat on tagging
+                        pass
+
             if session.desk_tag == "chat:master":
                 job = jobs.start(
                     f"user:{uid}:chat:master",

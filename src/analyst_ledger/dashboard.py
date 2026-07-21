@@ -2865,6 +2865,27 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
                 "workflow_run",
                 lambda job: execute_routed_run(ledger, thread_id, routed, stub=stub),
             ).public()
+        # Layer 0.5 — actionable-ask TAGGING (framework only; the agent does NOT
+        # act yet). If the message is an explicit research ask, record its labels
+        # (intent:research / entity:<slug> / state:open) as a `label` event so the
+        # captured data can train the model later — then fall through to the
+        # normal model handling. Kill-switch: ANALYST_CHAT_ACTIONABLE=off.
+        try:
+            from .actionable import actionable_enabled, detect_actionable
+
+            adecision = detect_actionable(content) if actionable_enabled() else None
+        except Exception:  # noqa: BLE001 — tagging must never break chat
+            adecision = None
+        if adecision is not None and adecision.matched:
+            try:
+                ledger.record_ask_labels(
+                    thread_id,
+                    adecision.labels,
+                    source="chat_actionable",
+                    meta={"actionable": adecision.public()},
+                )
+            except Exception:  # noqa: BLE001 — never block chat on tagging
+                pass
     if session.desk_tag == "chat:master":
         return jobs.start(
             "chat:master",

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .paths import artifacts_dir, events_dir, sqlite_path, state_path
+from .labels import normalize_labels
 from .schema import (
     SESSION_TAGS,
     ArtifactRef,
@@ -58,7 +59,8 @@ class Ledger:
                     started_at TEXT NOT NULL,
                     ended_at TEXT,
                     tags_json TEXT NOT NULL DEFAULT '[]',
-                    status TEXT NOT NULL DEFAULT 'open'
+                    status TEXT NOT NULL DEFAULT 'open',
+                    labels_json TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -111,6 +113,16 @@ class Ledger:
                 );
                 """
             )
+            # Additive migration: the topical `labels` axis (added 2026-07-20).
+            # Older ledgers created before this column get it via ALTER; new
+            # ledgers already have every base table from the script above.
+            cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "labels_json" not in cols:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def _append_jsonl(self, event: Event) -> Path:
         day = _day_key(event.ts)
@@ -195,6 +207,9 @@ class Ledger:
             ended_at=row["ended_at"],
             tags=json.loads(row["tags_json"] or "[]"),
             status=row["status"],
+            labels=json.loads(
+                (row["labels_json"] if "labels_json" in row.keys() else "[]") or "[]"
+            ),
         )
 
     def start_session(
@@ -531,6 +546,73 @@ class Ledger:
             )
         )
 
+    def add_labels(
+        self, labels: Iterable[str], session_id: Optional[str] = None
+    ) -> Event:
+        """Attach topical labels (``topic:``/``entity:``/``project:``/...) to a session.
+
+        Mirrors :meth:`add_tag`: the values are validated through the
+        controlled/open ``labels`` vocabulary, merged into the session's
+        ``labels_json`` column, and recorded as a ``label`` event. Unknown
+        values on a controlled axis raise ``LabelError``.
+        """
+        norm = normalize_labels(labels)
+        if not norm:
+            raise ValueError("no labels provided")
+        sid = session_id or self.get_active_session_id()
+        if not sid:
+            raise RuntimeError("No active session.")
+        session = self.get_session(sid)
+        if not session:
+            raise RuntimeError(f"Session '{sid}' not found.")
+        merged = sorted(set(session.labels) | set(norm))
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET labels_json = ? WHERE session_id = ?",
+                (json.dumps(merged), sid),
+            )
+        return self.append_event(
+            Event(
+                type="label",
+                surface=session.surface,
+                session_id=sid,
+                sensitivity=session.sensitivity,
+                payload={"labels": merged, "added": norm},
+            )
+        )
+
+    def record_ask_labels(
+        self,
+        session_id: str,
+        labels: Iterable[str],
+        *,
+        source: str = "chat",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Event:
+        """Record message-level labels (e.g. a detected actionable ask) as a
+        ``label`` event WITHOUT taking any action and WITHOUT touching the
+        session's topical labels.
+
+        This is the framework-capture path: it makes an ask legible (and mineable
+        for later model training) while the agent stays passive — nothing is run.
+        """
+        norm = normalize_labels(labels)
+        session = self.get_session(session_id)
+        sensitivity = session.sensitivity if session else Sensitivity.INTERNAL.value
+        surface = session.surface if session else Surface.CHAT.value
+        payload: Dict[str, Any] = {"labels": norm, "source": source}
+        if meta:
+            payload.update(meta)
+        return self.append_event(
+            Event(
+                type="label",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload=payload,
+            )
+        )
+
     def attach_artifact(
         self,
         file_path: Path,
@@ -717,6 +799,10 @@ class Ledger:
                     "ended_at": row["ended_at"],
                     "tags": json.loads(row["tags_json"] or "[]"),
                     "status": row["status"],
+                    "labels": json.loads(
+                        (row["labels_json"] if "labels_json" in row.keys() else "[]")
+                        or "[]"
+                    ),
                 }
             )
         return out
