@@ -177,3 +177,67 @@ def sync_messenger(
         "threads": threads,
         "errors": errors,
     }
+
+
+def capture_room_message(
+    ledger: Ledger,
+    room_id: str,
+    author: str,
+    text: str,
+    *,
+    room_title: str = "",
+    messenger_id: Any = None,
+    tag: bool = True,
+) -> Dict[str, Any]:
+    """Server-side hook: capture ONE live People-room message into the poster's
+    ledger and classify it (deterministic, so it never blocks the send).
+
+    This is the real-time counterpart to :func:`sync_messenger` — the messenger
+    calls it from its message-post path so room chat lands in that user's
+    Tracking ledger, tagged, exactly like everything else. Idempotent per
+    ``messenger_id``; never raises (capture must not break chat).
+    """
+    thread = _messenger_thread(ledger, room_id, room_title or room_id)
+    if messenger_id is not None and str(messenger_id) in _seen_messenger_ids(
+        ledger, thread.session_id
+    ):
+        return {"captured": False, "reason": "duplicate", "session_id": thread.session_id}
+
+    role = _role_for(str(author or ""))
+    event = ledger.append_chat_message(
+        thread.session_id,
+        role=role,
+        content=str(text or ""),
+        kind="message",
+        metadata={"messenger_id": messenger_id, "author": author, "room_id": room_id},
+    )
+    tagged = False
+    if tag and role == "user" and str(text or "").strip():
+        try:
+            from .classify import classify_message
+
+            result = classify_message(str(text), allow_qwen=False)
+            if result["labels"]:
+                ledger.record_ask_labels(
+                    thread.session_id,
+                    result["labels"],
+                    source="people_room",
+                    meta={
+                        "classification": {
+                            "kind": result["kind"],
+                            "entity": result["entity"],
+                            "source": result["source"],
+                        },
+                        "target_event_id": event.event_id,
+                        "author": author,
+                    },
+                )
+                tagged = True
+        except Exception:  # noqa: BLE001 — capture must never break chat
+            pass
+    return {
+        "captured": True,
+        "tagged": tagged,
+        "session_id": thread.session_id,
+        "event_id": event.event_id,
+    }

@@ -249,6 +249,34 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_classify_pending(args: argparse.Namespace) -> int:
+    from .classify import classify_pending
+    from .ledger import Ledger
+
+    result = classify_pending(Ledger(), limit=args.limit)
+    print(f"classified {result['classified']} message(s)")
+    return 0
+
+
+def cmd_classify_export(args: argparse.Namespace) -> int:
+    from .classify_export import export_kind_pairs
+    from .ledger import Ledger
+
+    out = export_kind_pairs(Ledger(), out_path=Path(args.out) if args.out else None)
+    print(f"exported -> {out}")
+    return 0
+
+
+def cmd_label_correct(args: argparse.Namespace) -> int:
+    from .ledger import Ledger
+
+    Ledger().correct_message_kind(
+        args.session_id, args.event, args.kind, entity=args.entity
+    )
+    print(f"set kind={args.kind} for {args.event}")
+    return 0
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from .review import run_review
 
@@ -588,6 +616,30 @@ def build_parser() -> argparse.ArgumentParser:
     sall.add_argument("--dir", default=None)
     sall.add_argument("--all-notes", action="store_true")
     sall.set_defaults(func=cmd_sync)
+
+    cp = sub.add_parser(
+        "classify-pending",
+        help="Qwen-classify captured chat messages that lack a kind label",
+    )
+    cp.add_argument("--limit", type=int, default=20)
+    cp.set_defaults(func=cmd_classify_pending)
+
+    ce = sub.add_parser(
+        "classify-export",
+        help="Export human-confirmed (message -> kind) pairs as JSONL for training",
+    )
+    ce.add_argument("--out", default=None, help="Output JSONL path")
+    ce.set_defaults(func=cmd_classify_export)
+
+    lc = sub.add_parser(
+        "label-correct",
+        help="Correct/confirm a captured message's kind (feeds the training loop)",
+    )
+    lc.add_argument("--session-id", required=True)
+    lc.add_argument("--event", required=True, help="target message event_id")
+    lc.add_argument("--kind", required=True)
+    lc.add_argument("--entity", default=None)
+    lc.set_defaults(func=cmd_label_correct)
 
     # review
     rev = sub.add_parser(

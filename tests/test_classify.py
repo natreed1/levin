@@ -37,14 +37,14 @@ def test_smalltalk_gets_no_kind():
 
 def test_qwen_fallback_used(monkeypatch):
     monkeypatch.setenv("ANALYST_CLASSIFY_QWEN", "on")
-    monkeypatch.setattr(classify_mod, "_qwen_kind", lambda text: "idea")
+    monkeypatch.setattr(classify_mod, "_qwen_kind", lambda text, examples=None: "idea")
     r = classify_message("we might spin something up around this space", allow_qwen=True)
     assert r["kind"] == "idea"
     assert r["source"] == "qwen"
 
 
 def test_qwen_not_called_when_deterministic(monkeypatch):
-    def _boom(text):
+    def _boom(text, examples=None):
         raise AssertionError("Qwen should not be called when rules already matched")
 
     monkeypatch.setattr(classify_mod, "_qwen_kind", _boom)
@@ -56,7 +56,43 @@ def test_qwen_not_called_when_deterministic(monkeypatch):
 def test_qwen_disabled_by_env(monkeypatch):
     monkeypatch.setenv("ANALYST_CLASSIFY_QWEN", "off")
     monkeypatch.setattr(
-        classify_mod, "_qwen_kind", lambda text: "idea"
+        classify_mod, "_qwen_kind", lambda text, examples=None: "idea"
     )  # would be used if enabled
     r = classify_message("just some ambiguous chatter here", allow_qwen=True)
     assert r["kind"] is None  # env off -> no Qwen fallback
+
+
+def test_classify_forwards_examples(monkeypatch):
+    monkeypatch.setenv("ANALYST_CLASSIFY_QWEN", "on")
+    seen = {}
+
+    def fake_qwen(text, examples=None):
+        seen["examples"] = examples
+        return "idea"
+
+    monkeypatch.setattr(classify_mod, "_qwen_kind", fake_qwen)
+    ex = [{"text": "the sync broke", "kind": "build"}]
+    r = classify_message("some ambiguous thing here", allow_qwen=True, examples=ex)
+    assert r["kind"] == "idea"
+    assert seen["examples"] == ex
+
+
+def test_qwen_fewshot_prompt(monkeypatch):
+    captured = {}
+
+    def fake_call(messages, **kw):
+        captured["messages"] = messages
+        return "research"
+
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize._call_openai_compatible_messages", fake_call
+    )
+    kind = classify_mod._qwen_kind(
+        "what about this new thing",
+        examples=[{"text": "the sync broke", "kind": "build"}],
+    )
+    assert kind == "research"
+    contents = [m["content"] for m in captured["messages"]]
+    assert "the sync broke" in contents
+    assert "build" in contents
+    assert contents[-1] == "what about this new thing"

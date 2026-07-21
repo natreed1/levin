@@ -58,6 +58,7 @@ EVENT_TYPES = frozenset(
         "inbox_file",
         "tag",
         "label",
+        "label_feedback",
         "synthesis_request",
         "synthesis_result",
         "egress_audit",

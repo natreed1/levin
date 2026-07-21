@@ -92,3 +92,29 @@ def test_sync_disabled_kill_switch(ledger, monkeypatch):
     monkeypatch.setenv("ANALYST_MESSENGER_SYNC", "off")
     res = sync_messenger(ledger)
     assert res["status"] == "disabled"
+
+
+def test_capture_room_message(ledger):
+    from analyst_ledger.messenger_sync import capture_room_message
+
+    res = capture_room_message(
+        ledger,
+        "legacy",
+        "Nat",
+        "the sync is broken, we should refactor the classifier",
+        messenger_id=42,
+    )
+    assert res["captured"] is True
+    assert res["tagged"] is True
+
+    sid = res["session_id"]
+    labels = [
+        e for e in ledger.list_events(session_id=sid, limit=50) if e["type"] == "label"
+    ]
+    assert any("kind:build" in lbl["payload"]["labels"] for lbl in labels)
+
+    # Idempotent per messenger_id — the same message isn't captured twice.
+    again = capture_room_message(
+        ledger, "legacy", "Nat", "the sync is broken", messenger_id=42
+    )
+    assert again["captured"] is False

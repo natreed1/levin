@@ -74,7 +74,9 @@ async def post_message(
                 return JSONResponse(
                     {"ok": False, "error": "not_found"}, status_code=404
                 )
-            ledger.append_chat_message(thread_id, role="user", content=content)
+            user_event = ledger.append_chat_message(
+                thread_id, role="user", content=content
+            )
             jobs = _jobs(request)
             uid = user["user_id"]
 
@@ -120,29 +122,35 @@ async def post_message(
                     )
                     return JSONResponse({"ok": True, "job": job.public()})
 
-                # Layer 0.5 — actionable-ask TAGGING (framework only; the agent
-                # does NOT act yet). Record an explicit research ask's labels
-                # (intent:research / entity:<slug> / state:open) as a `label`
-                # event for later model training, then fall through to normal
-                # handling. Kill-switch: ANALYST_CHAT_ACTIONABLE=off.
+                # Layer 0.5 — classify the message (framework only; agent does
+                # NOT act). Deterministic-only here so sending never blocks on a
+                # model call; the classify_pending sweep fills in Qwen kinds for
+                # the fuzzy ones. Kill-switch: ANALYST_CHAT_ACTIONABLE=off.
                 try:
-                    from analyst_ledger.actionable import (
-                        actionable_enabled,
-                        detect_actionable,
-                    )
+                    from analyst_ledger.actionable import actionable_enabled
+                    from analyst_ledger.classify import classify_message
 
-                    adecision = (
-                        detect_actionable(content) if actionable_enabled() else None
+                    classified = (
+                        classify_message(content, allow_qwen=False)
+                        if actionable_enabled()
+                        else None
                     )
                 except Exception:  # noqa: BLE001 — tagging must never break chat
-                    adecision = None
-                if adecision is not None and adecision.matched:
+                    classified = None
+                if classified and classified.get("labels"):
                     try:
                         ledger.record_ask_labels(
                             thread_id,
-                            adecision.labels,
-                            source="chat_actionable",
-                            meta={"actionable": adecision.public()},
+                            classified["labels"],
+                            source="chat_classify",
+                            meta={
+                                "classification": {
+                                    "kind": classified["kind"],
+                                    "entity": classified["entity"],
+                                    "source": classified["source"],
+                                },
+                                "target_event_id": user_event.event_id,
+                            },
                         )
                     except Exception:  # noqa: BLE001 — never block chat on tagging
                         pass

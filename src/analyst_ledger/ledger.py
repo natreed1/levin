@@ -613,6 +613,123 @@ class Ledger:
             )
         )
 
+    def correct_message_kind(
+        self,
+        session_id: str,
+        target_event_id: str,
+        kind: str,
+        *,
+        entity: Optional[str] = None,
+        auto_kind: Optional[str] = None,
+        source: str = "human",
+    ) -> List[str]:
+        """Record a human correction/confirmation of a captured message's kind.
+
+        Writes a superseding ``label`` event (``source``, tied to the message via
+        ``target_event_id``) plus a ``label_feedback`` event capturing the
+        auto->corrected transition — the gold-labeled example that feeds training.
+        """
+        labels = [f"kind:{kind}"]
+        if entity:
+            labels.append(f"entity:{entity}")
+        norm = normalize_labels(labels)  # validates kind against the controlled set
+        session = self.get_session(session_id)
+        sensitivity = session.sensitivity if session else Sensitivity.INTERNAL.value
+        surface = session.surface if session else Surface.CHAT.value
+        self.append_event(
+            Event(
+                type="label",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload={
+                    "labels": norm,
+                    "source": source,
+                    "target_event_id": target_event_id,
+                },
+            )
+        )
+        self.append_event(
+            Event(
+                type="label_feedback",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload={
+                    "target_event_id": target_event_id,
+                    "auto_kind": auto_kind,
+                    "corrected_kind": kind,
+                    "source": source,
+                },
+            )
+        )
+        return norm
+
+    def latest_kind_for(
+        self, target_event_id: str, session_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Current kind for a message: the latest label event tied to it, with a
+        human correction preferred over an auto label."""
+        best = None  # (priority, ts, kind)
+        for ev in self.list_events(session_id=session_id, limit=1000):
+            if ev.get("type") != "label":
+                continue
+            payload = ev.get("payload") or {}
+            if payload.get("target_event_id") != target_event_id:
+                continue
+            kinds = [
+                str(lbl).split(":", 1)[1]
+                for lbl in (payload.get("labels") or [])
+                if str(lbl).startswith("kind:")
+            ]
+            if not kinds:
+                continue
+            priority = 1 if payload.get("source") == "human" else 0
+            candidate = (priority, ev.get("ts") or "", kinds[0])
+            if best is None or candidate > best:
+                best = candidate
+        return best[2] if best else None
+
+    def confirmed_kind_examples(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Recent human-confirmed (message text -> kind) pairs, newest first.
+
+        Used both as few-shot examples for the classifier and as the export set
+        for fine-tuning a small kind classifier later.
+        """
+        events = self.list_events(limit=2000)
+        text_by_id: Dict[str, str] = {}
+        for ev in events:
+            if ev.get("type") == "chat_message":
+                text_by_id[ev.get("event_id")] = str(
+                    (ev.get("payload") or {}).get("content") or ""
+                )
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+        for ev in events:  # newest-first
+            if ev.get("type") != "label":
+                continue
+            payload = ev.get("payload") or {}
+            if payload.get("source") != "human":
+                continue
+            target = payload.get("target_event_id")
+            if not target or target in seen:
+                continue
+            kinds = [
+                str(lbl).split(":", 1)[1]
+                for lbl in (payload.get("labels") or [])
+                if str(lbl).startswith("kind:")
+            ]
+            if not kinds:
+                continue
+            text = text_by_id.get(target)
+            if not text:
+                continue
+            seen.add(target)
+            out.append({"text": text, "kind": kinds[0]})
+            if len(out) >= limit:
+                break
+        return out
+
     def attach_artifact(
         self,
         file_path: Path,
