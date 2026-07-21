@@ -158,7 +158,6 @@ def test_signup_login_and_tracking(tmp_path: Path, monkeypatch):
 def test_forgot_and_reset_password(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _signup_and_login(client, email="reset@example.com", name="Reset")
-    client.post("/api/auth/logout")
 
     forgot = client.post(
         "/api/auth/forgot-password",
@@ -183,6 +182,12 @@ def test_forgot_and_reset_password(tmp_path: Path, monkeypatch):
         json={"token": token, "password": "newpassword99"},
     )
     assert ok.status_code == 200, ok.text
+    assert client.get("/api/auth/me").status_code == 401
+    reused = client.post(
+        "/api/auth/reset-password",
+        json={"token": token, "password": "anotherpassword99"},
+    )
+    assert reused.status_code == 400
 
     old = client.post(
         "/api/auth/login",

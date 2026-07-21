@@ -42,6 +42,8 @@ RATE_LIMIT_WINDOW = 10.0  # seconds
 RATE_LIMIT_MAX = 20  # messages per window per author
 LOGIN_RATE_LIMIT_WINDOW = 900.0  # 15 minutes
 LOGIN_RATE_LIMIT_MAX = 10
+AUTH_EMAIL_RATE_LIMIT_WINDOW = 900.0  # 15 minutes
+AUTH_EMAIL_RATE_LIMIT_MAX = 5
 
 
 class RateLimiter:
@@ -157,6 +159,9 @@ def create_app() -> FastAPI:
     login_limiter = RateLimiter(
         window=LOGIN_RATE_LIMIT_WINDOW, max_hits=LOGIN_RATE_LIMIT_MAX
     )
+    auth_email_limiter = RateLimiter(
+        window=AUTH_EMAIL_RATE_LIMIT_WINDOW, max_hits=AUTH_EMAIL_RATE_LIMIT_MAX
+    )
 
     from analyst_ledger.workflow_engine import JobManager
 
@@ -196,6 +201,7 @@ def create_app() -> FastAPI:
     app.state.hub = hub
     app.state.limiter = limiter
     app.state.login_limiter = login_limiter
+    app.state.auth_email_limiter = auth_email_limiter
     app.state.jobs = jobs
     app.state.scheduler = scheduler
 
@@ -1272,6 +1278,7 @@ def create_app() -> FastAPI:
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
             },
         )
 

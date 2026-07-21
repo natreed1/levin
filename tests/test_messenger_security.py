@@ -10,7 +10,13 @@ from messenger.auth import normalize_name, normalize_title
 from messenger.emailer import send_verification_email
 
 
-def _client(tmp_path: Path, monkeypatch, *, login_max: int | None = None):
+def _client(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    login_max: int | None = None,
+    auth_email_max: int | None = None,
+):
     monkeypatch.setenv("MESSENGER_INVITE_TOKEN", "server-secret")
     monkeypatch.setenv("MESSENGER_SESSION_SECRET", "unit-test-secret")
     monkeypatch.setenv("MESSENGER_DB_PATH", str(tmp_path / "messages.sqlite3"))
@@ -31,6 +37,9 @@ def _client(tmp_path: Path, monkeypatch, *, login_max: int | None = None):
     if login_max is not None:
         monkeypatch.setattr(app_module, "LOGIN_RATE_LIMIT_MAX", login_max)
         monkeypatch.setattr(app_module, "LOGIN_RATE_LIMIT_WINDOW", 900.0)
+    if auth_email_max is not None:
+        monkeypatch.setattr(app_module, "AUTH_EMAIL_RATE_LIMIT_MAX", auth_email_max)
+        monkeypatch.setattr(app_module, "AUTH_EMAIL_RATE_LIMIT_WINDOW", 900.0)
     app = app_module.create_app()
     return starlette_testclient.TestClient(app)
 
@@ -148,3 +157,39 @@ def test_login_rate_limited(tmp_path: Path, monkeypatch):
         "/api/auth/login",
         json={"email": email, "password": "wrong-password"},
     ).json()["error"] == "rate_limited"
+
+
+@pytest.mark.parametrize("endpoint", ["forgot-password", "resend-verification"])
+def test_auth_email_endpoints_are_rate_limited(
+    tmp_path: Path, monkeypatch, endpoint: str
+):
+    client = _client(tmp_path / endpoint, monkeypatch, auth_email_max=2)
+    codes = [
+        client.post(
+            f"/api/auth/{endpoint}",
+            json={"email": "unknown@example.com"},
+        ).status_code
+        for _ in range(3)
+    ]
+    assert codes == [200, 200, 429]
+
+
+def test_fly_signup_fails_closed_without_email_provider(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    client = _client(tmp_path / "fly", monkeypatch)
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "0")
+
+    result = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "new@example.com",
+            "password": "password12",
+            "display_name": "New",
+        },
+    )
+
+    assert result.status_code == 503
+    assert result.json()["error"] == "email_delivery_unavailable"

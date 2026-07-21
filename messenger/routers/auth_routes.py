@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, Union
 from urllib.parse import quote
 
@@ -31,6 +32,7 @@ from messenger.deps import (
 )
 from messenger.emailer import (
     auto_verify_on_signup,
+    email_delivery_available,
     email_backend,
     expose_dev_links,
     public_base_url,
@@ -44,6 +46,14 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 VERIFY_HOURS = 24.0
 RESET_HOURS = 1.0
+
+
+def _email_action_allowed(request: Request, action: str, email: str) -> bool:
+    limiter = getattr(request.app.state, "auth_email_limiter", None)
+    if limiter is None:
+        return True
+    client_ip = request.client.host if request.client else "unknown"
+    return bool(limiter.allow(f"{action}:{client_ip}:{email}"))
 
 
 def _base(request: Request) -> str:
@@ -93,10 +103,24 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
             {"ok": False, "error": "bad_password", "message": str(exc)},
             status_code=400,
         )
+    skip_verify = auto_verify_on_signup()
+    if (
+        (os.environ.get("FLY_APP_NAME") or "").strip()
+        and not email_delivery_available()
+        and not skip_verify
+    ):
+        logger.error("signup unavailable: outbound email is not configured")
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_delivery_unavailable",
+                "message": "Account creation is temporarily unavailable. Please try again later.",
+            },
+            status_code=503,
+        )
     if store.user_by_email(email):
         return JSONResponse({"ok": False, "error": "email_taken"}, status_code=409)
     user_id = new_user_id()
-    skip_verify = auto_verify_on_signup()
     try:
         from datetime import datetime, timezone
 
@@ -191,6 +215,11 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
         return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
+    if not _email_action_allowed(request, "resend-verification", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
     user = store.user_by_email(email)
     if not user or not verify_password(password, str(user["password_hash"])):
         return JSONResponse({"ok": False, "error": "bad_credentials"}, status_code=401)
@@ -331,7 +360,11 @@ def verify_email_get(
     ok, message = _verify_token(store, token)
     if ok:
         # Land on login with a success banner.
-        return RedirectResponse(url="/?verified=1", status_code=303)
+        return RedirectResponse(
+            url="/?verified=1",
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
     body = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Verify email</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -346,7 +379,11 @@ a{{color:#3d9cf0}}
 <p>{message}</p>
 <p><a href="/">Back to Workflow</a></p>
 </div></body></html>"""
-    return HTMLResponse(body, status_code=400)
+    return HTMLResponse(
+        body,
+        status_code=400,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 @router.post("/verify-email")
@@ -388,6 +425,11 @@ async def forgot_password(
     email = normalize_email(str(body.get("email") or ""))
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
+    if not _email_action_allowed(request, "forgot-password", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
     payload: dict[str, Any] = {
         "ok": True,
         "message": "If an account exists for that email, a reset link is on the way.",

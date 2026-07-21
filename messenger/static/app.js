@@ -270,6 +270,7 @@
     }
     if (params.get("reset")) {
       state.resetToken = params.get("reset");
+      history.replaceState({}, "", "/");
       showAuthPanel("reset");
       setAuthBanner("Choose a new password.", true);
     }
