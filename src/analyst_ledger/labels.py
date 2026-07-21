@@ -30,7 +30,7 @@ import re
 from typing import Dict, Iterable, List
 
 # All recognised label axes.
-AXES = ("topic", "entity", "project", "intent", "state")
+AXES = ("topic", "entity", "project", "intent", "state", "kind")
 
 # --- Controlled vocabularies (edit TOPICS to grow the shared theme list) ---
 TOPICS = frozenset(
@@ -56,11 +56,14 @@ TOPICS = frozenset(
 )
 INTENTS = frozenset({"research", "monitor", "summarize", "compare", "watch"})
 STATES = frozenset({"open", "done", "blocked"})
+# What KIND of thing a chat message is — the stream classifier's primary axis.
+KINDS = frozenset({"research", "build", "observation", "idea", "question"})
 
 _CONTROLLED: Dict[str, frozenset] = {
     "topic": TOPICS,
     "intent": INTENTS,
     "state": STATES,
+    "kind": KINDS,
 }
 _OPEN = frozenset({"entity", "project"})
 

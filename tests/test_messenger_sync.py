@@ -13,6 +13,7 @@ def ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("ANALYST_INBOX", str(tmp_path / "inbox"))
     monkeypatch.setenv("ANALYST_MESSENGER_SYNC", "on")
     monkeypatch.setenv("ANALYST_CHAT_ACTIONABLE", "on")
+    monkeypatch.setenv("ANALYST_CLASSIFY_QWEN", "off")  # deterministic-only in tests
     return Ledger()
 
 
@@ -50,6 +51,7 @@ def test_sync_ingests_and_tags(ledger, monkeypatch):
         e for e in ledger.list_events(session_id=sid, limit=50) if e["type"] == "label"
     ]
     assert labels
+    assert "kind:research" in labels[0]["payload"]["labels"]
     assert "entity:acme-ai" in labels[0]["payload"]["labels"]
     assert labels[0]["payload"]["source"] == "messenger"
 

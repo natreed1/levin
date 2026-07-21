@@ -100,16 +100,20 @@ def ingest_room_messages(
         ingested += 1
         if tag and role == "user" and body.strip():
             try:
-                from .actionable import detect_actionable
+                from .classify import classify_message
 
-                decision = detect_actionable(body)
-                if decision.matched:
+                result = classify_message(body)
+                if result["labels"]:
                     ledger.record_ask_labels(
                         thread.session_id,
-                        decision.labels,
+                        result["labels"],
                         source="messenger",
                         meta={
-                            "actionable": decision.public(),
+                            "classification": {
+                                "kind": result["kind"],
+                                "entity": result["entity"],
+                                "source": result["source"],
+                            },
                             "author": author,
                             "messenger_id": mid,
                         },
