@@ -289,7 +289,8 @@ def pull_status(job_id: str) -> dict[str, Any]:
 
 
 _gateway_proc: Optional[subprocess.Popen] = None
-_tunnel_proc: Optional[subprocess.Popen] = None
+_tunnel_proc: Optional[subprocess.Popen] = None  # gateway (11435) tunnel
+_companion_tunnel_proc: Optional[subprocess.Popen] = None  # companion (8791) tunnel
 _proc_lock = threading.Lock()
 
 
@@ -372,18 +373,25 @@ def _ensure_gateway(upstream: str, token: str) -> str:
     raise RuntimeError("gateway failed to start")
 
 
-def _try_cloudflared_tunnel(local_port: int) -> Optional[str]:
-    """Start a quick tunnel; return https base without /v1, or None."""
-    global _tunnel_proc
+def _try_cloudflared_tunnel(
+    local_port: int, *, state_key: str = "tunnel_base"
+) -> Optional[str]:
+    """Start a quick tunnel; return https base without /v1, or None.
+
+    ``state_key`` lets companion (8791) and gateway (11435) keep separate tunnels.
+    """
+    global _tunnel_proc, _companion_tunnel_proc
     if not shutil.which("cloudflared"):
         return None
+    is_companion = local_port == LISTEN_PORT
     with _proc_lock:
-        if _tunnel_proc and _tunnel_proc.poll() is None:
+        proc = _companion_tunnel_proc if is_companion else _tunnel_proc
+        if proc and proc.poll() is None:
             state = _load_state()
-            url = state.get("tunnel_base")
+            url = state.get(state_key)
             if url:
                 return str(url)
-        _tunnel_proc = subprocess.Popen(
+        new_proc = subprocess.Popen(
             [
                 "cloudflared",
                 "tunnel",
@@ -395,25 +403,65 @@ def _try_cloudflared_tunnel(local_port: int) -> Optional[str]:
             stderr=subprocess.STDOUT,
             text=True,
         )
-    assert _tunnel_proc.stdout is not None
+        if is_companion:
+            _companion_tunnel_proc = new_proc
+        else:
+            _tunnel_proc = new_proc
+        proc = new_proc
+    assert proc.stdout is not None
     deadline = time.time() + 25
     while time.time() < deadline:
-        line = _tunnel_proc.stdout.readline()
+        line = proc.stdout.readline()
         if not line:
-            if _tunnel_proc.poll() is not None:
+            if proc.poll() is not None:
                 break
             time.sleep(0.1)
             continue
-        # Look for https://….trycloudflare.com
         if "trycloudflare.com" in line or "https://" in line:
             for part in line.split():
                 if part.startswith("https://") and "trycloudflare.com" in part:
                     url = part.rstrip("/")
                     st = _load_state()
-                    st["tunnel_base"] = url
+                    st[state_key] = url
                     _save_state(st)
                     return url
     return None
+
+
+def prepare_cloud_link() -> dict[str, Any]:
+    """Expose this companion via a public tunnel so Flyleaf can reach it.
+
+    Called from the *browser* (which can hit 127.0.0.1) when the user is on
+    levin.fly.dev — the cloud server cannot dial localhost itself.
+    """
+    if not shutil.which("cloudflared"):
+        return {
+            "ok": False,
+            "error": "cloudflared_missing",
+            "message": (
+                "Install cloudflared once so the website can reach this computer: "
+                "brew install cloudflared"
+            ),
+            "install_hint": "brew install cloudflared",
+        }
+    url = _try_cloudflared_tunnel(
+        LISTEN_PORT, state_key="companion_tunnel_base"
+    )
+    if not url:
+        return {
+            "ok": False,
+            "error": "tunnel_failed",
+            "message": (
+                "Could not open a public tunnel. Check that cloudflared is installed "
+                "and try again."
+            ),
+        }
+    return {
+        "ok": True,
+        "public_base_url": url,
+        "local_base_url": f"http://{LISTEN_HOST}:{LISTEN_PORT}",
+        "message": "Public tunnel ready — Flyleaf can use your local models.",
+    }
 
 
 def pipeline_start(
@@ -542,14 +590,15 @@ def pipeline_status() -> dict[str, Any]:
 
 
 def pipeline_stop() -> dict[str, Any]:
-    global _gateway_proc, _tunnel_proc
+    global _gateway_proc, _tunnel_proc, _companion_tunnel_proc
     with _proc_lock:
-        for proc in (_tunnel_proc, _gateway_proc):
+        for proc in (_companion_tunnel_proc, _tunnel_proc, _gateway_proc):
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
                 except OSError:
                     pass
+        _companion_tunnel_proc = None
         _tunnel_proc = None
         _gateway_proc = None
     return {"ok": True, "stopped": True}
@@ -585,6 +634,21 @@ class CompanionHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         logger.info("%s - " + fmt, self.address_string(), *args)
 
+    def _cors_headers(self) -> None:
+        # Browser on Flyleaf (levin.fly.dev) must call this loopback companion.
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type",
+        )
+        self.send_header("Access-Control-Max-Age", "86400")
+
     def _send_bytes(
         self, code: int, body: bytes, content_type: str = "application/json"
     ) -> None:
@@ -592,11 +656,17 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
         self._send_bytes(code, json.dumps(payload).encode("utf-8"))
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
 
     def _send_landing(self) -> None:
         """Browser-friendly status page — never embeds the companion token."""
@@ -624,6 +694,7 @@ class CompanionHandler(BaseHTTPRequestHandler):
   <p class="ok">Companion is running</p>
   <h1>Local Companion</h1>
   <p>URL for Settings: <code>{base}</code></p>
+  <p>On <strong>levin.fly.dev</strong>, keep this localhost URL — the site will open a secure tunnel for you when you click Link companion.</p>
   <p>The link token is <strong>not</strong> shown in the browser (so it stays off screenshots and public tunnels).</p>
   <ol>
     <li>In the terminal where Companion started, copy the line <code>Token: …</code></li>
@@ -684,6 +755,10 @@ class CompanionHandler(BaseHTTPRequestHandler):
         if not self._check_auth():
             return
         body = self._read_json()
+        if path == "/prepare-cloud-link":
+            result = prepare_cloud_link()
+            self._send(200 if result.get("ok") else 400, result)
+            return
         if path == "/local-model/discover":
             self._send(200, discover_candidates())
             return

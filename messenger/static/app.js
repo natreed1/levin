@@ -1624,9 +1624,42 @@
   $("#os-search-retry")?.addEventListener("click", () => runDiscover());
   $("#os-back-btn")?.addEventListener("click", () => showWizardStep("search"));
 
+  function isFlyleafHost() {
+    const h = (location.hostname || "").toLowerCase();
+    return h.endsWith(".fly.dev") || h === "levin.fly.dev";
+  }
+
+  function isLoopbackCompanionUrl(url) {
+    try {
+      const u = new URL(url);
+      return ["127.0.0.1", "localhost", "::1"].includes(u.hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  async function prepareCompanionForCloud(localUrl, token) {
+    const base = String(localUrl || "").replace(/\/$/, "");
+    const res = await fetch(`${base}/prepare-cloud-link`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    return { res, data };
+  }
+
   async function linkCompanion() {
     setError("#companion-error", "");
-    const base_url = $("#companion-url")?.value.trim() || "";
+    let base_url = $("#companion-url")?.value.trim() || "";
     const token = $("#companion-token")?.value.trim() || "";
     if (!base_url) {
       setError("#companion-error", "Enter the companion URL (http://127.0.0.1:8791).");
@@ -1639,6 +1672,36 @@
     const btn = $("#companion-link-btn");
     if (btn) btn.disabled = true;
     try {
+      // On Flyleaf, the server cannot reach your laptop's localhost. The browser can —
+      // ask Companion to open a public tunnel, then register that URL with the site.
+      if (isFlyleafHost() && isLoopbackCompanionUrl(base_url)) {
+        setError("#companion-error", "");
+        if (btn) btn.textContent = "Opening secure tunnel…";
+        let prep;
+        try {
+          prep = await prepareCompanionForCloud(base_url, token);
+        } catch (err) {
+          setError(
+            "#companion-error",
+            "Could not reach Local Companion at that URL. Is `python -m messenger.companion_app` running?"
+          );
+          return;
+        }
+        if (!prep.res.ok || !prep.data?.public_base_url) {
+          setError(
+            "#companion-error",
+            prep.data?.message ||
+              prep.data?.error ||
+              "Could not open a tunnel for the website. Install cloudflared (`brew install cloudflared`) and retry."
+          );
+          return;
+        }
+        base_url = String(prep.data.public_base_url).replace(/\/$/, "");
+        const urlInput = $("#companion-url");
+        if (urlInput) urlInput.value = base_url;
+        if (btn) btn.textContent = "Link companion";
+      }
+
       const { res, data } = await api("/api/companion/link", {
         method: "POST",
         body: JSON.stringify({ base_url, token }),
@@ -1658,11 +1721,13 @@
       setError(
         "#companion-error",
         data?.message ||
-          "Linked, but companion is not reachable from this app. " +
-            "On the cloud site, use a public tunnel URL — localhost only works with a local Workflow."
+          "Linked, but companion is not reachable yet. Keep Companion running and try again."
       );
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Link companion";
+      }
     }
   }
   $("#companion-link-btn")?.addEventListener("click", () => { linkCompanion(); });
