@@ -114,8 +114,14 @@ def _extract_entity(text: str) -> str:
     return ""
 
 
-def _qwen_kind(text: str) -> Optional[str]:
-    """Ask the local Qwen model to classify; return a kind or None (graceful)."""
+def _qwen_kind(
+    text: str, examples: Optional[List[Dict[str, Any]]] = None
+) -> Optional[str]:
+    """Ask the local Qwen model to classify; return a kind or None (graceful).
+
+    ``examples`` are human-confirmed (text -> kind) pairs injected as few-shot
+    turns so Qwen adopts the user's own taxonomy over time.
+    """
     try:
         from .synthesize import _call_openai_compatible_messages
     except Exception:  # noqa: BLE001
@@ -131,9 +137,17 @@ def _qwen_kind(text: str) -> Optional[str]:
         "question = an open question to resolve.\n"
         "none = small talk / nothing worth tracking."
     )
+    messages: List[Dict[str, str]] = []
+    for ex in (examples or [])[:15]:
+        ex_text = str(ex.get("text") or "").strip()
+        ex_kind = str(ex.get("kind") or "").strip()
+        if ex_text and ex_kind:
+            messages.append({"role": "user", "content": ex_text})
+            messages.append({"role": "assistant", "content": ex_kind})
+    messages.append({"role": "user", "content": text or ""})
     try:
         reply = _call_openai_compatible_messages(
-            [{"role": "user", "content": text or ""}],
+            messages,
             max_tokens=200,
             system=system,
             temperature=0.0,
@@ -149,12 +163,21 @@ def _qwen_kind(text: str) -> Optional[str]:
     return found if found in KINDS else None
 
 
-def classify_message(text: str, *, allow_qwen: bool = True) -> Dict[str, Any]:
-    """Classify one message into kind/entity/topic + normalized labels."""
+def classify_message(
+    text: str,
+    *,
+    allow_qwen: bool = True,
+    examples: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Classify one message into kind/entity/topic + normalized labels.
+
+    ``examples`` (human-confirmed text->kind pairs) are forwarded to Qwen as
+    few-shot examples so it learns the user's taxonomy over time.
+    """
     kind = _deterministic_kind(text)
     source = "deterministic" if kind else "none"
     if kind is None and allow_qwen and _qwen_enabled():
-        qk = _qwen_kind(text)
+        qk = _qwen_kind(text, examples=examples)
         if qk:
             kind, source = qk, "qwen"
 
@@ -175,3 +198,65 @@ def classify_message(text: str, *, allow_qwen: bool = True) -> Dict[str, Any]:
         "labels": labels,
         "source": source,
     }
+
+
+def classify_pending(
+    ledger: Any, *, limit: int = 20, session_id: Optional[str] = None, scan: int = 500
+) -> Dict[str, Any]:
+    """Background/batch pass: classify captured *user* chat messages that don't
+    yet carry a ``kind:`` label (using Qwen for the fuzzy ones). Records a
+    ``label`` event tied to each message via ``target_event_id``. Idempotent:
+    messages that already have a kind are skipped, so it is safe to re-run.
+    """
+    events = ledger.list_events(session_id=session_id, limit=scan)
+    have_kind: set = set()
+    for ev in events:
+        if ev.get("type") != "label":
+            continue
+        payload = ev.get("payload") or {}
+        target = payload.get("target_event_id")
+        if target and any(
+            str(lbl).startswith("kind:") for lbl in (payload.get("labels") or [])
+        ):
+            have_kind.add(target)
+
+    try:
+        examples = ledger.confirmed_kind_examples(limit=15)
+    except Exception:  # noqa: BLE001
+        examples = None
+
+    classified = 0
+    for ev in events:
+        if classified >= limit:
+            break
+        if ev.get("type") != "chat_message":
+            continue
+        payload = ev.get("payload") or {}
+        if payload.get("role") != "user":
+            continue
+        if ev.get("event_id") in have_kind:
+            continue
+        body = str(payload.get("content") or "")
+        if not body.strip():
+            continue
+        result = classify_message(body, allow_qwen=True, examples=examples)
+        if not (result.get("kind") and result.get("labels")):
+            continue
+        try:
+            ledger.record_ask_labels(
+                ev.get("session_id"),
+                result["labels"],
+                source="classify_sweep",
+                meta={
+                    "classification": {
+                        "kind": result["kind"],
+                        "entity": result["entity"],
+                        "source": result["source"],
+                    },
+                    "target_event_id": ev.get("event_id"),
+                },
+            )
+            classified += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return {"classified": classified}

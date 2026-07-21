@@ -113,3 +113,46 @@ enable it.
 - Dashboard UI to one-click confirm proposed labels
   (the data + API are in place; the buttons are not).
 - A governed `research` action in `ALLOWED_ACTIONS` so workflows can call it too.
+
+---
+
+## Update — stream classifier + correction loop (2026-07-21)
+
+The tagging moved from "detect research asks" to **classify every message**, and
+gained a human-correction training loop. This is the current shape.
+
+### `kind:` — the classifier's primary axis
+Every captured message is classified into one **kind** — `research` / `build` /
+`observation` / `idea` / `question` — plus `entity:` and `topic:` when
+detectable. Two layers (`classify.classify_message`):
+- **deterministic** rules — instant, high precision, run *at capture* so sending
+  never blocks;
+- **local Qwen** — fills in the fuzzy ones in the background
+  (`classify.classify_pending`, CLI `analyst classify-pending`). Offline-graceful;
+  kill-switch `ANALYST_CLASSIFY_QWEN=off`. Confirmed corrections are injected as
+  few-shot examples so it learns your taxonomy.
+
+Both chat handlers (`dashboard` + messenger `agent_chats`) classify at capture
+and tie each label to its message via `target_event_id`.
+
+### Correct-a-tag → training loop
+- `ledger.correct_message_kind(session_id, event_id, kind)` records a superseding
+  `source:human` label + a `label_feedback` example. `POST /api/label/correct`
+  and `analyst label-correct` expose it.
+- `ledger.latest_kind_for()` resolves a message's current kind (human > auto).
+- `ledger.confirmed_kind_examples()` powers both few-shot and export.
+- `analyst classify-export` writes `(message → kind)` JSONL for fine-tuning later.
+
+Flywheel: **auto-tag → you correct → corrections few-shot the classifier now and
+become fine-tune data later.**
+
+### Capture into the ledger
+- `messenger_sync.sync_messenger` pulls a hosted room's history into the ledger.
+- `messenger_sync.capture_room_message` is the real-time hook for the messenger's
+  message-post path (one line, non-blocking, idempotent) so live room chat lands
+  in each user's Tracking ledger, tagged.
+
+### Fits the messenger
+The messenger's **Tracking tab is analyst_ledger per-user**, so all of this shows
+up there once the deployed messenger runs this version. See
+[MESSENGER_INTEGRATION.md](MESSENGER_INTEGRATION.md) for the deploy + hook package.
