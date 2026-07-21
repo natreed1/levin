@@ -297,10 +297,16 @@
 
   async function refreshChatRails() {
     if (state.me?.authenticated) {
-      const rooms = await api("/api/rooms/mine");
+      const [rooms, threads, specialists, models] = await Promise.all([
+        api("/api/rooms/mine"),
+        api("/api/agent-chats"),
+        api("/api/specialists"),
+        api("/api/settings/models"),
+      ]);
       state.rooms = (rooms.data && rooms.data.rooms) || [];
-      const threads = await api("/api/agent-chats");
       state.threads = (threads.data && threads.data.threads) || [];
+      state.specialists = (specialists.data && specialists.data.specialists) || [];
+      state.compute = models.data?.active || null;
     } else {
       state.rooms = state.me?.room_id
         ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
@@ -310,58 +316,128 @@
     renderRails();
   }
 
-  function renderRails() {
-    const people = $("#people-list");
-    const agents = $("#agents-list");
-    people.innerHTML = "";
-    agents.innerHTML = "";
+  function roomAgents(room) {
+    const config = room?.config || {};
+    return config.agents || config.specialists || [];
+  }
 
-    if (!state.rooms.length) {
+  function allRoomEntries() {
+    return [
+      ...state.rooms.map((room) => ({
+        id: room.room_id,
+        title: room.title,
+        surface: "people",
+        room,
+      })),
+      ...state.threads.map((thread) => ({
+        id: thread.session_id,
+        title: thread.title,
+        surface: "agent",
+        thread,
+      })),
+    ];
+  }
+
+  function renderRails() {
+    const list = $("#room-list");
+    const palette = $("#agent-palette");
+    list.innerHTML = "";
+    palette.innerHTML = "";
+    const entries = allRoomEntries();
+
+    if (!entries.length) {
       const li = document.createElement("li");
       li.innerHTML = '<button type="button" class="muted" disabled>No rooms yet</button>';
-      people.appendChild(li);
+      list.appendChild(li);
     }
-    state.rooms.forEach((r) => {
+    entries.forEach((entry) => {
       const li = document.createElement("li");
       const btn = document.createElement("button");
       btn.type = "button";
-      const meta = r.kind === "specialist" ? "Workshop" : "Room";
-      btn.innerHTML = `${escapeHtml(r.title || r.room_id)}<span class="meta">${meta}</span>`;
-      if (state.kind === "people" && state.roomId === r.room_id) {
-        btn.classList.add("active", "people-active");
+      const agents = entry.room ? roomAgents(entry.room) : [];
+      const compute = entry.room?.compute || (entry.thread ? state.compute : null);
+      const meta = compute
+        ? `${compute.local ? "Local" : "API"} · ${compute.label || compute.model}`
+        : (entry.thread?.master ? "Private room" : "Ongoing room");
+      btn.innerHTML = `
+        <span class="room-name"><span class="room-icon">#</span>${escapeHtml(entry.title || entry.id)}</span>
+        <span class="meta">${escapeHtml(meta)}</span>
+        ${agents.length ? `<span class="room-agents" aria-label="${agents.length} agents">${agents.map(() => '<i class="room-agent-dot"></i>').join("")}</span>` : ""}
+      `;
+      if (
+        (entry.surface === "people" && state.kind === "people" && state.roomId === entry.id) ||
+        (entry.surface === "agent" && state.kind === "agents" && state.threadId === entry.id)
+      ) {
+        btn.classList.add("active");
       }
-      btn.addEventListener("click", () => selectPeople(r.room_id, r.title, r));
+      if (entry.surface === "people") {
+        btn.addEventListener("click", () => selectPeople(entry.id, entry.title, entry.room));
+        makeRoomDropTarget(btn, entry.id);
+      } else {
+        btn.addEventListener("click", () => {
+          selectAgent(entry.id, entry.title, !!entry.thread?.master);
+        });
+      }
       li.appendChild(btn);
-      people.appendChild(li);
+      list.appendChild(li);
     });
 
-    // Always show current room for guests
-    if (!state.me?.authenticated && state.me?.room_id) {
-      // already added above
-    }
-
-    if (!state.threads.length) {
+    if (!state.specialists.length) {
       const li = document.createElement("li");
-      li.innerHTML = '<button type="button" class="muted" disabled>Master workflows</button>';
-      // still allow click to ensure thread
-      const btn = li.querySelector("button");
-      btn.disabled = false;
-      btn.addEventListener("click", () => selectAgent(null, "Master workflows", true));
-      agents.appendChild(li);
+      li.className = "muted tiny-hint";
+      li.textContent = "No agents available";
+      palette.appendChild(li);
     }
-    state.threads.forEach((t) => {
+    state.specialists.forEach((agent) => {
       const li = document.createElement("li");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      const kind = t.master ? "Master" : "Workflow";
-      btn.innerHTML = `${escapeHtml(t.title || t.session_id)}<span class="meta">${kind}</span>`;
-      if (state.kind === "agents" && state.threadId === t.session_id) {
-        btn.classList.add("active", "agents-active");
-      }
-      btn.addEventListener("click", () => selectAgent(t.session_id, t.title, !!t.master));
-      li.appendChild(btn);
-      agents.appendChild(li);
+      li.className = "agent-card";
+      li.draggable = true;
+      li.dataset.agentId = agent.id;
+      li.title = `Drag ${agent.name} into a room`;
+      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.role)}</span>`;
+      li.addEventListener("dragstart", (event) => {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("application/x-workflow-agent", agent.id);
+        event.dataTransfer.setData("text/plain", agent.id);
+        li.classList.add("dragging");
+      });
+      li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      palette.appendChild(li);
     });
+  }
+
+  function makeRoomDropTarget(element, roomId) {
+    element.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer.types.includes("application/x-workflow-agent")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      element.classList.add("drop-ready");
+    });
+    element.addEventListener("dragleave", () => element.classList.remove("drop-ready"));
+    element.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      element.classList.remove("drop-ready");
+      const agentId =
+        event.dataTransfer.getData("application/x-workflow-agent") ||
+        event.dataTransfer.getData("text/plain");
+      if (agentId) await addAgentToRoom(roomId, agentId);
+    });
+  }
+
+  async function addAgentToRoom(roomId, agentId) {
+    setError("#chat-error", "");
+    const { res, data } = await api(`/api/rooms/${encodeURIComponent(roomId)}/agents`, {
+      method: "POST",
+      body: JSON.stringify({ agent_id: agentId }),
+    });
+    if (!res.ok) {
+      setError("#chat-error", data?.error || "Could not add agent");
+      return;
+    }
+    await refreshChatRails();
+    if (state.kind === "people" && state.roomId === roomId) {
+      updateRoomContext(currentRoom());
+    }
   }
 
   function currentRoom() {
@@ -1548,24 +1624,51 @@
   $("#os-search-retry")?.addEventListener("click", () => runDiscover());
   $("#os-back-btn")?.addEventListener("click", () => showWizardStep("search"));
 
-  $("#companion-link-btn")?.addEventListener("click", async () => {
+  async function linkCompanion() {
     setError("#companion-error", "");
-    const base_url = $("#companion-url").value.trim();
-    const token = $("#companion-token").value.trim();
-    const { res, data } = await api("/api/companion/link", {
-      method: "POST",
-      body: JSON.stringify({ base_url, token }),
-    });
-    if (!res.ok) {
-      setError("#companion-error", data?.error || "Link failed");
+    const base_url = $("#companion-url")?.value.trim() || "";
+    const token = $("#companion-token")?.value.trim() || "";
+    if (!base_url) {
+      setError("#companion-error", "Enter the companion URL (http://127.0.0.1:8791).");
       return;
     }
-    await loadSettings();
-    if ((settingsState.companion || {}).reachable) {
-      showWizardStep("search");
-    } else {
-      setError("#companion-error", "Linked, but companion is not reachable. Is it running?");
+    if (!token) {
+      setError("#companion-error", "Paste the companion token from the terminal (or companion_token file).");
+      return;
     }
+    const btn = $("#companion-link-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const { res, data } = await api("/api/companion/link", {
+        method: "POST",
+        body: JSON.stringify({ base_url, token }),
+      });
+      if (!res.ok) {
+        setError(
+          "#companion-error",
+          data?.message || data?.error || data?.detail || "Link failed"
+        );
+        return;
+      }
+      await loadSettings();
+      if ((settingsState.companion || {}).reachable || data?.reachable) {
+        showWizardStep("search");
+        return;
+      }
+      setError(
+        "#companion-error",
+        data?.message ||
+          "Linked, but companion is not reachable from this app. " +
+            "On the cloud site, use a public tunnel URL — localhost only works with a local Workflow."
+      );
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  $("#companion-link-btn")?.addEventListener("click", () => { linkCompanion(); });
+  $("#companion-link-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    linkCompanion();
   });
 
   $("#os-pull-btn")?.addEventListener("click", async () => {

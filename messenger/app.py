@@ -277,22 +277,61 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
-        try:
-            entry = registry.register(
-                user["user_id"],
-                str(body.get("base_url") or ""),
-                token=str(body.get("token") or ""),
+        base_url = str(body.get("base_url") or "").strip()
+        token = str(body.get("token") or "").strip()
+        if not base_url:
+            return JSONResponse(
+                {"ok": False, "error": "base_url_required", "message": "Companion URL is required."},
+                status_code=400,
             )
+        if not token:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "token_required",
+                    "message": "Paste the companion token from the terminal (or companion_token file).",
+                },
+                status_code=400,
+            )
+        try:
+            entry = registry.register(user["user_id"], base_url, token=token)
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        # healthz is open; verify the bearer token against an authenticated route
+        check = registry.verify_token(user["user_id"], timeout=3.0)
+        if check.get("error") == "invalid_token":
+            registry.unlink(user["user_id"])
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "invalid_token",
+                    "message": "Companion rejected that token. Copy the token from the companion terminal again.",
+                },
+                status_code=400,
+            )
         return JSONResponse(
             {
                 "ok": True,
+                "reachable": bool(check.get("reachable")),
+                "authenticated": bool(check.get("authenticated")),
                 "companion": {
                     "user_id": entry["user_id"],
                     "base_url": entry["base_url"],
                     "registered_at": entry["registered_at"],
                 },
+                "error": None if check.get("ok") else check.get("error"),
+                "message": (
+                    None
+                    if check.get("ok")
+                    else (
+                        "Saved, but companion is not reachable from this server. "
+                        "If you're on the cloud app, use a public tunnel URL to the companion "
+                        "(not http://127.0.0.1)."
+                        if not check.get("reachable")
+                        else "Companion linked but auth check failed."
+                    )
+                ),
             }
         )
 

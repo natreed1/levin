@@ -49,12 +49,15 @@ class CompanionRegistry:
     def register(self, user_id: str, base_url: str, *, token: str = "") -> dict[str, Any]:
         uid = str(user_id).strip()
         url = str(base_url).strip().rstrip("/")
+        tok = str(token or "").strip()
         if not uid or not url:
             raise ValueError("user_id and base_url required")
+        if not tok:
+            raise ValueError("token_required")
         entry = {
             "user_id": uid,
             "base_url": url,
-            "token": token,
+            "token": tok,
             "registered_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         with self._lock:
@@ -62,6 +65,62 @@ class CompanionRegistry:
             data[uid] = entry
             self._save(data)
         return entry
+
+    def verify_token(self, user_id: str, timeout: float = 3.0) -> dict[str, Any]:
+        """Confirm the stored bearer token is accepted (healthz alone is open)."""
+        entry = self.get(user_id)
+        if not entry:
+            return {"ok": False, "linked": False, "error": "not_registered"}
+        if not str(entry.get("token") or "").strip():
+            return {
+                "ok": False,
+                "linked": True,
+                "reachable": False,
+                "authenticated": False,
+                "base_url": entry.get("base_url"),
+                "error": "token_required",
+            }
+        # pipeline/status requires auth and is cheap when idle
+        url = f"{entry['base_url'].rstrip('/')}/local-model/pipeline/status"
+        headers = {"Authorization": f"Bearer {entry['token']}", "Accept": "application/json"}
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp.read()
+            return {
+                "ok": True,
+                "linked": True,
+                "reachable": True,
+                "authenticated": True,
+                "base_url": entry["base_url"],
+            }
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                return {
+                    "ok": False,
+                    "linked": True,
+                    "reachable": True,
+                    "authenticated": False,
+                    "base_url": entry["base_url"],
+                    "error": "invalid_token",
+                }
+            return {
+                "ok": False,
+                "linked": True,
+                "reachable": True,
+                "authenticated": False,
+                "base_url": entry["base_url"],
+                "error": f"http_{exc.code}",
+            }
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return {
+                "ok": False,
+                "linked": True,
+                "reachable": False,
+                "authenticated": False,
+                "base_url": entry["base_url"],
+                "error": str(exc),
+            }
 
     def get(self, user_id: str) -> Optional[dict[str, Any]]:
         with self._lock:

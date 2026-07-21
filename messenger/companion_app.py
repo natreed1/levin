@@ -585,14 +585,55 @@ class CompanionHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         logger.info("%s - " + fmt, self.address_string(), *args)
 
-    def _send(self, code: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload).encode("utf-8")
+    def _send_bytes(
+        self, code: int, body: bytes, content_type: str = "application/json"
+    ) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send(self, code: int, payload: dict[str, Any]) -> None:
+        self._send_bytes(code, json.dumps(payload).encode("utf-8"))
+
+    def _send_landing(self) -> None:
+        """Browser-friendly status page — never embeds the companion token."""
+        peer = self.client_address[0] if self.client_address else ""
+        if peer not in {"127.0.0.1", "::1", "localhost"}:
+            self._send(403, {"ok": False, "error": "loopback_only"})
+            return
+        base = f"http://{LISTEN_HOST}:{LISTEN_PORT}"
+        token_path = str(_token_path())
+        html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Local Companion</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background:#0e1116; color:#e8eef7;
+         max-width: 36rem; margin: 2.5rem auto; padding: 0 1.25rem; line-height:1.45; }}
+  h1 {{ font-size: 1.35rem; margin: 0 0 0.5rem; }}
+  p {{ color:#8b9bb4; }}
+  code {{ font-family: ui-monospace, monospace; background:#161b22; border:1px solid #2a3344;
+         color:#e8eef7; border-radius:6px; padding:0.15rem 0.4rem; font-size:0.85rem; }}
+  .ok {{ color:#34d399; font-size:0.9rem; }}
+  ol {{ color:#8b9bb4; padding-left: 1.2rem; }}
+  li {{ margin: 0.4rem 0; }}
+</style></head><body>
+  <p class="ok">Companion is running</p>
+  <h1>Local Companion</h1>
+  <p>URL for Settings: <code>{base}</code></p>
+  <p>The link token is <strong>not</strong> shown in the browser (so it stays off screenshots and public tunnels).</p>
+  <ol>
+    <li>In the terminal where Companion started, copy the line <code>Token: …</code></li>
+    <li>Or run: <code>cat {token_path}</code></li>
+    <li>Paste URL + token under <strong>Settings → Open source → Add your own</strong></li>
+  </ol>
+  <p style="margin-top:1.25rem;font-size:0.85rem;">API health: <a href="/healthz" style="color:#3d9cf0">/healthz</a></p>
+</body></html>
+"""
+        self._send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -614,6 +655,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/":
+            self._send_landing()
+            return
         if path == "/healthz":
             self._send(
                 200,

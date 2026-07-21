@@ -379,16 +379,28 @@ def test_companion_link_requires_account(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     forbidden = client.post(
         "/api/companion/link",
-        json={"base_url": "http://127.0.0.1:8791"},
+        json={"base_url": "http://127.0.0.1:8791", "token": "tok"},
     )
     assert forbidden.status_code == 401
 
     _signup_and_login(client, email="c@example.com", name="C")
-    linked = client.post(
+    missing_token = client.post(
         "/api/companion/link",
         json={"base_url": "http://127.0.0.1:8791"},
     )
+    assert missing_token.status_code == 400
+    assert missing_token.json()["error"] == "token_required"
+
+    # Token is stored even when the companion isn't running (verify may be unreachable).
+    linked = client.post(
+        "/api/companion/link",
+        json={"base_url": "http://127.0.0.1:59999", "token": "test-companion-token"},
+    )
     assert linked.status_code == 200
+    body = linked.json()
+    assert body["ok"] is True
+    assert body.get("reachable") is False
     status = client.get("/api/companion/status")
     assert status.status_code == 200
     assert status.json()["linked"] is True
+    assert status.json()["base_url"] == "http://127.0.0.1:59999"

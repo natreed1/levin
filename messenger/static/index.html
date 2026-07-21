@@ -387,16 +387,18 @@
                 <li>Paste the printed URL and token below</li>
                 <li>Click Link companion</li>
               </ol>
-              <label>Companion URL
-                <input id="companion-url" type="url" placeholder="http://127.0.0.1:8791" value="http://127.0.0.1:8791" />
-              </label>
-              <label>Token
-                <input id="companion-token" type="password" placeholder="Companion token" autocomplete="off" />
-              </label>
-              <div class="card-actions">
-                <button type="button" id="companion-link-btn">Link companion</button>
-              </div>
-              <p id="companion-error" class="error" hidden></p>
+              <form id="companion-link-form">
+                <label>Companion URL
+                  <input id="companion-url" type="url" placeholder="http://127.0.0.1:8791" value="http://127.0.0.1:8791" required />
+                </label>
+                <label>Token
+                  <input id="companion-token" type="password" placeholder="Companion token" autocomplete="off" required />
+                </label>
+                <div class="card-actions">
+                  <button type="submit" id="companion-link-btn">Link companion</button>
+                </div>
+                <p id="companion-error" class="error" hidden></p>
+              </form>
             </div>
             <div id="os-step-search" class="wizard-step hidden">
               <p class="muted">Find models already on this computer (Ollama or LM Studio).</p>
