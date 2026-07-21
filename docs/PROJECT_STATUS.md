@@ -100,4 +100,9 @@ From the Windows fork (`mattymitch499-sketch/Levin`), adapted for dual OS:
 1. Capture real morning sessions → mine → approve → schedule.
 2. Run the `ledger-review` skill weekly; approve/reject proposals.
 3. Add runners the review agent finds (earnings calendar, etc.).
-4. Deferred: local open-source model tier for confidential notes.
+4. ~~Deferred: local open-source model tier for confidential notes.~~ Done
+   2026-07-20: `note_digest` accepts `destination="qwen"` (local model) which may
+   include `confidential` notes; a hard gate (`assert_destination_allowed` in
+   `synthesize.py`) now enforces the egress ceiling at every model call —
+   external models cap at `internal`, local at `confidential`, `restricted`
+   never egresses.

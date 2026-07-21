@@ -12,7 +12,26 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from .ledger import Ledger
 from .redact import build_synthesis_prompt
-from .schema import Event, Sensitivity, Surface
+from .schema import Event, Sensitivity, Surface, sensitivity_allows_egress
+
+# Destinations whose model runs on this machine; everything else (including
+# unknown strings, which run_synthesis routes to Anthropic) counts as external.
+LOCAL_DESTINATIONS = {"qwen", "local_stub"}
+
+
+def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -> None:
+    """Hard gate at the model-call boundary: external models (Anthropic/Bedrock)
+    accept an egress ceiling of `internal` at most; local destinations may go up
+    to `confidential`; `restricted` never goes to any model."""
+    is_local = destination in LOCAL_DESTINATIONS
+    ceiling = Sensitivity.CONFIDENTIAL if is_local else Sensitivity.INTERNAL
+    if not sensitivity_allows_egress(max_sensitivity, ceiling):
+        raise RuntimeError(
+            f"Sensitivity ceiling '{max_sensitivity.value}' is not allowed for "
+            f"destination '{destination}'. External models take 'internal' or below; "
+            f"'confidential' must stay on a local destination ({', '.join(sorted(LOCAL_DESTINATIONS))}); "
+            f"'restricted' content never goes to any model."
+        )
 
 # Per-request / per-job override so each Workflow user can point at their own
 # Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
@@ -68,6 +87,7 @@ def run_synthesis(
     dry_run: bool = False,
     destination: str = "anthropic",
 ) -> Dict[str, Any]:
+    assert_destination_allowed(destination, max_sensitivity)
     context = ledger.session_context_for_synthesis(session_id, max_sensitivity=max_sensitivity)
     prompt = build_synthesis_prompt(context, instruction)
 
@@ -218,9 +238,11 @@ def _call_anthropic_messages(
             "or use an OpenAI-compatible provider under Model."
         ) from exc
 
+    # Per-user Model-tab override, else ANALYST_CLAUDE_MODEL.
+    # (claude-sonnet-4-20250514 is retired.)
     model = (
         (override.get("model") or "").strip()
-        or os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-4-20250514").strip()
+        or os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-5").strip()
     )
     client = anthropic.Anthropic(api_key=api_key)
     kwargs: Dict[str, Any] = {
