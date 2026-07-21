@@ -7,7 +7,7 @@ import json
 import os
 import re
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
@@ -18,6 +18,47 @@ def _h(text: Any) -> str:
     return html.escape("" if text is None else str(text), quote=True)
 
 
+def _get_model_availability(user_id: str = "local") -> List[dict]:
+    """Return list of available/connected models for display."""
+    try:
+        # Try to import model_link registry
+        try:
+            from messenger.model_link import registry as model_registry
+        except ImportError:
+            # Add parent directory to path if needed
+            import sys
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            from messenger.model_link import registry as model_registry
+        
+        reg = model_registry()
+        profile_data = reg.list_profiles(user_id)
+        profiles = profile_data.get("profiles", [])
+        active_id = profile_data.get("active_profile_id")
+        
+        available = []
+        for profile in profiles:
+            if not profile.get("enabled"):
+                continue
+            
+            label = profile.get("label") or profile.get("model", "Unknown")
+            provider_label = profile.get("provider_label", "")
+            is_active = profile.get("id") == active_id
+            
+            available.append({
+                "label": label,
+                "provider": provider_label,
+                "is_local": profile.get("is_local", False),
+                "is_active": is_active,
+            })
+        
+        return available
+    except Exception:
+        # Silently fail if model registry is not available
+        return []
+
+    
 def _css() -> str:
     return """
     :root {
@@ -314,6 +355,28 @@ def _css() -> str:
     }
     .chat-group:first-child { padding-top: 0.35rem; }
     .chat-link.friend { border-left: 2px solid var(--accent); }
+    .model-status {
+      background: var(--panel); border: 1px solid var(--border);
+      padding: 0.85rem 1rem; margin-bottom: 1rem; border-radius: 4px;
+    }
+    .model-status h4 {
+      margin: 0 0 0.65rem; font-size: 0.82rem; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted); font-weight: 600;
+    }
+    .model-item {
+      display: flex; align-items: center; gap: 0.55rem; padding: 0.5rem 0.65rem;
+      margin-bottom: 0.35rem; border-radius: 3px; font-size: 0.86rem;
+      background: #121820; border: 1px solid var(--border);
+    }
+    .model-item .indicator {
+      width: 0.55rem; height: 0.55rem; border-radius: 50%; flex-shrink: 0;
+      background: var(--open);
+    }
+    .model-item .label { color: var(--text); flex: 1; }
+    .model-item .provider { color: var(--muted); font-size: 0.75rem; }
+    .model-status .empty-state {
+      color: var(--muted); font-size: 0.82rem; padding: 0.5rem 0;
+    }
     .chat-title-row {
       display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: center;
       justify-content: space-between;
@@ -1669,11 +1732,42 @@ def _chats_page(ledger: Ledger, qs: str = "") -> str:
     ritual_id = selected.get("ritual_id") if not is_friend and not is_qwen else None
     layout_class = "chat-layout friend-research" if is_friend else "chat-layout"
 
+    # Get model availability status
+    user_id = os.environ.get("ANALYST_USER_ID", "local")
+    available_models = _get_model_availability(user_id)
+    
+    model_status_html = ""
+    if available_models:
+        model_items = []
+        for model in available_models:
+            label = _h(model["label"])
+            provider = _h(model["provider"])
+            is_local = model.get("is_local", False)
+            location = "local" if is_local else "cloud"
+            
+            # Create a friendly status message
+            status_msg = f"{label} is connected"
+            if provider and provider != label:
+                status_msg = f"{provider} ({label}) is in this Chat"
+            
+            model_items.append(
+                f'<div class="model-item">'
+                f'<span class="indicator"></span>'
+                f'<span class="label">{_h(status_msg)}</span>'
+                f'</div>'
+            )
+        model_status_html = f"""
+  <div class="model-status">
+    <h4>Available Models</h4>
+    {''.join(model_items)}
+  </div>"""
+
     body = f"""
   <p class="sub">Chat with your friend, call a Qwen personality, or talk to workflow agents.
     Friend/Qwen traffic stays on the cloud messenger; agent threads stay local.
     Try <code>@Qwen</code> or <code>@Qwen-Contrarian</code>; add
     <code>research …</code> for background web research.</p>
+  {model_status_html}
   <div class="{layout_class}">
     <aside class="chat-sidebar">{''.join(links)}</aside>
     <section class="chat-main">
