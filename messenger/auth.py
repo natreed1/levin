@@ -1,4 +1,4 @@
-"""Invite-token gate and signed session cookies."""
+"""Account auth (signup/login) + signed session cookies + room invite tokens."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ import hmac
 import os
 import secrets
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 COOKIE_NAME = "messenger_session"
 MAX_NAME_LEN = 40
+MAX_EMAIL_LEN = 254
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+_PBKDF2_ITERATIONS = 260_000
 
 
 def invite_token() -> str:
@@ -33,7 +35,7 @@ def session_secret() -> str:
 
 
 def _serializer() -> URLSafeTimedSerializer:
-    return URLSafeTimedSerializer(session_secret(), salt="messenger-session-v1")
+    return URLSafeTimedSerializer(session_secret(), salt="messenger-session-v2")
 
 
 def invite_ok(candidate: str) -> bool:
@@ -50,10 +52,67 @@ def normalize_name(name: str) -> Optional[str]:
     return cleaned
 
 
-def mint_session(name: str, room_id: str = "legacy") -> str:
-    return _serializer().dumps(
-        {"name": name, "room_id": room_id or "legacy", "iat": int(time.time())}
+def normalize_email(email: str) -> Optional[str]:
+    cleaned = (email or "").strip().lower()
+    if not cleaned or len(cleaned) > MAX_EMAIL_LEN or "@" not in cleaned:
+        return None
+    local, _, domain = cleaned.partition("@")
+    if not local or not domain or "." not in domain:
+        return None
+    return cleaned
+
+
+def hash_password(password: str) -> str:
+    """PBKDF2-SHA256 password hash (stdlib; no bcrypt C extension required)."""
+    if not password or len(password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    if len(password) > 256:
+        raise ValueError("password too long")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS
     )
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algo, iters_s, salt_hex, digest_hex = (password_hash or "").split("$", 3)
+    except ValueError:
+        return False
+    if algo != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(iters_s)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except ValueError:
+        return False
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256", (password or "").encode("utf-8"), salt, iterations
+    )
+    return hmac.compare_digest(candidate, expected)
+
+
+def mint_session(
+    name: str,
+    room_id: str = "legacy",
+    *,
+    can_create: bool = False,
+    user_id: Optional[str] = None,
+    email: Optional[str] = None,
+) -> str:
+    payload: Dict[str, Any] = {
+        "name": name,
+        "room_id": room_id or "legacy",
+        "can_create": bool(can_create),
+        "iat": int(time.time()),
+    }
+    if user_id:
+        payload["user_id"] = str(user_id)
+    if email:
+        payload["email"] = str(email)
+    return _serializer().dumps(payload)
 
 
 def read_identity(cookie_value: Optional[str]) -> Optional[Dict[str, str]]:
@@ -71,7 +130,18 @@ def read_identity(cookie_value: Optional[str]) -> Optional[Dict[str, str]]:
     room_id = str(data.get("room_id") or "legacy").strip()
     if not room_id or len(room_id) > 80:
         return None
-    return {"name": name, "room_id": room_id}
+    out: Dict[str, str] = {
+        "name": name,
+        "room_id": room_id,
+        "can_create": "1" if data.get("can_create") else "",
+    }
+    user_id = str(data.get("user_id") or "").strip()
+    if user_id:
+        out["user_id"] = user_id
+    email = str(data.get("email") or "").strip()
+    if email:
+        out["email"] = email
+    return out
 
 
 def read_session(cookie_value: Optional[str]) -> Optional[str]:
@@ -82,3 +152,23 @@ def read_session(cookie_value: Optional[str]) -> Optional[str]:
 
 def new_csrf() -> str:
     return secrets.token_urlsafe(16)
+
+
+def new_user_id() -> str:
+    # URL-safe but must start with alphanumeric for path safety.
+    return "u" + secrets.token_hex(12)
+
+
+def new_auth_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_auth_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def utc_expiry_iso(*, hours: float = 24.0) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    when = datetime.now(timezone.utc) + timedelta(hours=hours)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")

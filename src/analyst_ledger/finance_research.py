@@ -26,8 +26,20 @@ COMPANY_ALIASES = {
     "alphabet": "GOOGL",
     "google": "GOOGL",
     "meta": "META",
+    "facebook": "META",
     "tesla": "TSLA",
     "amd": "AMD",
+    "alibaba": "BABA",
+    "netflix": "NFLX",
+    "disney": "DIS",
+    "intel": "INTC",
+    "broadcom": "AVGO",
+    "palantir": "PLTR",
+    "coinbase": "COIN",
+    "berkshire": "BRK-B",
+    "walmart": "WMT",
+    "jpmorgan": "JPM",
+    "boeing": "BA",
 }
 OUTLOOK_RE = re.compile(
     r"\b(?:outlook|buy|sell|forecast|guidance|consensus|price\s+target|"

@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Analyst Ledger Capture",
-  "version": "0.4.3",
-  "description": "Capture research browsing to Analyst Ledger. Deep research, Verge/Xinhua/Google News presets, denylist, excludes.",
+  "version": "0.5.0",
+  "description": "Capture research browsing to Workflow/Analyst Ledger. Honors Tracking capture scope (active/all/selected tabs).",
   "permissions": ["storage", "tabs", "webNavigation"],
   "host_permissions": [
     "http://127.0.0.1:8788/*",
     "http://localhost:8788/*",
+    "http://127.0.0.1:8790/*",
+    "http://localhost:8790/*",
     "https://finance.yahoo.com/*",
     "https://*.finance.yahoo.com/*",
     "https://*/*",

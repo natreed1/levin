@@ -78,6 +78,20 @@
     </div>
   </div>
 
+  <h2>Workflow session</h2>
+  <div class="tab-card">
+    <div class="tab-state"><span class="dot off" id="scopeDot"></span><span id="scopeState">No active session</span></div>
+    <p class="hint" id="scopeHint">Start Tracking in Workflow to set Active / All / Selected tabs.</p>
+  </div>
+
+  <h2>Selected tabs</h2>
+  <p class="hint">Used when Tracking scope is <strong>Selected tabs</strong>.</p>
+  <div class="panel" id="selectedTabList"><div class="hint">Loading…</div></div>
+  <div class="row2">
+    <button class="secondary" type="button" id="refreshTabs">Refresh tabs</button>
+    <button class="secondary" type="button" id="clearSelected">Clear selection</button>
+  </div>
+
   <h2>Research sites (auto)</h2>
   <p class="hint">Off = skip auto-capture for that family. Manual Capture still works unless excluded/denied.</p>
   <div class="panel" id="siteList"></div>

@@ -3,75 +3,370 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Messenger</title>
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <title>Workflow</title>
+  <link rel="stylesheet" href="/static/style.css?v=30" />
 </head>
 <body>
-  <div id="app">
-    <section id="join-panel" class="panel hidden">
-      <h1>Messenger</h1>
-      <p class="sub">Join a shared room, or create a new room and send its link to a friend.</p>
-      <div class="room-tabs">
-        <button type="button" id="show-join" class="active">Join room</button>
-        <button type="button" id="show-create" class="ghost">Create room</button>
+  <div id="auth-screen" class="auth-screen hidden">
+    <div class="auth-card">
+      <h1>Workflow</h1>
+      <p class="sub">Rooms · Agent threads · Automations · Review · Tracking</p>
+      <div class="room-tabs auth-tabs">
+        <button type="button" id="tab-login" class="active">Log in</button>
+        <button type="button" id="tab-signup" class="ghost">Create account</button>
       </div>
-      <form id="join-form">
-        <label>
-          Invite token
-          <input id="invite" name="invite" type="password" autocomplete="off" required />
-        </label>
-        <label>
-          Display name
-          <input id="name" name="name" type="text" maxlength="40" autocomplete="nickname" required />
-        </label>
-        <p id="join-error" class="error" hidden></p>
-        <button type="submit">Join</button>
+      <p id="auth-banner" class="auth-banner muted" hidden></p>
+      <form id="login-form">
+        <label>Email <input id="login-email" type="email" autocomplete="username" required /></label>
+        <label>Password <input id="login-password" type="password" autocomplete="current-password" required /></label>
+        <p id="login-error" class="error" hidden></p>
+        <button type="submit">Log in</button>
+        <p class="auth-links">
+          <button type="button" id="show-forgot-btn" class="linkish">Forgot password?</button>
+          <button type="button" id="resend-verify-btn" class="linkish hidden">Resend verification</button>
+        </p>
       </form>
-      <form id="create-form" class="hidden">
-        <label>
-          Room name
-          <input id="room-title" type="text" maxlength="80" placeholder="Research chat" required />
-        </label>
-        <label>
-          Creator key
-          <input id="creator-invite" type="password" autocomplete="off" required />
-        </label>
-        <label>
-          Your display name
-          <input id="creator-name" type="text" maxlength="40" autocomplete="nickname" required />
-        </label>
-        <p class="sub">The creator key is the server invite. Your friend only receives the generated room link.</p>
-        <p id="create-error" class="error" hidden></p>
-        <button type="submit">Create room</button>
+      <form id="signup-form" class="hidden">
+        <label>Display name <input id="signup-name" type="text" maxlength="40" autocomplete="nickname" required /></label>
+        <label>Email <input id="signup-email" type="email" autocomplete="username" required /></label>
+        <label>Password <input id="signup-password" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <p class="sub">At least 8 characters. We’ll email a verification link before you can log in.</p>
+        <p id="signup-error" class="error" hidden></p>
+        <button type="submit">Create account</button>
       </form>
-    </section>
-
-    <section id="chat-panel" class="panel hidden">
-      <header class="chat-header">
-        <div>
-          <h1>Messenger</h1>
-          <p class="sub"><strong id="room-name">Private room</strong> · signed in as <strong id="who"></strong></p>
-        </div>
-        <div class="header-actions">
-          <button type="button" id="clear-chat" class="ghost danger">Delete chat</button>
-          <button type="button" id="logout" class="ghost">Leave</button>
-        </div>
-      </header>
-      <div id="share-box" class="share-box hidden">
-        <label for="share-url">Send this private room link to your friend</label>
-        <div class="share-row">
-          <input id="share-url" type="text" readonly />
-          <button type="button" id="copy-share">Copy link</button>
-        </div>
-      </div>
-      <div id="messages" class="messages" aria-live="polite"></div>
-      <form id="send-form" class="composer">
-        <input id="body" type="text" maxlength="2000" placeholder="Message… @Qwen or @Qwen-Contrarian" autocomplete="off" />
-        <button type="submit">Send</button>
+      <form id="forgot-form" class="hidden">
+        <label>Email <input id="forgot-email" type="email" autocomplete="username" required /></label>
+        <p class="sub">We’ll send a reset link if an account exists for that address.</p>
+        <p id="forgot-error" class="error" hidden></p>
+        <button type="submit">Send reset link</button>
+        <p class="auth-links"><button type="button" id="forgot-back-btn" class="linkish">Back to log in</button></p>
       </form>
-      <p id="chat-error" class="error" hidden></p>
-    </section>
+      <form id="reset-form" class="hidden">
+        <label>New password <input id="reset-password" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <label>Confirm password <input id="reset-password2" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <p id="reset-error" class="error" hidden></p>
+        <button type="submit">Update password</button>
+      </form>
+      <details class="guest-join">
+        <summary>Join a room with an invite link (guest)</summary>
+        <form id="guest-join-form">
+          <label>Invite token <input id="guest-invite" type="password" autocomplete="off" /></label>
+          <label>Display name <input id="guest-name" type="text" maxlength="40" /></label>
+          <p id="guest-error" class="error" hidden></p>
+          <button type="submit" class="ghost">Join room</button>
+        </form>
+      </details>
+    </div>
   </div>
-  <script src="/static/app.js?v=4"></script>
+
+  <div id="shell" class="shell hidden">
+    <aside class="rail">
+      <div class="rail-brand">
+        <strong>Workflow</strong>
+        <span id="who-label" class="muted"></span>
+      </div>
+      <nav class="rail-nav" aria-label="Primary">
+        <button type="button" class="nav-btn active" data-tab="chats">Chats</button>
+        <button type="button" class="nav-btn" data-tab="automations">Automations</button>
+        <button type="button" class="nav-btn" data-tab="review">Review</button>
+        <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
+        <button type="button" class="nav-btn" data-tab="model">Model</button>
+      </nav>
+      <div class="rail-foot">
+        <button type="button" id="logout-btn" class="ghost">Log out</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- CHATS -->
+      <section id="tab-chats" class="tab-panel">
+        <div class="chats-layout">
+          <aside class="thread-rail">
+            <div class="rail-section people">
+              <header class="section-head">
+                <h2>Rooms</h2>
+                <button type="button" id="new-room-btn" class="ghost tiny" title="Create room">+</button>
+              </header>
+              <ul id="people-list" class="thread-list"></ul>
+            </div>
+            <div class="rail-section agents">
+              <header class="section-head">
+                <h2>Agents</h2>
+              </header>
+              <ul id="agents-list" class="thread-list"></ul>
+            </div>
+          </aside>
+          <div class="chat-stage">
+            <header class="stage-header">
+              <div>
+                <p class="eyebrow" id="stage-kind">Room</p>
+                <h1 id="stage-title">Select a chat</h1>
+              </div>
+              <div class="header-actions">
+                <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
+                <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
+                <button type="button" id="specialist-idea-btn" class="ghost hidden">Ideas</button>
+                <button type="button" id="specialist-stop-btn" class="ghost danger hidden">Stop</button>
+                <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
+              </div>
+            </header>
+            <div id="specialist-run-banner" class="run-banner hidden" role="status">
+              <span id="specialist-run-text">Specialists running — safe to leave this room.</span>
+              <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
+            </div>
+            <div id="share-box" class="share-box hidden">
+              <label for="share-url">Invite link</label>
+              <div class="share-row">
+                <input id="share-url" type="text" readonly />
+                <button type="button" id="copy-share">Copy</button>
+              </div>
+            </div>
+            <div id="messages" class="messages" aria-live="polite"></div>
+            <form id="send-form" class="composer">
+              <input id="body" type="text" maxlength="2000" placeholder="Message… @Qwen or @workflow ritual_id" autocomplete="off" disabled />
+              <button type="submit" disabled>Send</button>
+            </form>
+            <p id="chat-error" class="error" hidden></p>
+          </div>
+        </div>
+
+        <dialog id="new-room-dialog">
+          <form id="new-room-form" method="dialog">
+            <h3>New room</h3>
+            <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
+            <fieldset class="scope-fieldset">
+              <legend>Type</legend>
+              <label class="scope-option"><input type="radio" name="room-kind" value="people" checked /> Shared room</label>
+              <label class="scope-option"><input type="radio" name="room-kind" value="specialist" /> Specialist workshop</label>
+            </fieldset>
+            <div id="specialist-picker" class="hidden">
+              <p class="muted tiny-hint">Pick at least two sides. They’ll present recent work, debate a topic, and synthesize ideas.</p>
+              <div id="specialist-checkboxes" class="specialist-checks"></div>
+            </div>
+            <div class="dialog-actions">
+              <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
+              <button type="submit">Create</button>
+            </div>
+            <p id="new-room-error" class="error" hidden></p>
+          </form>
+        </dialog>
+        <dialog id="debate-dialog">
+          <form id="debate-form" method="dialog">
+            <h3 id="debate-dialog-title">Specialist debate</h3>
+            <label>Topic / question
+              <input id="debate-topic" type="text" maxlength="400" placeholder="e.g. Is NVDA’s data-center growth still under-appreciated?" required />
+            </label>
+            <label id="debate-rounds-wrap">Rounds
+              <select id="debate-rounds">
+                <option value="1">1 — single pass</option>
+                <option value="2" selected>2 — open + rebuttal</option>
+                <option value="3">3 — open, rebuttal, close</option>
+                <option value="4">4</option>
+                <option value="5">5 (max)</option>
+              </select>
+            </label>
+            <label id="debate-loop-wrap" class="scope-option">
+              <input type="checkbox" id="debate-continuous" />
+              Loop until I stop
+            </label>
+            <p class="muted tiny-hint" id="debate-rounds-hint">Each round: non-synthesizers speak in turn, then synthesizer closes once at the end. Safe to leave the room — turns keep posting.</p>
+            <p class="muted tiny-hint hidden" id="debate-loop-hint">They keep debating in the background until you hit Stop (safety cap 20 rounds). You can switch chats or close the tab.</p>
+            <div class="dialog-actions">
+              <button type="button" id="debate-cancel" class="ghost">Cancel</button>
+              <button type="submit">Start</button>
+            </div>
+            <p id="debate-error" class="error" hidden></p>
+          </form>
+        </dialog>
+      </section>
+
+      <!-- AUTOMATIONS -->
+      <section id="tab-automations" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Control</p>
+            <h1>Automations</h1>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="mine-btn" class="ghost">Mine</button>
+            <button type="button" id="refresh-autos-btn" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="data-table" id="autos-table">
+            <thead>
+              <tr>
+                <th>Ritual</th>
+                <th>Status</th>
+                <th>Runner</th>
+                <th>Schedule</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="autos-empty" class="empty muted">No automations yet. Mine from tracked sessions or create drafts from the local ledger tools.</p>
+        <p id="autos-error" class="error" hidden></p>
+      </section>
+
+      <!-- REVIEW -->
+      <section id="tab-review" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Proposals</p>
+            <h1>Review</h1>
+          </div>
+          <div class="header-actions">
+            <label class="inline-note">Days
+              <select id="review-days">
+                <option value="7">7</option>
+                <option value="14" selected>14</option>
+                <option value="21">21</option>
+              </select>
+            </label>
+            <button type="button" id="run-review-btn">Run review</button>
+            <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <p class="sub muted">Claude (or a local stub) mines sessions and chat gaps into draft automations. Approve here — nothing runs until you do.</p>
+        <h2 class="section-title">Open proposals</h2>
+        <div class="table-wrap">
+          <table class="data-table" id="review-proposals-table">
+            <thead>
+              <tr>
+                <th>Ritual</th>
+                <th>Source</th>
+                <th>Runner</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="review-empty" class="empty muted">No open proposals. Run a review after some chat or tracking activity.</p>
+        <h2 class="section-title">Latest memo</h2>
+        <pre id="review-memo" class="review-memo muted">(no reviews yet)</pre>
+        <p id="review-status" class="muted"></p>
+        <p id="review-error" class="error" hidden></p>
+      </section>
+
+      <!-- TRACKING -->
+      <section id="tab-tracking" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Data</p>
+            <h1>Tracking</h1>
+          </div>
+        </header>
+        <div class="cards">
+          <div class="card">
+            <h3>Active session</h3>
+            <p id="active-session" class="muted">None</p>
+            <p id="active-scope" class="muted tiny-hint" hidden></p>
+            <fieldset id="capture-scope-fieldset" class="scope-fieldset">
+              <legend>Capture scope</legend>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="active_tab" checked /> Active tab</label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="all_tabs" /> All open tabs</label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs <span class="muted">(pick in extension)</span></label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="research_sites" /> Research sites only</label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="notes_only" /> Notes only</label>
+            </fieldset>
+            <label class="inline-note">Title
+              <input id="session-title" type="text" placeholder="Research session" value="Research session" />
+            </label>
+            <div class="card-actions">
+              <button type="button" id="start-session-btn">Start</button>
+              <button type="button" id="end-session-btn" class="ghost">End</button>
+            </div>
+            <label class="inline-note">Note
+              <input id="session-note" type="text" placeholder="Optional note…" />
+            </label>
+            <button type="button" id="add-note-btn" class="ghost tiny">Add note</button>
+            <p class="muted tiny-hint">Browser scopes need the Capture extension pointed at this app (:8790) while you stay signed in.</p>
+          </div>
+          <div class="card">
+            <h3>Summary</h3>
+            <ul id="summary-list" class="summary-list"></ul>
+          </div>
+        </div>
+        <h2 class="section-title">Recent sessions</h2>
+        <div class="table-wrap">
+          <table class="data-table" id="sessions-table">
+            <thead>
+              <tr><th>Title</th><th>Surface</th><th>Status</th><th>Started</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h2 class="section-title">Recent events</h2>
+        <ul id="events-list" class="events-list"></ul>
+        <p id="track-error" class="error" hidden></p>
+      </section>
+
+      <!-- MODEL (per-user providers: Claude, GPT, Ollama, …) -->
+      <section id="tab-model" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Your keys</p>
+            <h1>Model</h1>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="model-refresh-btn" class="ghost">Refresh</button>
+            <button type="button" id="model-unlink-btn" class="ghost danger">Disconnect</button>
+          </div>
+        </header>
+        <p class="muted" style="max-width:42rem;margin:0 1.25rem 1rem;">
+          Specialists use <strong>your</strong> provider — Claude, GPT, OpenRouter, or a local Ollama tunnel.
+          Keys stay on this account; other users bring their own.
+        </p>
+        <div class="cards">
+          <div class="card">
+            <h3>Status</h3>
+            <p id="model-status-line" class="muted">Not linked</p>
+            <p id="model-models-line" class="muted tiny-hint" hidden></p>
+          </div>
+          <div class="card">
+            <h3>Connect</h3>
+            <label>Provider
+              <select id="model-provider">
+                <option value="anthropic">Claude (Anthropic)</option>
+                <option value="openai">GPT (OpenAI)</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="ollama">Local Ollama (tunnel)</option>
+                <option value="custom">Custom OpenAI-compatible</option>
+              </select>
+            </label>
+            <p id="model-provider-hint" class="muted tiny-hint"></p>
+            <label id="model-base-url-wrap">Base URL
+              <input id="model-base-url" type="url" placeholder="https://….trycloudflare.com/v1" autocomplete="off" />
+            </label>
+            <label>API key
+              <input id="model-api-key" type="password" placeholder="sk-… or gateway token" autocomplete="off" />
+            </label>
+            <label>Model
+              <input id="model-id" type="text" list="model-id-suggestions" value="claude-sonnet-4-20250514" />
+              <datalist id="model-id-suggestions"></datalist>
+            </label>
+            <div class="card-actions">
+              <button type="button" id="model-link-btn">Save &amp; test</button>
+            </div>
+            <p id="model-error" class="error" hidden></p>
+          </div>
+          <div class="card" id="model-ollama-help">
+            <h3>Local Ollama only</h3>
+            <ol class="muted tiny-hint" style="margin:0;padding-left:1.2rem;line-height:1.5;">
+              <li>Install Ollama and pull <code>qwen3:8b</code></li>
+              <li>From the Workflow repo: <code>./scripts/secure_qwen_tunnel.sh</code></li>
+              <li>Paste the printed HTTPS <code>/v1</code> URL + token here</li>
+              <li>Leave the tunnel running while you debate</li>
+            </ol>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=30"></script>
 </body>
 </html>

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import threading
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
@@ -1595,7 +1597,7 @@ def _chats_page(ledger: Ledger, qs: str = "") -> str:
       </div>
       <div class="chat-messages" id="chat-messages">{bubbles}</div>
       <form class="chat-compose" id="chat-form">
-        <textarea id="chat-input" placeholder="Message your friend… @Qwen or @Qwen-Contrarian"
+        <textarea id="chat-input" placeholder="Message… @Qwen, @Qwen-Contrarian, or @workflow ritual_id"
           required></textarea>
         <button class="primary" type="submit">Send</button>
         <button id="cancel-job" type="button" style="display:none">Cancel</button>
@@ -1778,7 +1780,7 @@ def _chats_page(ledger: Ledger, qs: str = "") -> str:
     }}
   }}
 
-  async function pollJob() {{
+  async function pollJob(doneHref) {{
     if (!activeJob) return;
     const status = document.getElementById('job-status');
     const cancel = document.getElementById('cancel-job');
@@ -1790,7 +1792,7 @@ def _chats_page(ledger: Ledger, qs: str = "") -> str:
       if (['completed', 'failed', 'cancelled'].includes(job.status)) {{
         if (cancel) cancel.style.display = 'none';
         if (job.status === 'completed') {{
-          location.href = '/chats?thread_id=' + encodeURIComponent(THREAD_ID);
+          location.href = doneHref || ('/chats?thread_id=' + encodeURIComponent(THREAD_ID));
         }} else if (status) {{
           status.textContent = ' · ' + (job.error || job.status);
         }}
@@ -1900,7 +1902,17 @@ def _chats_page(ledger: Ledger, qs: str = "") -> str:
         if (!res.ok) throw new Error(data.error || res.status);
         input.value = '';
         if (IS_FRIEND) {{
-          if (/@qwen\\b/i.test(content)) {{
+          if (data.workflow && data.workflow.status === 'blocked') {{
+            document.getElementById('job-status').textContent =
+              ' · Workflow blocked: ' + (data.workflow.error || 'not approved');
+          }} else if (data.workflow && data.workflow.job_id) {{
+            document.getElementById('job-status').textContent = ' · Workflow running…';
+            activeJob = data.workflow.job_id;
+            const wfRitual = (data.workflow.ritual_id
+              || (content.match(/@workflow\\s+([\\w-]+)/i) || [])[1]
+              || '');
+            await pollJob(wfRitual ? ('/chats?ritual_id=' + encodeURIComponent(wfRitual)) : null);
+          }} else if (/@qwen\\b/i.test(content)) {{
             document.getElementById('job-status').textContent = ' · Qwen personality thinking…';
             await tickQwen();
           }}
@@ -2766,6 +2778,7 @@ def _api_automations_action(
 
 def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
     from .messenger_bridge import FRIEND_THREAD_ID, send_friend_message
+    from .rituals import _validate_ritual_id, list_automations
     from .router import execute_routed_run, route_message, router_enabled
     from .workflow_engine import MasterCoordinator, WorkflowEngine
 
@@ -2774,7 +2787,45 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
     if not content:
         raise ValueError("message content is required")
     if thread_id == FRIEND_THREAD_ID:
-        return send_friend_message(content)
+        sent = send_friend_message(content)
+        # Fly/Friend chat can reference an approved workflow: @workflow <ritual_id>
+        match = re.search(
+            r"(?<!\w)@workflow\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,120})\b",
+            content,
+            flags=re.I,
+        )
+        if not match:
+            return sent
+        ritual_id = _validate_ritual_id(match.group(1))
+        approved = {
+            a["ritual_id"]
+            for a in list_automations(ledger)
+            if a.get("approved") and a.get("enabled", True)
+        }
+        if ritual_id not in approved:
+            sent["workflow"] = {
+                "status": "blocked",
+                "ritual_id": ritual_id,
+                "error": (
+                    f"Workflow '{ritual_id}' is not approved/enabled. "
+                    "Approve it in Automations first."
+                ),
+            }
+            return sent
+        job = jobs.start(
+            f"workflow:{ritual_id}",
+            "workflow_chat",
+            lambda job: WorkflowEngine(ledger).run(
+                ritual_id,
+                request=content,
+                stub=False,
+                job=job,
+            ),
+        )
+        public = job.public()
+        public["ritual_id"] = ritual_id
+        sent["workflow"] = public
+        return sent
     session = ledger.get_session(thread_id)
     if not session or session.surface != "chat":
         raise RuntimeError(f"Chat thread '{thread_id}' not found.")
@@ -3256,9 +3307,69 @@ def make_app(ledger: Optional[Ledger] = None):
     return app
 
 
+_QWEN_POLLER_STARTED = False
+
+
+def _start_qwen_poller(interval: float = 3.0) -> None:
+    """Background thread that ticks Qwen across all rooms.
+
+    This makes Qwen answer in any room without the Friend tab being open. It is a
+    no-op unless the messenger is configured and Qwen has been enabled.
+    """
+    global _QWEN_POLLER_STARTED
+    if _QWEN_POLLER_STARTED:
+        return
+    if os.environ.get("ANALYST_QWEN_POLLER", "1").strip() in {"0", "false", "no"}:
+        return
+    _QWEN_POLLER_STARTED = True
+
+    debug = os.environ.get("ANALYST_QWEN_POLLER_DEBUG", "").strip() not in {
+        "",
+        "0",
+        "false",
+        "no",
+    }
+
+    def _loop() -> None:
+        import time as _time
+        import traceback as _tb
+
+        from .friend_qwen import load_state, reset_inflight_research, tick_qwen
+        from .messenger_bridge import messenger_configured
+
+        try:
+            reset_inflight_research()
+        except Exception:  # noqa: BLE001
+            pass
+        if debug:
+            print("qwen-poller: loop started", flush=True)
+        beats = 0
+        while True:
+            try:
+                if messenger_configured() and load_state().get("enabled"):
+                    res = tick_qwen()
+                    if debug and res.get("replied"):
+                        print(
+                            f"qwen-poller: replied in {res.get('room_id')}",
+                            flush=True,
+                        )
+            except Exception:  # noqa: BLE001
+                if debug:
+                    print("qwen-poller: error\n" + _tb.format_exc(), flush=True)
+            beats += 1
+            if debug and beats % 20 == 0:
+                print(f"qwen-poller: alive ({beats} ticks)", flush=True)
+            _time.sleep(max(1.0, interval))
+
+    thread = threading.Thread(target=_loop, name="qwen-poller", daemon=True)
+    thread.start()
+
+
 def serve(host: str = "127.0.0.1", port: int = 8788) -> None:
     app = make_app()
+    _start_qwen_poller()
     httpd = make_server(host, port, app)
     print(f"Analyst ledger dashboard: http://{host}:{port}/")
     print(f"Automations: http://{host}:{port}/automations")
+    print("Qwen room poller: on (answers @Qwen in every room)")
     httpd.serve_forever()

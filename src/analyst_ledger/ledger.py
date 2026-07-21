@@ -142,26 +142,41 @@ class Ledger:
 
     # --- active session state file ---
 
-    def get_active_session_id(self) -> Optional[str]:
+    def get_active_session_state(self) -> Dict[str, Any]:
         path = state_path()
         if not path.exists():
-            return None
+            return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return None
-        return data.get("session_id")
+            return {}
+        return data if isinstance(data, dict) else {}
 
-    def set_active_session_id(self, session_id: Optional[str]) -> None:
+    def get_active_session_id(self) -> Optional[str]:
+        return self.get_active_session_state().get("session_id")
+
+    def get_capture_scope(self) -> Optional[str]:
+        scope = self.get_active_session_state().get("capture_scope")
+        return str(scope) if scope else None
+
+    def set_active_session_id(
+        self,
+        session_id: Optional[str],
+        *,
+        capture_scope: Optional[str] = None,
+    ) -> None:
         path = state_path()
         if session_id is None:
             if path.exists():
                 path.unlink()
             return
-        path.write_text(
-            json.dumps({"session_id": session_id, "updated_at": utc_now_iso()}, indent=2),
-            encoding="utf-8",
-        )
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "updated_at": utc_now_iso(),
+        }
+        if capture_scope:
+            payload["capture_scope"] = capture_scope
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def get_session(self, session_id: str) -> Optional[Session]:
         with self._connect() as conn:
@@ -189,6 +204,7 @@ class Ledger:
         sensitivity: str = Sensitivity.INTERNAL.value,
         desk_tag: Optional[str] = None,
         session_id: Optional[str] = None,
+        capture_scope: Optional[str] = None,
     ) -> Session:
         parse_surface(surface)
         parse_sensitivity(sensitivity)
@@ -224,19 +240,22 @@ class Ledger:
                     session.started_at,
                 ),
             )
+        start_payload: Dict[str, Any] = {
+            "title": title,
+            "desk_tag": desk_tag,
+        }
+        if capture_scope:
+            start_payload["capture_scope"] = capture_scope
         self.append_event(
             Event(
                 type="session_start",
                 surface=surface,
                 session_id=sid,
                 sensitivity=sensitivity,
-                payload={
-                    "title": title,
-                    "desk_tag": desk_tag,
-                },
+                payload=start_payload,
             )
         )
-        self.set_active_session_id(sid)
+        self.set_active_session_id(sid, capture_scope=capture_scope)
         return session
 
     def start_background_session(

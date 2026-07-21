@@ -102,6 +102,39 @@ def test_claude_planner_filters_restricted_and_writes_unapproved(ledger: Ledger)
     assert spec["proposed_by"] == "claude_api"
 
 
+def test_public_web_search_action_stub(ledger: Ledger):
+    path = ritual_specs_dir() / "osint_stub.json"
+    path.write_text(
+        json.dumps(
+            {
+                "name": "osint_stub",
+                "version": 1,
+                "approved": True,
+                "enabled": True,
+                "model": "claude",
+                "runner": "note_digest",
+                "watchlist": [],
+                "steps": [{"public_web_search": ["Iran updates"]}],
+                "budget": {"max_steps": 2, "max_minutes": 1, "max_tokens": 8000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    replies = iter(
+        [
+            '{"action":"public_web_search"}',
+            "Summary\n\nPublic search returned stub headlines. Next check: verify sources.",
+        ]
+    )
+    gateway = ClaudeGateway(
+        ledger, responder=lambda _messages, _max_tokens, _system: next(replies)
+    )
+    result = WorkflowEngine(ledger, gateway).run(
+        "osint_stub", request="Iran updates", stub=True
+    )
+    assert result["status"] == "ok"
+
+
 def test_workflow_run_creates_chat_and_master_handoff(ledger: Ledger):
     source = ledger.start_session("Research notes", surface=Surface.NOTES.value)
     ledger.add_note("Margins need a follow-up", session_id=source.session_id)

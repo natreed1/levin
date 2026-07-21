@@ -1,429 +1,1260 @@
 (() => {
-  const joinPanel = document.getElementById("join-panel");
-  const chatPanel = document.getElementById("chat-panel");
-  const joinForm = document.getElementById("join-form");
-  const createForm = document.getElementById("create-form");
-  const joinError = document.getElementById("join-error");
-  const createError = document.getElementById("create-error");
-  const chatError = document.getElementById("chat-error");
-  const messagesEl = document.getElementById("messages");
-  const sendForm = document.getElementById("send-form");
-  const bodyInput = document.getElementById("body");
-  const whoEl = document.getElementById("who");
-  const logoutBtn = document.getElementById("logout");
-  const clearChatBtn = document.getElementById("clear-chat");
-  const inviteInput = document.getElementById("invite");
-  const nameInput = document.getElementById("name");
-  const roomTitleInput = document.getElementById("room-title");
-  const creatorInviteInput = document.getElementById("creator-invite");
-  const creatorNameInput = document.getElementById("creator-name");
-  const showJoinBtn = document.getElementById("show-join");
-  const showCreateBtn = document.getElementById("show-create");
-  const roomNameEl = document.getElementById("room-name");
-  const shareBox = document.getElementById("share-box");
-  const shareUrlInput = document.getElementById("share-url");
-  const copyShareBtn = document.getElementById("copy-share");
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-  let me = null;
-  let currentRoom = "legacy";
-  let ws = null;
-  let reconnectTimer = null;
-  const personalityMentions = ["@Qwen", "@Qwen-Contrarian"];
+  const state = {
+    me: null,
+    tab: "chats",
+    kind: null, // "people" | "agents"
+    roomId: null,
+    threadId: null,
+    rooms: [],
+    threads: [],
+    specialists: [],
+    ws: null,
+    shareUrl: null,
+    debateAction: "debate",
+    resetToken: null,
+    specialistJob: null,
+    specialistPoll: null,
+  };
 
-  function qsInvite() {
-    const params = new URLSearchParams(window.location.search);
-    return (params.get("invite") || "").trim();
-  }
-
-  function qsRoom() {
-    const params = new URLSearchParams(window.location.search);
-    return (params.get("room") || "legacy").trim();
-  }
-
-  function showError(el, msg) {
-    if (!msg) {
-      el.hidden = true;
-      el.textContent = "";
-      return;
-    }
-    el.hidden = false;
-    el.textContent = msg;
+  function show(el) { el && el.classList.remove("hidden"); }
+  function hide(el) { el && el.classList.add("hidden"); }
+  function setError(id, msg) {
+    const el = $(id);
+    if (!el) return;
+    if (msg) { el.textContent = msg; show(el); }
+    else { el.textContent = ""; hide(el); }
   }
 
   function fmtTime(iso) {
     if (!iso) return "";
     try {
-      const d = new Date(iso);
-      return d.toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
-    } catch {
-      return iso;
+      const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+      return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch { return iso; }
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    return { res, data };
+  }
+
+  // --- Auth -----------------------------------------------------------------
+
+  function showAuth() {
+    show($("#auth-screen"));
+    hide($("#shell"));
+  }
+  function showShell() {
+    hide($("#auth-screen"));
+    show($("#shell"));
+    $("#who-label").textContent = state.me?.display_name || state.me?.name || "";
+  }
+
+  function setAuthBanner(msg, ok) {
+    const el = $("#auth-banner");
+    if (!el) return;
+    if (!msg) {
+      el.textContent = "";
+      hide(el);
+      el.classList.remove("ok");
+      return;
+    }
+    el.textContent = msg;
+    el.classList.toggle("ok", !!ok);
+    show(el);
+  }
+
+  function showAuthPanel(which) {
+    const panels = {
+      login: "#login-form",
+      signup: "#signup-form",
+      forgot: "#forgot-form",
+      reset: "#reset-form",
+    };
+    Object.entries(panels).forEach(([key, sel]) => {
+      const el = $(sel);
+      if (!el) return;
+      if (key === which) show(el);
+      else hide(el);
+    });
+    if (which === "login" || which === "signup") {
+      $("#tab-login").classList.toggle("active", which === "login");
+      $("#tab-signup").classList.toggle("active", which === "signup");
+      show($("#tab-login"));
+      show($("#tab-signup"));
     }
   }
 
-  function renderMessage(msg) {
+  $("#tab-login").addEventListener("click", () => {
+    setError("#login-error", "");
+    hide($("#resend-verify-btn"));
+    showAuthPanel("login");
+  });
+  $("#tab-signup").addEventListener("click", () => {
+    setError("#signup-error", "");
+    showAuthPanel("signup");
+  });
+  $("#show-forgot-btn").addEventListener("click", () => {
+    setError("#forgot-error", "");
+    $("#forgot-email").value = $("#login-email").value || "";
+    showAuthPanel("forgot");
+  });
+  $("#forgot-back-btn").addEventListener("click", () => showAuthPanel("login"));
+
+  $("#login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#login-error", "");
+    hide($("#resend-verify-btn"));
+    const email = $("#login-email").value;
+    const { res, data } = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        password: $("#login-password").value,
+      }),
+    });
+    if (!res.ok) {
+      if (data?.error === "email_unverified") {
+        setError("#login-error", data.message || "Verify your email first");
+        show($("#resend-verify-btn"));
+        return;
+      }
+      setError("#login-error", (data && (data.message || data.error)) || "Login failed");
+      return;
+    }
+    await bootstrap();
+  });
+
+  $("#resend-verify-btn").addEventListener("click", async () => {
+    const email = $("#login-email").value.trim();
+    if (!email) {
+      setError("#login-error", "Enter your email first");
+      return;
+    }
+    const { data } = await api("/api/auth/resend-verification", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    let msg = data?.message || "If needed, a new verification email was sent.";
+    if (data?.dev_verify_url) {
+      msg += ` Dev link: ${data.dev_verify_url}`;
+    }
+    setAuthBanner(msg, true);
+  });
+
+  $("#signup-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#signup-error", "");
+    const email = $("#signup-email").value;
+    const { res, data } = await api("/api/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({
+        display_name: $("#signup-name").value,
+        email,
+        password: $("#signup-password").value,
+      }),
+    });
+    if (!res.ok) {
+      setError("#signup-error", (data && (data.message || data.error)) || "Signup failed");
+      return;
+    }
+    let msg = data?.message || "Check your email to verify, then log in.";
+    if (data?.dev_verify_url) {
+      msg += ` Dev link: ${data.dev_verify_url}`;
+    }
+    setAuthBanner(msg, true);
+    $("#login-email").value = email;
+    showAuthPanel("login");
+  });
+
+  $("#forgot-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#forgot-error", "");
+    const email = $("#forgot-email").value;
+    const { res, data } = await api("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    if (!res.ok) {
+      setError("#forgot-error", (data && (data.message || data.error)) || "Request failed");
+      return;
+    }
+    let msg = data?.message || "Check your email for a reset link.";
+    if (data?.dev_reset_url) {
+      msg += ` Dev link: ${data.dev_reset_url}`;
+    }
+    setAuthBanner(msg, true);
+    $("#login-email").value = email;
+    showAuthPanel("login");
+  });
+
+  $("#reset-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#reset-error", "");
+    const password = $("#reset-password").value;
+    const password2 = $("#reset-password2").value;
+    if (password !== password2) {
+      setError("#reset-error", "Passwords do not match");
+      return;
+    }
+    const params = new URLSearchParams(location.search);
+    const token = params.get("reset") || state.resetToken || "";
+    const { res, data } = await api("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    });
+    if (!res.ok) {
+      setError("#reset-error", (data && (data.message || data.error)) || "Reset failed");
+      return;
+    }
+    setAuthBanner(data?.message || "Password updated. Log in.", true);
+    state.resetToken = null;
+    history.replaceState({}, "", "/");
+    showAuthPanel("login");
+  });
+
+  $("#guest-join-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#guest-error", "");
+    const params = new URLSearchParams(location.search);
+    const roomId = params.get("room") || "legacy";
+    const { res, data } = await api("/api/join", {
+      method: "POST",
+      body: JSON.stringify({
+        invite: $("#guest-invite").value || params.get("invite") || "",
+        name: $("#guest-name").value,
+        room_id: roomId,
+      }),
+    });
+    if (!res.ok) {
+      setError("#guest-error", (data && data.error) || "Join failed");
+      return;
+    }
+    await bootstrap();
+  });
+
+  $("#logout-btn").addEventListener("click", async () => {
+    await api("/api/auth/logout", { method: "POST" });
+    await api("/api/logout", { method: "POST" });
+    closeWs();
+    state.me = null;
+    showAuth();
+  });
+
+  // Prefill invite / handle verify + reset deep links
+  (() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("invite")) $("#guest-invite").value = params.get("invite");
+    if (params.get("verified") === "1") {
+      setAuthBanner("Email verified. You can log in.", true);
+      history.replaceState({}, "", "/");
+    }
+    if (params.get("reset")) {
+      state.resetToken = params.get("reset");
+      showAuthPanel("reset");
+      setAuthBanner("Choose a new password.", true);
+    }
+  })();
+
+  // --- Tabs ------------------------------------------------------------------
+
+  $$(".nav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+
+  function switchTab(tab) {
+    state.tab = tab;
+    $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    $$(".tab-panel").forEach((p) => hide(p));
+    show($(`#tab-${tab}`));
+    if (tab === "automations") loadAutomations();
+    if (tab === "review") loadReview();
+    if (tab === "tracking") loadTracking();
+    if (tab === "model") loadModelStatus();
+    if (tab === "chats") refreshChatRails();
+  }
+
+  // --- Chats -----------------------------------------------------------------
+
+  async function refreshChatRails() {
+    if (state.me?.authenticated) {
+      const rooms = await api("/api/rooms/mine");
+      state.rooms = (rooms.data && rooms.data.rooms) || [];
+      const threads = await api("/api/agent-chats");
+      state.threads = (threads.data && threads.data.threads) || [];
+    } else {
+      state.rooms = state.me?.room_id
+        ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
+        : [];
+      state.threads = [];
+    }
+    renderRails();
+  }
+
+  function renderRails() {
+    const people = $("#people-list");
+    const agents = $("#agents-list");
+    people.innerHTML = "";
+    agents.innerHTML = "";
+
+    if (!state.rooms.length) {
+      const li = document.createElement("li");
+      li.innerHTML = '<button type="button" class="muted" disabled>No rooms yet</button>';
+      people.appendChild(li);
+    }
+    state.rooms.forEach((r) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const meta = r.kind === "specialist" ? "Workshop" : "Room";
+      btn.innerHTML = `${escapeHtml(r.title || r.room_id)}<span class="meta">${meta}</span>`;
+      if (state.kind === "people" && state.roomId === r.room_id) {
+        btn.classList.add("active", "people-active");
+      }
+      btn.addEventListener("click", () => selectPeople(r.room_id, r.title, r));
+      li.appendChild(btn);
+      people.appendChild(li);
+    });
+
+    // Always show current room for guests
+    if (!state.me?.authenticated && state.me?.room_id) {
+      // already added above
+    }
+
+    if (!state.threads.length) {
+      const li = document.createElement("li");
+      li.innerHTML = '<button type="button" class="muted" disabled>Master workflows</button>';
+      // still allow click to ensure thread
+      const btn = li.querySelector("button");
+      btn.disabled = false;
+      btn.addEventListener("click", () => selectAgent(null, "Master workflows", true));
+      agents.appendChild(li);
+    }
+    state.threads.forEach((t) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const kind = t.master ? "Master" : "Workflow";
+      btn.innerHTML = `${escapeHtml(t.title || t.session_id)}<span class="meta">${kind}</span>`;
+      if (state.kind === "agents" && state.threadId === t.session_id) {
+        btn.classList.add("active", "agents-active");
+      }
+      btn.addEventListener("click", () => selectAgent(t.session_id, t.title, !!t.master));
+      li.appendChild(btn);
+      agents.appendChild(li);
+    });
+  }
+
+  function currentRoom() {
+    return state.rooms.find((r) => r.room_id === state.roomId) || null;
+  }
+
+  function updateSpecialistActions(room) {
+    const isSpec = !!(room && room.kind === "specialist");
+    ["#specialist-present-btn", "#specialist-debate-btn", "#specialist-idea-btn"].forEach((sel) => {
+      const el = $(sel);
+      if (!el) return;
+      if (isSpec) show(el);
+      else hide(el);
+    });
+    if (!isSpec) {
+      setSpecialistRunUi(null);
+    }
+  }
+
+  function setSpecialistRunUi(job) {
+    const banner = $("#specialist-run-banner");
+    const stopBtn = $("#specialist-stop-btn");
+    const text = $("#specialist-run-text");
+    if (!job || job.status !== "running") {
+      hide(banner);
+      hide(stopBtn);
+      state.specialistJob = null;
+      if (state.specialistPoll) {
+        clearInterval(state.specialistPoll);
+        state.specialistPoll = null;
+      }
+      return;
+    }
+    state.specialistJob = job;
+    const loopBit = job.continuous
+      ? `loop ${job.round_num || "…"}`
+      : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
+    text.textContent = job.continuous
+      ? `Looping “${job.topic || "debate"}” (${loopBit}) — safe to leave; turns keep posting.`
+      : `Running ${job.action} “${job.topic || ""}” (${loopBit}) — safe to leave this room.`;
+    show(banner);
+    show(stopBtn);
+    if (!state.specialistPoll && state.roomId) {
+      state.specialistPoll = setInterval(() => {
+        if (state.roomId) refreshSpecialistStatus(state.roomId);
+      }, 4000);
+    }
+  }
+
+  async function refreshSpecialistStatus(roomId) {
+    if (!roomId) {
+      setSpecialistRunUi(null);
+      return;
+    }
+    const room = currentRoom() || state.rooms.find((r) => r.room_id === roomId);
+    if (room && room.kind !== "specialist") {
+      setSpecialistRunUi(null);
+      return;
+    }
+    const { res, data } = await api(`/api/rooms/${roomId}/specialist-status`);
+    if (!res.ok) {
+      setSpecialistRunUi(null);
+      return;
+    }
+    setSpecialistRunUi(data?.running ? data.job : null);
+  }
+
+  async function stopSpecialistRun() {
+    if (!state.roomId) return;
+    setError("#chat-error", "");
+    const { res, data } = await api(`/api/rooms/${state.roomId}/specialist-stop`, {
+      method: "POST",
+      body: "{}",
+    });
+    if (!res.ok) {
+      setError("#chat-error", data?.error || "Stop failed");
+      return;
+    }
+    if (data?.job) {
+      setSpecialistRunUi({ ...data.job, status: "running", stop_requested: true });
+      $("#specialist-run-text").textContent =
+        "Stop requested — finishing the current turn…";
+    } else {
+      setSpecialistRunUi(null);
+    }
+  }
+
+  async function selectPeople(roomId, title, roomMeta) {
+    closeWs();
+    state.kind = "people";
+    state.roomId = roomId;
+    state.threadId = null;
+    const room = roomMeta || currentRoom() || { room_id: roomId, title, kind: "people" };
+    const isSpec = room.kind === "specialist";
+    $("#stage-kind").textContent = isSpec ? "Workshop" : "Room";
+    $("#stage-title").textContent = title || room.title || "Room";
+    show($("#clear-chat"));
+    updateSpecialistActions(room);
+    enableComposer(
+      true,
+      isSpec
+        ? "Message… or use Present / Debate / Ideas"
+        : "Message… @Qwen or @workflow ritual_id"
+    );
+    renderRails();
+
+    if (state.me?.authenticated) {
+      await api("/api/rooms/select", {
+        method: "POST",
+        body: JSON.stringify({ room_id: roomId }),
+      });
+    }
+    const { data } = await api("/api/messages?limit=200");
+    $("#messages").innerHTML = "";
+    (data?.messages || []).forEach((m) => appendPeopleMessage(m, data?.me));
+    openWs();
+    if (isSpec) await refreshSpecialistStatus(roomId);
+    else setSpecialistRunUi(null);
+  }
+
+  async function selectAgent(threadId, title, isMaster) {
+    closeWs();
+    state.kind = "agents";
+    state.roomId = null;
+    hide($("#clear-chat"));
+    hide($("#share-box"));
+    updateSpecialistActions(null);
+    setSpecialistRunUi(null);
+    $("#stage-kind").textContent = "Agents";
+    $("#stage-title").textContent = title || "Agent";
+    enableComposer(true, "Ask the agent…");
+
+    if (!threadId) {
+      // Ensure master exists
+      const { data } = await api("/api/agent-chats");
+      const master = (data?.threads || []).find((t) => t.master);
+      threadId = master?.session_id;
+      title = master?.title || "Master workflows";
+      state.threads = data?.threads || [];
+      $("#stage-title").textContent = title;
+    }
+    state.threadId = threadId;
+    renderRails();
+    $("#messages").innerHTML = "";
+    if (!threadId) return;
+    const { data } = await api(`/api/agent-chats/messages?thread_id=${encodeURIComponent(threadId)}`);
+    (data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+  }
+
+  function enableComposer(on, placeholder) {
+    const input = $("#body");
+    const btn = $("#send-form button");
+    input.disabled = !on;
+    btn.disabled = !on;
+    if (placeholder) input.placeholder = placeholder;
+  }
+
+  function appendPeopleMessage(msg, me) {
     const div = document.createElement("div");
-    div.className = "msg" + (msg.author === me ? " mine" : "");
-    div.dataset.id = String(msg.id);
+    const mine = msg.author === (me || state.me?.name);
+    const agent = /^(Qwen|Workflow)/i.test(msg.author || "");
+    div.className = "msg" + (mine ? " mine" : "") + (agent ? " agent" : "");
     div.innerHTML =
       '<div class="meta"><span class="author"></span><span class="time"></span></div>' +
       '<div class="body"></div>';
     div.querySelector(".author").textContent = msg.author || "";
     div.querySelector(".time").textContent = fmtTime(msg.created_at);
     div.querySelector(".body").textContent = msg.body || "";
-    return div;
+    $("#messages").appendChild(div);
+    $("#messages").scrollTop = $("#messages").scrollHeight;
   }
 
-  function appendMessage(msg) {
-    if (!msg || msg.id == null) return;
-    if (messagesEl.querySelector(`[data-id="${msg.id}"]`)) return;
-    messagesEl.appendChild(renderMessage(msg));
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+  function appendAgentMessage(ev) {
+    const payload = ev.payload || {};
+    const role = payload.role || "assistant";
+    const div = document.createElement("div");
+    div.className = "msg" + (role === "user" ? " mine" : " agent");
+    div.innerHTML =
+      '<div class="meta"><span class="author"></span><span class="time"></span></div>' +
+      '<div class="body"></div>';
+    div.querySelector(".author").textContent = role;
+    div.querySelector(".time").textContent = fmtTime(ev.ts);
+    div.querySelector(".body").textContent = payload.content || "";
+    $("#messages").appendChild(div);
+    $("#messages").scrollTop = $("#messages").scrollHeight;
   }
 
-  function setHistory(list) {
-    messagesEl.innerHTML = "";
-    (list || []).forEach(appendMessage);
+  function escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
-  function showJoin() {
-    joinPanel.classList.remove("hidden");
-    chatPanel.classList.add("hidden");
-    const invite = qsInvite();
-    if (invite) inviteInput.value = invite;
-  }
-
-  function showChat(name, roomId = "legacy", roomTitle = "Private room", shareUrl = "") {
-    me = name;
-    currentRoom = roomId || "legacy";
-    whoEl.textContent = name;
-    roomNameEl.textContent = roomTitle || "Private room";
-    if (shareUrl) {
-      shareUrlInput.value = shareUrl;
-      shareBox.classList.remove("hidden");
-    } else {
-      shareBox.classList.add("hidden");
-    }
-    joinPanel.classList.add("hidden");
-    chatPanel.classList.remove("hidden");
-    connectWs();
-    bodyInput.focus();
-  }
-
-  function connectWs() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+  $("#send-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#chat-error", "");
+    const body = $("#body").value.trim();
+    if (!body) return;
+    if (state.kind === "people") {
+      if (state.ws && state.ws.readyState === 1) {
+        state.ws.send(JSON.stringify({ type: "message", body }));
+        $("#body").value = "";
+      } else {
+        const { res, data } = await api("/api/messages", {
+          method: "POST",
+          body: JSON.stringify({ body }),
+        });
+        if (!res.ok) {
+          setError("#chat-error", data?.error || "Send failed");
+          return;
+        }
+        $("#body").value = "";
+        if (data?.message) appendPeopleMessage(data.message, data.me);
+      }
       return;
     }
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
-    ws.onmessage = (ev) => {
-      let data;
-      try {
-        data = JSON.parse(ev.data);
-      } catch {
+    if (state.kind === "agents" && state.threadId) {
+      $("#body").value = "";
+      appendAgentMessage({
+        ts: new Date().toISOString(),
+        payload: { role: "user", content: body },
+      });
+      const { res, data } = await api("/api/agent-chats/message", {
+        method: "POST",
+        body: JSON.stringify({ thread_id: state.threadId, content: body }),
+      });
+      if (!res.ok) {
+        setError("#chat-error", data?.error || data?.message || "Send failed");
         return;
       }
+      if (data?.job?.job_id) pollJob(data.job.job_id);
+    }
+  });
+
+  async function pollJob(jobId) {
+    for (let i = 0; i < 90; i++) {
+      await sleep(1500);
+      const { data } = await api(`/api/agent-chats/jobs/${encodeURIComponent(jobId)}`);
+      const job = data?.job;
+      if (!job) continue;
+      if (job.status === "completed" || job.status === "failed") {
+        // Reload thread messages
+        if (state.threadId) {
+          const msgs = await api(
+            `/api/agent-chats/messages?thread_id=${encodeURIComponent(state.threadId)}`
+          );
+          $("#messages").innerHTML = "";
+          (msgs.data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+        }
+        return;
+      }
+    }
+  }
+
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  function openWs() {
+    closeWs();
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    state.ws = ws;
+    ws.onmessage = (ev) => {
+      let data;
+      try { data = JSON.parse(ev.data); } catch { return; }
       if (data.type === "history") {
-        setHistory(data.messages || []);
-      } else if (data.type === "message") {
-        appendMessage(data.message);
-        showError(chatError, "");
+        $("#messages").innerHTML = "";
+        (data.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
+      } else if (data.type === "message" && data.message) {
+        appendPeopleMessage(data.message, state.me?.name);
       } else if (data.type === "cleared") {
-        setHistory([]);
-        showError(chatError, "");
+        $("#messages").innerHTML = "";
       } else if (data.type === "error") {
-        const map = {
-          too_long: "Message is too long.",
-          rate_limited: "Slow down — too many messages.",
-        };
-        showError(chatError, map[data.error] || "Could not send.");
+        setError("#chat-error", data.error);
       }
     };
     ws.onclose = () => {
-      ws = null;
-      if (me) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connectWs, 1500);
-      }
-    };
-    ws.onerror = () => {
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
+      if (state.kind === "people" && state.ws === ws) {
+        setTimeout(() => { if (state.kind === "people") openWs(); }, 1500);
       }
     };
   }
-
-  async function bootstrap() {
-    const invite = qsInvite();
-    if (invite) inviteInput.value = invite;
-
-    try {
-      const res = await fetch("/api/me", { credentials: "same-origin" });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.ok && data.name) {
-          showChat(data.name, data.room_id, data.room_title);
-          return;
-        }
-      }
-    } catch {
-      /* fall through to join */
+  function closeWs() {
+    if (state.ws) {
+      try { state.ws.close(); } catch {}
+      state.ws = null;
     }
-    showJoin();
   }
 
-  function addMentionAutofill(input) {
-    const menu = document.createElement("div");
-    menu.className = "mention-autofill";
-    menu.hidden = true;
-    input.parentElement.appendChild(menu);
-    let matches = [];
-    let active = 0;
-    let tokenStart = -1;
-
-    function closeMenu() {
-      menu.hidden = true;
-      matches = [];
-      tokenStart = -1;
-    }
-
-    function choose(index) {
-      const mention = matches[index];
-      if (!mention || tokenStart < 0) return;
-      const cursor = input.selectionStart;
-      input.value =
-        input.value.slice(0, tokenStart) +
-        mention +
-        " " +
-        input.value.slice(cursor);
-      const next = tokenStart + mention.length + 1;
-      input.setSelectionRange(next, next);
-      closeMenu();
-      input.focus();
-    }
-
-    function refresh() {
-      const cursor = input.selectionStart;
-      const before = input.value.slice(0, cursor);
-      const found = before.match(/(^|\s)(@[\w-]*)$/);
-      if (!found) {
-        closeMenu();
-        return;
-      }
-      const query = found[2].toLowerCase();
-      tokenStart = cursor - found[2].length;
-      matches = personalityMentions.filter((mention) =>
-        mention.toLowerCase().startsWith(query)
-      );
-      if (!matches.length) {
-        closeMenu();
-        return;
-      }
-      active = Math.min(active, matches.length - 1);
-      menu.innerHTML = "";
-      matches.forEach((mention, index) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = index === active ? "active" : "";
-        button.dataset.index = String(index);
-        button.textContent = mention;
-        menu.appendChild(button);
-      });
-      menu.hidden = false;
-    }
-
-    input.addEventListener("input", refresh);
-    input.addEventListener("blur", () => setTimeout(closeMenu, 120));
-    input.addEventListener("keydown", (event) => {
-      if (menu.hidden) return;
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        active =
-          (active +
-            (event.key === "ArrowDown" ? 1 : -1) +
-            matches.length) %
-          matches.length;
-        refresh();
-      } else if (event.key === "Enter" || event.key === "Tab") {
-        event.preventDefault();
-        choose(active);
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        closeMenu();
-      }
-    });
-    menu.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      const button = event.target.closest("button[data-index]");
-      if (button) choose(Number(button.dataset.index));
-    });
-  }
-
-  function showRoomForm(kind) {
-    const creating = kind === "create";
-    joinForm.classList.toggle("hidden", creating);
-    createForm.classList.toggle("hidden", !creating);
-    showJoinBtn.classList.toggle("active", !creating);
-    showCreateBtn.classList.toggle("active", creating);
-    showJoinBtn.classList.toggle("ghost", creating);
-    showCreateBtn.classList.toggle("ghost", !creating);
-    if (creating) {
-      creatorNameInput.value = creatorNameInput.value || nameInput.value;
-      roomTitleInput.focus();
+  $("#clear-chat").addEventListener("click", async () => {
+    if (!confirm("Clear this room’s messages for everyone?")) return;
+    if (state.ws && state.ws.readyState === 1) {
+      state.ws.send(JSON.stringify({ type: "clear" }));
     } else {
-      nameInput.value = nameInput.value || creatorNameInput.value;
-      inviteInput.focus();
+      await api("/api/messages", { method: "DELETE" });
+      $("#messages").innerHTML = "";
     }
+  });
+
+  async function loadSpecialists() {
+    const { res, data } = await api("/api/specialists");
+    if (!res.ok) return;
+    state.specialists = data.specialists || [];
+    const box = $("#specialist-checkboxes");
+    if (!box) return;
+    box.innerHTML = "";
+    const defaults = new Set(["qwen-bull", "qwen-contrarian", "qwen-synthesizer"]);
+    state.specialists.forEach((s) => {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = s.id;
+      cb.checked = defaults.has(s.id);
+      label.appendChild(cb);
+      label.appendChild(
+        document.createTextNode(` ${s.name} (${s.role}) — ${s.mention}`)
+      );
+      box.appendChild(label);
+    });
   }
 
-  showJoinBtn.addEventListener("click", () => showRoomForm("join"));
-  showCreateBtn.addEventListener("click", () => showRoomForm("create"));
+  function selectedRoomKind() {
+    const el = document.querySelector('input[name="room-kind"]:checked');
+    return (el && el.value) || "people";
+  }
 
-  createForm.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    showError(createError, "");
-    try {
-      const res = await fetch("/api/rooms", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: roomTitleInput.value.trim(),
-          creator_invite: creatorInviteInput.value.trim(),
-          name: creatorNameInput.value.trim(),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        const map = {
-          bad_creator_invite: "Creator key is incorrect.",
-          bad_name: "Pick a display name (1–40 characters).",
-          bad_title: "Enter a room name.",
-        };
-        showError(createError, map[data.error] || "Could not create room.");
+  function syncRoomKindUi() {
+    const kind = selectedRoomKind();
+    const picker = $("#specialist-picker");
+    if (!picker) return;
+    if (kind === "specialist") show(picker);
+    else hide(picker);
+  }
+
+  $$('input[name="room-kind"]').forEach((el) => {
+    el.addEventListener("change", syncRoomKindUi);
+  });
+
+  $("#new-room-btn").addEventListener("click", async () => {
+    await loadSpecialists();
+    syncRoomKindUi();
+    $("#new-room-dialog").showModal();
+  });
+  $("#new-room-cancel").addEventListener("click", () => {
+    $("#new-room-dialog").close();
+  });
+  $("#new-room-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#new-room-error", "");
+    const title = $("#new-room-title").value.trim();
+    const kind = selectedRoomKind();
+    const payload = {
+      title,
+      name: state.me?.name || state.me?.display_name,
+      kind,
+    };
+    if (kind === "specialist") {
+      payload.specialists = $$("#specialist-checkboxes input:checked").map((el) => el.value);
+      if (payload.specialists.length < 2) {
+        setError("#new-room-error", "Pick at least two specialists");
         return;
       }
-      if (window.history.replaceState) {
-        window.history.replaceState(
-          {},
-          "",
-          "/?room=" + encodeURIComponent(data.room_id)
-        );
-      }
-      showChat(data.name, data.room_id, data.room_title, data.share_url);
-    } catch {
-      showError(createError, "Network error — try again.");
     }
-  });
-
-  joinForm.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    showError(joinError, "");
-    const invite = inviteInput.value.trim();
-    const name = nameInput.value.trim();
-    try {
-      const res = await fetch("/api/join", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invite, name, room_id: qsRoom() }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        const map = {
-          bad_invite: "Invite token is incorrect.",
-          bad_name: "Pick a display name (1–40 characters).",
-        };
-        showError(joinError, map[data.error] || "Could not join.");
-        return;
-      }
-      // Drop invite from the URL bar after joining.
-      if (window.history.replaceState) {
-        const room = data.room_id || "legacy";
-        window.history.replaceState(
-          {},
-          "",
-          room === "legacy" ? "/" : "/?room=" + encodeURIComponent(room)
-        );
-      }
-      showChat(data.name, data.room_id, data.room_title);
-    } catch {
-      showError(joinError, "Network error — try again.");
-    }
-  });
-
-  sendForm.addEventListener("submit", (ev) => {
-    ev.preventDefault();
-    const body = bodyInput.value.trim();
-    if (!body || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "message", body }));
-    bodyInput.value = "";
-  });
-
-  copyShareBtn.addEventListener("click", async () => {
-    const value = shareUrlInput.value;
-    if (!value) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      copyShareBtn.textContent = "Copied";
-      setTimeout(() => {
-        copyShareBtn.textContent = "Copy link";
-      }, 1500);
-    } catch {
-      shareUrlInput.select();
-    }
-  });
-
-  logoutBtn.addEventListener("click", async () => {
-    me = null;
-    clearTimeout(reconnectTimer);
-    if (ws) {
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-      ws = null;
-    }
-    await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
-    shareBox.classList.add("hidden");
-    showJoin();
-  });
-
-  clearChatBtn.addEventListener("click", async () => {
-    if (
-      !confirm(
-        "Delete the entire room chat for everyone? This cannot be undone."
-      )
-    ) {
+    const { res, data } = await api("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      setError("#new-room-error", data?.error || "Create failed");
       return;
     }
-    showError(chatError, "");
-    clearChatBtn.disabled = true;
-    try {
-      const res = await fetch("/api/messages", {
-        method: "DELETE",
-        credentials: "same-origin",
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        showError(chatError, "Could not delete chat.");
-        return;
+    $("#new-room-dialog").close();
+    state.shareUrl = data.share_url;
+    $("#share-url").value = data.share_url || "";
+    show($("#share-box"));
+    await refreshChatRails();
+    await selectPeople(data.room_id, data.room_title, {
+      room_id: data.room_id,
+      title: data.room_title,
+      kind: data.kind || kind,
+      config: data.config || {},
+    });
+  });
+
+  async function runSpecialistAction(action, topic, rounds, continuous) {
+    if (!state.roomId) return;
+    setError("#chat-error", "");
+    const payload = { action, topic: topic || "" };
+    if (action === "debate") {
+      if (continuous) {
+        payload.continuous = true;
+      } else {
+        payload.rounds = Math.max(1, Math.min(5, Number(rounds) || 1));
       }
-      setHistory([]);
-    } catch {
-      showError(chatError, "Network error — try again.");
-    } finally {
-      clearChatBtn.disabled = false;
+    }
+    const { res, data } = await api(`/api/rooms/${state.roomId}/specialist-run`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      setError(
+        "#chat-error",
+        data?.message || data?.error || "Specialist run failed"
+      );
+      if (data?.job) setSpecialistRunUi(data.job);
+      return;
+    }
+    if (data?.job) setSpecialistRunUi(data.job);
+  }
+
+  $("#specialist-present-btn").addEventListener("click", () => {
+    runSpecialistAction("present", "");
+  });
+  $("#specialist-debate-btn").addEventListener("click", () => {
+    state.debateAction = "debate";
+    $("#debate-dialog-title").textContent = "Specialist debate";
+    $("#debate-topic").value = "";
+    $("#debate-continuous").checked = false;
+    show($("#debate-rounds-wrap"));
+    show($("#debate-loop-wrap"));
+    show($("#debate-rounds-hint"));
+    hide($("#debate-loop-hint"));
+    $("#debate-rounds").disabled = false;
+    setError("#debate-error", "");
+    $("#debate-dialog").showModal();
+  });
+  $("#specialist-idea-btn").addEventListener("click", () => {
+    state.debateAction = "idea";
+    $("#debate-dialog-title").textContent = "Idea pass";
+    $("#debate-topic").value = "";
+    $("#debate-continuous").checked = false;
+    hide($("#debate-rounds-wrap"));
+    hide($("#debate-loop-wrap"));
+    hide($("#debate-rounds-hint"));
+    hide($("#debate-loop-hint"));
+    setError("#debate-error", "");
+    $("#debate-dialog").showModal();
+  });
+  $("#debate-continuous").addEventListener("change", () => {
+    const on = $("#debate-continuous").checked;
+    $("#debate-rounds").disabled = on;
+    if (on) {
+      hide($("#debate-rounds-hint"));
+      show($("#debate-loop-hint"));
+    } else {
+      show($("#debate-rounds-hint"));
+      hide($("#debate-loop-hint"));
+    }
+  });
+  $("#debate-cancel").addEventListener("click", () => {
+    $("#debate-dialog").close();
+  });
+  $("#debate-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const topic = $("#debate-topic").value.trim();
+    if (!topic) {
+      setError("#debate-error", "Topic required");
+      return;
+    }
+    const action = state.debateAction || "debate";
+    const continuous =
+      action === "debate" && $("#debate-continuous").checked;
+    const rounds = action === "debate" ? ($("#debate-rounds").value || "2") : "1";
+    $("#debate-dialog").close();
+    await runSpecialistAction(action, topic, rounds, continuous);
+  });
+  $("#specialist-stop-btn").addEventListener("click", () => stopSpecialistRun());
+  $("#specialist-stop-banner-btn").addEventListener("click", () => stopSpecialistRun());
+
+  $("#copy-share").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#share-url").value);
+    } catch {}
+  });
+
+  // Keyboard: j/k to move between rails when chats tab focused
+  document.addEventListener("keydown", (e) => {
+    if (state.tab !== "chats") return;
+    if (e.target.matches("input, textarea")) return;
+    if (e.key === "j" || e.key === "k") {
+      const items = [
+        ...state.rooms.map((r) => ({ kind: "people", id: r.room_id, title: r.title })),
+        ...state.threads.map((t) => ({
+          kind: "agents",
+          id: t.session_id,
+          title: t.title,
+          master: t.master,
+        })),
+      ];
+      if (!items.length) return;
+      const cur = items.findIndex(
+        (it) =>
+          (state.kind === "people" && it.kind === "people" && it.id === state.roomId) ||
+          (state.kind === "agents" && it.kind === "agents" && it.id === state.threadId)
+      );
+      const next = e.key === "j"
+        ? Math.min(items.length - 1, cur + 1)
+        : Math.max(0, cur < 0 ? 0 : cur - 1);
+      const it = items[next];
+      if (it.kind === "people") selectPeople(it.id, it.title);
+      else selectAgent(it.id, it.title, !!it.master);
+      e.preventDefault();
     }
   });
 
-  addMentionAutofill(bodyInput);
+  // --- Automations -----------------------------------------------------------
+
+  async function loadAutomations() {
+    setError("#autos-error", "");
+    const { res, data } = await api("/api/automations");
+    const tbody = $("#autos-table tbody");
+    tbody.innerHTML = "";
+    const rows = data?.automations || [];
+    $("#autos-empty").classList.toggle("hidden", rows.length > 0);
+    if (!res.ok) {
+      setError("#autos-error", data?.error || "Failed to load");
+      return;
+    }
+    rows.forEach((a) => {
+      const tr = document.createElement("tr");
+      const status = a.approved
+        ? '<span class="badge approved">approved</span>'
+        : '<span class="badge draft">draft</span>';
+      tr.innerHTML = `
+        <td>${escapeHtml(a.ritual_id || a.name || "")}</td>
+        <td>${status}</td>
+        <td>${escapeHtml(a.runner || "")}</td>
+        <td>${escapeHtml(a.schedule || "")}</td>
+        <td></td>`;
+      const td = tr.querySelector("td:last-child");
+      if (!a.approved) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ghost tiny";
+        btn.textContent = "Approve";
+        btn.addEventListener("click", async () => {
+          await api("/api/automations/approve", {
+            method: "POST",
+            body: JSON.stringify({ ritual_id: a.ritual_id }),
+          });
+          loadAutomations();
+        });
+        td.appendChild(btn);
+      }
+      const run = document.createElement("button");
+      run.type = "button";
+      run.className = "tiny";
+      run.style.marginLeft = "0.35rem";
+      run.textContent = "Run";
+      run.addEventListener("click", async () => {
+        await api("/api/automations/run", {
+          method: "POST",
+          body: JSON.stringify({ ritual_id: a.ritual_id, stub: true }),
+        });
+        loadAutomations();
+      });
+      td.appendChild(run);
+      tbody.appendChild(tr);
+    });
+  }
+
+  $("#mine-btn").addEventListener("click", async () => {
+    await api("/api/automations/mine", { method: "POST", body: "{}" });
+    loadAutomations();
+  });
+  $("#refresh-autos-btn").addEventListener("click", loadAutomations);
+
+  // --- Review ----------------------------------------------------------------
+
+  async function loadReview() {
+    setError("#review-error", "");
+    $("#review-status").textContent = "";
+    const { res, data } = await api("/api/review");
+    const tbody = $("#review-proposals-table tbody");
+    tbody.innerHTML = "";
+    if (!res.ok) {
+      setError("#review-error", data?.error || "Failed to load review");
+      return;
+    }
+    const rows = data?.proposals || [];
+    $("#review-empty").classList.toggle("hidden", rows.length > 0);
+    rows.forEach((p) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(p.ritual_id || p.name || "")}</td>
+        <td><span class="badge draft">${escapeHtml(p.proposed_by || "review")}</span></td>
+        <td>${escapeHtml(p.runner || "")}</td>
+        <td></td>`;
+      const td = tr.querySelector("td:last-child");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost tiny";
+      btn.textContent = "Approve";
+      btn.addEventListener("click", async () => {
+        await api("/api/automations/approve", {
+          method: "POST",
+          body: JSON.stringify({ ritual_id: p.ritual_id }),
+        });
+        loadReview();
+        if (state.tab === "automations") loadAutomations();
+      });
+      td.appendChild(btn);
+      tbody.appendChild(tr);
+    });
+    const memo = data?.memo_text;
+    $("#review-memo").textContent = memo || "(no reviews yet)";
+    $("#review-memo").classList.toggle("muted", !memo);
+  }
+
+  $("#run-review-btn").addEventListener("click", async () => {
+    setError("#review-error", "");
+    const days = parseInt($("#review-days").value, 10) || 14;
+    $("#review-status").textContent = "Reviewing ledger…";
+    $("#run-review-btn").disabled = true;
+    try {
+      const { res, data } = await api("/api/review/run", {
+        method: "POST",
+        body: JSON.stringify({ days }),
+      });
+      if (!res.ok) throw new Error(data?.error || "review failed");
+      const n = (data?.proposals_written || []).length;
+      const dest = data?.destination || "local";
+      $("#review-status").textContent =
+        `Done via ${dest}` + (n ? ` — ${n} proposal(s).` : ".");
+      await loadReview();
+    } catch (e) {
+      setError("#review-error", String(e.message || e));
+      $("#review-status").textContent = "";
+    } finally {
+      $("#run-review-btn").disabled = false;
+    }
+  });
+  $("#refresh-review-btn").addEventListener("click", loadReview);
+
+  // --- Tracking --------------------------------------------------------------
+
+  const SCOPE_LABELS = {
+    active_tab: "Active tab",
+    all_tabs: "All open tabs",
+    selected_tabs: "Selected tabs",
+    research_sites: "Research sites",
+    notes_only: "Notes only",
+  };
+
+  function selectedCaptureScope() {
+    const el = document.querySelector('input[name="capture-scope"]:checked');
+    return (el && el.value) || "active_tab";
+  }
+
+  async function loadTracking() {
+    setError("#track-error", "");
+    const summary = await api("/api/tracking/summary");
+    if (!summary.res.ok) {
+      setError("#track-error", summary.data?.error || "Failed to load tracking");
+      return;
+    }
+    const active = summary.data?.active_session;
+    $("#active-session").textContent = active
+      ? `${active.title} (${active.session_id})`
+      : "None";
+    const scopeHint = $("#active-scope");
+    if (active && active.capture_scope) {
+      scopeHint.hidden = false;
+      scopeHint.textContent = `Scope: ${SCOPE_LABELS[active.capture_scope] || active.capture_scope}`;
+      const radio = document.querySelector(
+        `input[name="capture-scope"][value="${active.capture_scope}"]`
+      );
+      if (radio) radio.checked = true;
+    } else {
+      scopeHint.hidden = true;
+      scopeHint.textContent = "";
+    }
+    const trackingOn = !!(active && active.status === "open");
+    $("#start-session-btn").disabled = trackingOn;
+    $("#end-session-btn").disabled = !trackingOn;
+    $("#capture-scope-fieldset").disabled = trackingOn;
+
+    const list = $("#summary-list");
+    list.innerHTML = "";
+    const s = summary.data?.summary || {};
+    Object.entries(s).forEach(([k, v]) => {
+      const li = document.createElement("li");
+      li.textContent = `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`;
+      list.appendChild(li);
+    });
+
+    const sessions = await api("/api/tracking/sessions?limit=30");
+    const tbody = $("#sessions-table tbody");
+    tbody.innerHTML = "";
+    (sessions.data?.sessions || []).forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(row.title)}</td>
+        <td>${escapeHtml(row.surface)}</td>
+        <td>${escapeHtml(row.status)}</td>
+        <td>${escapeHtml(fmtTime(row.started_at))}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    const events = await api("/api/tracking/events?limit=40");
+    const el = $("#events-list");
+    el.innerHTML = "";
+    (events.data?.events || []).forEach((ev) => {
+      const li = document.createElement("li");
+      const scope =
+        ev.type === "session_start" && ev.payload && ev.payload.capture_scope
+          ? ` · ${ev.payload.capture_scope}`
+          : "";
+      li.textContent = `${fmtTime(ev.ts)} · ${ev.type} · ${ev.surface || ""}${scope}`;
+      el.appendChild(li);
+    });
+  }
+
+  $("#start-session-btn").addEventListener("click", async () => {
+    const title = ($("#session-title").value || "").trim() || "Research session";
+    const capture_scope = selectedCaptureScope();
+    const { res, data } = await api("/api/tracking/session/start", {
+      method: "POST",
+      body: JSON.stringify({ title, capture_scope }),
+    });
+    if (!res.ok) {
+      setError("#track-error", data?.error || "Failed to start session");
+      return;
+    }
+    loadTracking();
+  });
+  $("#end-session-btn").addEventListener("click", async () => {
+    await api("/api/tracking/session/end", {
+      method: "POST",
+      body: JSON.stringify({ tags: ["neutral"] }),
+    });
+    loadTracking();
+  });
+  $("#add-note-btn").addEventListener("click", async () => {
+    const text = $("#session-note").value.trim();
+    if (!text) return;
+    await api("/api/tracking/session/note", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    $("#session-note").value = "";
+    loadTracking();
+  });
+
+  // --- Local model (per-user providers) -------------------------------------
+
+  const MODEL_PRESETS = {
+    anthropic: {
+      hint: "Paste your Anthropic API key (sk-ant-…). Billing is on your Anthropic account.",
+      model: "claude-sonnet-4-20250514",
+      models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+      needsUrl: false,
+      base: "",
+    },
+    openai: {
+      hint: "Paste your OpenAI API key (sk-…). Billing is on your OpenAI account.",
+      model: "gpt-4o",
+      models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o4-mini"],
+      needsUrl: false,
+      base: "https://api.openai.com/v1",
+    },
+    openrouter: {
+      hint: "One key for many models. Paste your OpenRouter key.",
+      model: "anthropic/claude-sonnet-4",
+      models: ["anthropic/claude-sonnet-4", "openai/gpt-4o", "google/gemini-2.5-flash"],
+      needsUrl: false,
+      base: "https://openrouter.ai/api/v1",
+    },
+    ollama: {
+      hint: "Run ./scripts/secure_qwen_tunnel.sh on your computer, then paste the HTTPS /v1 URL + gateway token.",
+      model: "qwen3:8b",
+      models: ["qwen3:8b", "qwen2.5:7b"],
+      needsUrl: true,
+      base: "",
+    },
+    custom: {
+      hint: "Any OpenAI-compatible /v1 endpoint (Groq, Together, vLLM, …).",
+      model: "gpt-4o",
+      models: [],
+      needsUrl: true,
+      base: "",
+    },
+  };
+
+  function applyModelProviderUI() {
+    const id = $("#model-provider")?.value || "anthropic";
+    const preset = MODEL_PRESETS[id] || MODEL_PRESETS.anthropic;
+    const hint = $("#model-provider-hint");
+    if (hint) hint.textContent = preset.hint;
+    const wrap = $("#model-base-url-wrap");
+    if (wrap) {
+      if (preset.needsUrl) show(wrap);
+      else hide(wrap);
+    }
+    const help = $("#model-ollama-help");
+    if (help) {
+      if (id === "ollama") show(help);
+      else hide(help);
+    }
+    const modelInput = $("#model-id");
+    if (modelInput && (!modelInput.value || MODEL_PRESETS[state.lastModelProvider]?.model === modelInput.value)) {
+      modelInput.value = preset.model;
+    }
+    state.lastModelProvider = id;
+    const list = $("#model-id-suggestions");
+    if (list) {
+      list.innerHTML = "";
+      (preset.models || []).forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m;
+        list.appendChild(opt);
+      });
+    }
+    if (!preset.needsUrl && preset.base) {
+      $("#model-base-url").value = preset.base;
+    } else if (preset.needsUrl && !preset.base) {
+      // leave whatever the user typed
+    }
+  }
+
+  async function loadModelStatus() {
+    setError("#model-error", "");
+    applyModelProviderUI();
+    const line = $("#model-status-line");
+    const modelsLine = $("#model-models-line");
+    const { res, data } = await api("/api/model/status");
+    if (!res.ok) {
+      line.textContent = "Could not load model status";
+      hide(modelsLine);
+      return;
+    }
+    if (!data.linked) {
+      line.textContent = data.message || "Not linked — pick a provider below.";
+      hide(modelsLine);
+      return;
+    }
+    const link = data.model_link || {};
+    const reach = data.reachable ? "reachable" : "unreachable";
+    line.textContent = `${link.provider_label || link.provider || "Model"} · ${link.model || ""} · ${reach}`;
+    if (data.models && data.models.length) {
+      modelsLine.textContent = `Seen: ${data.models.slice(0, 8).join(", ")}`;
+      show(modelsLine);
+    } else {
+      modelsLine.textContent = data.message || "";
+      show(modelsLine);
+    }
+    if (link.provider) {
+      $("#model-provider").value = link.provider;
+      applyModelProviderUI();
+    }
+    if (link.base_url) $("#model-base-url").value = link.base_url;
+    if (link.model) $("#model-id").value = link.model;
+  }
+
+  $("#model-provider")?.addEventListener("change", () => applyModelProviderUI());
+  $("#model-refresh-btn").addEventListener("click", () => loadModelStatus());
+  $("#model-link-btn").addEventListener("click", async () => {
+    setError("#model-error", "");
+    const provider = $("#model-provider").value;
+    const preset = MODEL_PRESETS[provider] || {};
+    const base_url = preset.needsUrl
+      ? $("#model-base-url").value.trim()
+      : (preset.base || $("#model-base-url").value.trim());
+    const api_key = $("#model-api-key").value.trim();
+    const model = $("#model-id").value.trim() || preset.model || "";
+    const { res, data } = await api("/api/model/link", {
+      method: "POST",
+      body: JSON.stringify({ provider, base_url, api_key, model }),
+    });
+    if (!res.ok) {
+      setError("#model-error", data?.error || "Link failed");
+      return;
+    }
+    $("#model-api-key").value = "";
+    await loadModelStatus();
+  });
+  $("#model-unlink-btn").addEventListener("click", async () => {
+    await api("/api/model/link", { method: "DELETE" });
+    $("#model-base-url").value = "";
+    $("#model-api-key").value = "";
+    await loadModelStatus();
+  });
+
+  // --- Bootstrap -------------------------------------------------------------
+
+  async function bootstrap() {
+    const { res, data } = await api("/api/me");
+    if (!res.ok) {
+      showAuth();
+      return;
+    }
+    state.me = data;
+    showShell();
+    switchTab("chats");
+    await refreshChatRails();
+    // Auto-open current room if present
+    if (data.room_id) {
+      await selectPeople(data.room_id, data.room_title || "Room");
+    } else if (state.threads[0]) {
+      await selectAgent(state.threads[0].session_id, state.threads[0].title, !!state.threads[0].master);
+    }
+  }
+
   bootstrap();
 })();

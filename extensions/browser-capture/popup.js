@@ -11,7 +11,7 @@ const tabDot = document.getElementById("tabDot");
 const tabState = document.getElementById("tabState");
 const tabToggle = document.getElementById("tabToggle");
 
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8788/api/ingest-browser";
+const DEFAULT_ENDPOINT = "http://127.0.0.1:8790/api/ingest-browser";
 
 // Kept in sync with background.js
 const SITE_PRESETS = [
@@ -53,7 +53,26 @@ function apiBase() {
     const u = new URL(ep);
     return `${u.protocol}//${u.host}`;
   } catch {
-    return "http://127.0.0.1:8788";
+    return "http://127.0.0.1:8790";
+  }
+}
+
+function isLedgerAppUrl(url, endpoint) {
+  try {
+    const u = new URL(url);
+    const h = (u.hostname || "").toLowerCase();
+    if (h !== "127.0.0.1" && h !== "localhost" && h !== "::1") return false;
+    const port = parseInt(u.port, 10) || (u.protocol === "https:" ? 443 : 80);
+    const ports = new Set([8788, 8790]);
+    try {
+      const ep = new URL(endpoint || DEFAULT_ENDPOINT);
+      ports.add(parseInt(ep.port, 10) || 80);
+    } catch {
+      /* ignore */
+    }
+    return ports.has(port);
+  } catch {
+    return false;
   }
 }
 
@@ -120,6 +139,9 @@ function tabCaptureState() {
   }
   if (!/^https?:/i.test(lower)) {
     return { kind: "internal", text: "Not an http(s) page" };
+  }
+  if (isLedgerAppUrl(activeUrl, endpointEl.value || DEFAULT_ENDPOINT)) {
+    return { kind: "internal", text: "Workflow / ledger UI — not captured" };
   }
   if (suffixMatch(activeHost, DENY_SUFFIXES)) {
     return { kind: "deny", text: "Denied (login/mail/bank/localhost)" };
@@ -251,12 +273,18 @@ chrome.storage.local.get(
     renderTabState();
     if (s.lastStatus) {
       const age = Math.round((Date.now() - (s.lastStatus.at || 0)) / 1000);
-      showStatus(
-        (s.lastStatus.ok ? "Last: " : "Last error: ") +
-          (s.lastStatus.message || "") +
-          (age < 3600 ? ` (${age}s ago)` : ""),
-        !!s.lastStatus.ok
-      );
+      const isLedgerNoise =
+        !s.lastStatus.ok &&
+        s.lastStatus.message &&
+        /Denied host \(127\.0\.0\.1\)|localhost blocked/i.test(s.lastStatus.message);
+      if (!isLedgerNoise) {
+        showStatus(
+          (s.lastStatus.ok ? "Last: " : "Last error: ") +
+            (s.lastStatus.message || "") +
+            (age < 3600 ? ` (${age}s ago)` : ""),
+          !!s.lastStatus.ok
+        );
+      }
     }
   }
 );
@@ -341,14 +369,15 @@ document.querySelectorAll("button[data-tag]").forEach((btn) => {
     const tag = btn.getAttribute("data-tag");
     showStatus("Tagging " + tag + "…", true);
     try {
-      const res = await fetch(apiBase() + "/api/session/tag", {
+      const res = await fetch(apiBase() + "/api/tracking/session/tag", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ tag }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showStatus(data.error || "Tag failed — start a session first", false);
+        showStatus(data.error || "Tag failed — start Tracking first", false);
         return;
       }
       showStatus("Outcome: " + tag, true);
@@ -357,6 +386,100 @@ document.querySelectorAll("button[data-tag]").forEach((btn) => {
     }
   });
 });
+
+const SCOPE_LABELS = {
+  active_tab: "Active tab",
+  all_tabs: "All open tabs",
+  selected_tabs: "Selected tabs",
+  research_sites: "Research sites",
+  notes_only: "Notes only",
+};
+
+function renderScope(session) {
+  const scopeDot = document.getElementById("scopeDot");
+  const scopeState = document.getElementById("scopeState");
+  const scopeHint = document.getElementById("scopeHint");
+  if (!scopeDot || !scopeState) return;
+  if (!session || !session.session_id) {
+    scopeDot.className = "dot off";
+    scopeState.textContent = "No active Workflow session";
+    if (scopeHint) {
+      scopeHint.textContent = "Start Tracking in Workflow to set Active / All / Selected tabs.";
+    }
+    return;
+  }
+  const label = SCOPE_LABELS[session.capture_scope] || session.capture_scope || "active_tab";
+  scopeDot.className = "dot on";
+  scopeState.textContent = `${label} · ${session.session_id}`;
+  if (scopeHint) {
+    scopeHint.textContent =
+      session.capture_scope === "selected_tabs"
+        ? "Check the tabs below to include them in this session."
+        : session.capture_scope === "all_tabs"
+          ? "Extension will snapshot every open http(s) tab once."
+          : "Capturing according to this session scope.";
+  }
+}
+
+function renderSelectedTabs(tabs) {
+  const el = document.getElementById("selectedTabList");
+  if (!el) return;
+  if (!tabs || !tabs.length) {
+    el.innerHTML = '<div class="hint">No capturable tabs open</div>';
+    return;
+  }
+  el.innerHTML = "";
+  for (const tab of tabs) {
+    const row = document.createElement("div");
+    row.className = "site-row";
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!tab.selected;
+    cb.setAttribute("data-id", String(tab.id));
+    cb.addEventListener("change", () => {
+      const checked = [...el.querySelectorAll("input[type=checkbox]:checked")].map((node) =>
+        Number(node.getAttribute("data-id"))
+      );
+      chrome.runtime.sendMessage({ kind: "set_selected_tabs", tabIds: checked }, () => {
+        showStatus(`Selected ${checked.length} tab(s)`, true);
+      });
+    });
+    label.appendChild(cb);
+    const text = document.createElement("span");
+    text.textContent = `${tab.host}${tab.active ? " · active" : ""} — ${tab.title}`;
+    label.appendChild(text);
+    row.appendChild(label);
+    el.appendChild(row);
+  }
+}
+
+function refreshSelectedTabs() {
+  chrome.runtime.sendMessage({ kind: "list_open_tabs" }, (res) => {
+    if (chrome.runtime.lastError) {
+      renderSelectedTabs([]);
+      return;
+    }
+    renderSelectedTabs((res && res.tabs) || []);
+  });
+  chrome.runtime.sendMessage({ kind: "refresh_scope" }, (res) => {
+    if (chrome.runtime.lastError) return;
+    renderScope(res && res.scope);
+  });
+}
+
+const refreshTabsBtn = document.getElementById("refreshTabs");
+if (refreshTabsBtn) refreshTabsBtn.addEventListener("click", refreshSelectedTabs);
+const clearSelectedBtn = document.getElementById("clearSelected");
+if (clearSelectedBtn) {
+  clearSelectedBtn.addEventListener("click", () => {
+    chrome.runtime.sendMessage({ kind: "set_selected_tabs", tabIds: [] }, () => {
+      refreshSelectedTabs();
+      showStatus("Cleared tab selection", true);
+    });
+  });
+}
+refreshSelectedTabs();
 
 document.getElementById("openDash").addEventListener("click", () => {
   chrome.tabs.create({ url: apiBase() + "/" });

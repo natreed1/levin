@@ -1,9 +1,21 @@
-# Fly.io config for the cloud messenger.
-# Deploy from this directory:  cd messenger && fly launch  (or fly deploy)
+# Unified Workflow Messenger on Fly.io
 #
-# After first launch, create a volume and set secrets:
-#   fly volumes create messenger_data --region <region> --size 1
-#   fly secrets set MESSENGER_INVITE_TOKEN='...' MESSENGER_SESSION_SECRET='...'
+# Deploy from the REPOSITORY ROOT (so src/analyst_ledger is in the build context):
+#   fly deploy --config messenger/fly.toml --dockerfile Dockerfile
+#
+# Volume + secrets:
+#   fly volumes create messenger_data --region sjc --size 3 -a levin
+#   fly secrets set -a levin \
+#     MESSENGER_INVITE_TOKEN='...' \
+#     MESSENGER_SESSION_SECRET='...'
+#
+# Optional managed Postgres for shared users/rooms at scale:
+#   fly postgres create --name levin-db
+#   fly postgres attach levin-db -a levin
+#   fly secrets set -a levin MESSENGER_DATABASE_URL="$DATABASE_URL"
+#
+# Per-user ledgers live on the volume at /data/users/{user_id}/
+# (SQLite + JSONL). Automations run in-cloud via CloudScheduler.
 
 app = "levin"
 primary_region = "sjc"
@@ -13,7 +25,10 @@ primary_region = "sjc"
 
 [env]
   MESSENGER_DATA_DIR = "/data"
+  MESSENGER_USERS_DIR = "/data/users"
   MESSENGER_COOKIE_SECURE = "1"
+  MESSENGER_SCHEDULER = "1"
+  PYTHONPATH = "/app/src:/app"
 
 [http_service]
   internal_port = 8080
@@ -35,6 +50,6 @@ primary_region = "sjc"
   destination = "/data"
 
 [[vm]]
-  memory = "256mb"
+  memory = "512mb"
   cpu_kind = "shared"
   cpus = 1

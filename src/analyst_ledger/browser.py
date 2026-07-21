@@ -33,6 +33,10 @@ ALLOWED_HOST_SUFFIXES = (
     "xinhuanet.com",
     "www.xinhuanet.com",
     "news.google.com",
+    # Public OSINT / social research (manual or deep-research still prefer allow_any)
+    "x.com",
+    "twitter.com",
+    "www.twitter.com",
 )
 
 # Never capture these (privacy / noise), even in deep research.
