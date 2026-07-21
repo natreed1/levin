@@ -215,11 +215,6 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
         return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
-    if not _email_action_allowed(request, "resend-verification", email):
-        return JSONResponse(
-            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
-            status_code=429,
-        )
     user = store.user_by_email(email)
     if not user or not verify_password(password, str(user["password_hash"])):
         return JSONResponse({"ok": False, "error": "bad_credentials"}, status_code=401)
@@ -326,6 +321,11 @@ async def resend_verification(
     email = normalize_email(str(body.get("email") or ""))
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
+    if not _email_action_allowed(request, "resend-verification", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
     user = store.user_by_email(email)
     # Always look successful to avoid email enumeration.
     payload: dict[str, Any] = {
