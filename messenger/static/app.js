@@ -11,16 +11,26 @@
     rooms: [],
     threads: [],
     specialists: [],
+    compute: null,
     ws: null,
     shareUrl: null,
+    shareRoomId: null,
     debateAction: "debate",
     resetToken: null,
     specialistJob: null,
     specialistPoll: null,
   };
 
-  function show(el) { el && el.classList.remove("hidden"); }
-  function hide(el) { el && el.classList.add("hidden"); }
+  function show(el) {
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.hidden = false;
+  }
+  function hide(el) {
+    if (!el) return;
+    el.classList.add("hidden");
+    el.hidden = true;
+  }
   function setError(id, msg) {
     const el = $(id);
     if (!el) return;
@@ -52,6 +62,7 @@
   function showAuth() {
     show($("#auth-screen"));
     hide($("#shell"));
+    renderModelStatus(null);
   }
   function showShell() {
     hide($("#auth-screen"));
@@ -358,16 +369,59 @@
   }
 
   function updateSpecialistActions(room) {
-    const isSpec = !!(room && room.kind === "specialist");
-    ["#specialist-present-btn", "#specialist-debate-btn", "#specialist-idea-btn"].forEach((sel) => {
+    const agentCount = roomAgents(room).length;
+    const hasAgents = agentCount > 0;
+    ["#specialist-present-btn", "#specialist-idea-btn"].forEach((sel) => {
       const el = $(sel);
       if (!el) return;
-      if (isSpec) show(el);
+      if (hasAgents) show(el);
       else hide(el);
     });
-    if (!isSpec) {
+    if (agentCount > 1) show($("#specialist-debate-btn"));
+    else hide($("#specialist-debate-btn"));
+    if (!hasAgents) {
       setSpecialistRunUi(null);
     }
+  }
+
+  function updateRoomContext(room) {
+    const badge = $("#compute-badge");
+    const members = $("#room-members");
+    members.innerHTML = "";
+    if (room?.compute) {
+      const source = room.compute.local ? "Local compute" : "API compute";
+      badge.textContent = `${source} · ${room.compute.label || room.compute.model}`;
+      show(badge);
+    } else {
+      hide(badge);
+    }
+    roomAgents(room).forEach((agentId) => {
+      const agent = state.specialists.find((item) => item.id === agentId);
+      const chip = document.createElement("span");
+      chip.className = "member-chip";
+      chip.appendChild(document.createTextNode(agent?.name || agentId));
+      if (room?.owner_user_id === state.me?.user_id) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Remove ${agent?.name || agentId}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", async () => {
+          const { res, data } = await api(
+            `/api/rooms/${encodeURIComponent(room.room_id)}/agents/${encodeURIComponent(agentId)}`,
+            { method: "DELETE" }
+          );
+          if (!res.ok) {
+            setError("#chat-error", data?.error || "Could not remove agent");
+            return;
+          }
+          await refreshChatRails();
+          updateRoomContext(currentRoom());
+          updateSpecialistActions(currentRoom());
+        });
+        chip.appendChild(remove);
+      }
+      members.appendChild(chip);
+    });
   }
 
   function setSpecialistRunUi(job) {
@@ -406,7 +460,7 @@
       return;
     }
     const room = currentRoom() || state.rooms.find((r) => r.room_id === roomId);
-    if (room && room.kind !== "specialist") {
+    if (room && roomAgents(room).length === 0) {
       setSpecialistRunUi(null);
       return;
     }
@@ -438,24 +492,87 @@
     }
   }
 
+  function modelStatusLabel(profile, { isActive }) {
+    const label = (profile && (profile.label || profile.model)) || "Model";
+    const provider = (profile && (profile.provider_label || profile.provider)) || "";
+    const name = provider && provider !== label ? `${provider} (${label})` : label;
+    return isActive ? `${name} is active` : `${name} is available`;
+  }
+
+  function renderModelStatus(payload) {
+    const box = $("#model-status");
+    const list = $("#model-status-list");
+    if (!box || !list) return;
+    if (!state.me?.authenticated) {
+      hide(box);
+      list.innerHTML = "";
+      return;
+    }
+    const profiles = (payload && payload.profiles) || [];
+    const activeId = payload && payload.active_profile_id;
+    const enabled = profiles.filter(
+      (p) => p && p.enabled !== false && p.setup_complete !== false
+    );
+    show(box);
+    if (!enabled.length) {
+      list.innerHTML =
+        `<div class="empty-state">No model active — add one in Settings.</div>`;
+      return;
+    }
+    const ordered = [...enabled].sort((a, b) => {
+      if (a.id === activeId) return -1;
+      if (b.id === activeId) return 1;
+      return 0;
+    });
+    list.innerHTML = ordered
+      .map((p) => {
+        const msg = modelStatusLabel(p, { isActive: p.id === activeId });
+        return (
+          `<div class="model-item">` +
+          `<span class="indicator" aria-hidden="true"></span>` +
+          `<span class="label">${escapeHtml(msg)}</span>` +
+          `</div>`
+        );
+      })
+      .join("");
+  }
+
+  async function refreshModelStatus() {
+    if (!state.me?.authenticated) {
+      renderModelStatus(null);
+      return;
+    }
+    const { res, data } = await api("/api/settings/models");
+    if (!res.ok) {
+      renderModelStatus({ profiles: [], active_profile_id: null });
+      return;
+    }
+    renderModelStatus(data);
+  }
+
   async function selectPeople(roomId, title, roomMeta) {
     closeWs();
     state.kind = "people";
     state.roomId = roomId;
     state.threadId = null;
     const room = roomMeta || currentRoom() || { room_id: roomId, title, kind: "people" };
-    const isSpec = room.kind === "specialist";
-    $("#stage-kind").textContent = isSpec ? "Workshop" : "Room";
+    const hasAgents = roomAgents(room).length > 0;
+    $("#stage-kind").textContent = "Room";
     $("#stage-title").textContent = title || room.title || "Room";
     show($("#clear-chat"));
+    if (state.me?.authenticated) show($("#invite-friend-btn"));
+    else hide($("#invite-friend-btn"));
+    if (state.shareRoomId !== roomId) hide($("#share-box"));
+    updateRoomContext(room);
     updateSpecialistActions(room);
     enableComposer(
       true,
-      isSpec
-        ? "Message… or use Present / Debate / Ideas"
+      hasAgents
+        ? "Message the room… agents can use your automations"
         : "Message… @Qwen or @workflow ritual_id"
     );
     renderRails();
+    await refreshModelStatus();
 
     if (state.me?.authenticated) {
       await api("/api/rooms/select", {
@@ -467,7 +584,7 @@
     $("#messages").innerHTML = "";
     (data?.messages || []).forEach((m) => appendPeopleMessage(m, data?.me));
     openWs();
-    if (isSpec) await refreshSpecialistStatus(roomId);
+    if (hasAgents) await refreshSpecialistStatus(roomId);
     else setSpecialistRunUi(null);
   }
 
@@ -476,12 +593,23 @@
     state.kind = "agents";
     state.roomId = null;
     hide($("#clear-chat"));
+    hide($("#invite-friend-btn"));
     hide($("#share-box"));
+    if (state.compute) {
+      const source = state.compute.is_local ? "Local compute" : "API compute";
+      $("#compute-badge").textContent =
+        `${source} · ${state.compute.label || state.compute.model}`;
+      show($("#compute-badge"));
+    } else {
+      hide($("#compute-badge"));
+    }
+    $("#room-members").innerHTML = "";
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
-    $("#stage-kind").textContent = "Agents";
-    $("#stage-title").textContent = title || "Agent";
-    enableComposer(true, "Ask the agent…");
+    $("#stage-kind").textContent = "Room";
+    $("#stage-title").textContent = title || "Room";
+    enableComposer(true, "Message this room…");
+    await refreshModelStatus();
 
     if (!threadId) {
       // Ensure master exists
@@ -655,44 +783,10 @@
     const { res, data } = await api("/api/specialists");
     if (!res.ok) return;
     state.specialists = data.specialists || [];
-    const box = $("#specialist-checkboxes");
-    if (!box) return;
-    box.innerHTML = "";
-    const defaults = new Set(["qwen-bull", "qwen-contrarian", "qwen-synthesizer"]);
-    state.specialists.forEach((s) => {
-      const label = document.createElement("label");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.value = s.id;
-      cb.checked = defaults.has(s.id);
-      label.appendChild(cb);
-      label.appendChild(
-        document.createTextNode(` ${s.name} (${s.role}) — ${s.mention}`)
-      );
-      box.appendChild(label);
-    });
   }
-
-  function selectedRoomKind() {
-    const el = document.querySelector('input[name="room-kind"]:checked');
-    return (el && el.value) || "people";
-  }
-
-  function syncRoomKindUi() {
-    const kind = selectedRoomKind();
-    const picker = $("#specialist-picker");
-    if (!picker) return;
-    if (kind === "specialist") show(picker);
-    else hide(picker);
-  }
-
-  $$('input[name="room-kind"]').forEach((el) => {
-    el.addEventListener("change", syncRoomKindUi);
-  });
 
   $("#new-room-btn").addEventListener("click", async () => {
     await loadSpecialists();
-    syncRoomKindUi();
     $("#new-room-dialog").showModal();
   });
   $("#new-room-cancel").addEventListener("click", () => {
@@ -702,19 +796,11 @@
     e.preventDefault();
     setError("#new-room-error", "");
     const title = $("#new-room-title").value.trim();
-    const kind = selectedRoomKind();
     const payload = {
       title,
       name: state.me?.name || state.me?.display_name,
-      kind,
+      kind: "people",
     };
-    if (kind === "specialist") {
-      payload.specialists = $$("#specialist-checkboxes input:checked").map((el) => el.value);
-      if (payload.specialists.length < 2) {
-        setError("#new-room-error", "Pick at least two specialists");
-        return;
-      }
-    }
     const { res, data } = await api("/api/rooms", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -725,13 +811,14 @@
     }
     $("#new-room-dialog").close();
     state.shareUrl = data.share_url;
+    state.shareRoomId = data.room_id;
     $("#share-url").value = data.share_url || "";
     show($("#share-box"));
     await refreshChatRails();
     await selectPeople(data.room_id, data.room_title, {
       room_id: data.room_id,
       title: data.room_title,
-      kind: data.kind || kind,
+      kind: data.kind || "people",
       config: data.config || {},
     });
   });
@@ -827,7 +914,44 @@
     } catch {}
   });
 
-  // Keyboard: j/k to move between rails when chats tab focused
+  $("#invite-friend-btn").addEventListener("click", async () => {
+    if (!state.roomId) return;
+    setError("#chat-error", "");
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
+      { method: "POST", body: "{}" }
+    );
+    if (!res.ok) {
+      setError("#chat-error", data?.error || "Could not create invite");
+      return;
+    }
+    state.shareUrl = data.share_url;
+    state.shareRoomId = state.roomId;
+    $("#share-url").value = data.share_url || "";
+    show($("#share-box"));
+  });
+
+  ["dragover", "dragleave", "drop"].forEach((eventName) => {
+    $("#chat-stage").addEventListener(eventName, async (event) => {
+      if (!state.roomId || state.kind !== "people") return;
+      if (eventName === "dragover") {
+        if (!event.dataTransfer.types.includes("application/x-workflow-agent")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        $("#chat-stage").classList.add("drop-ready");
+        return;
+      }
+      $("#chat-stage").classList.remove("drop-ready");
+      if (eventName !== "drop") return;
+      event.preventDefault();
+      const agentId =
+        event.dataTransfer.getData("application/x-workflow-agent") ||
+        event.dataTransfer.getData("text/plain");
+      if (agentId) await addAgentToRoom(state.roomId, agentId);
+    });
+  });
+
+  // Keyboard: j/k moves through the single room list.
   document.addEventListener("keydown", (e) => {
     if (state.tab !== "chats") return;
     if (e.target.matches("input, textarea")) return;
@@ -1248,6 +1372,7 @@
     } else {
       $("#settings-active-line").textContent = "None — add a frontier or local model below";
     }
+    renderModelStatus(data);
 
     const frontier = $("#frontier-list");
     const osList = $("#os-list");
@@ -1549,6 +1674,8 @@
       await selectPeople(data.room_id, data.room_title || "Room");
     } else if (state.threads[0]) {
       await selectAgent(state.threads[0].session_id, state.threads[0].title, !!state.threads[0].master);
+    } else {
+      await refreshModelStatus();
     }
   }
 

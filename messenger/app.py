@@ -617,6 +617,23 @@ def create_app() -> FastAPI:
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:
         rooms = store.list_rooms_for_user(user["user_id"])
+        from messenger.model_link import registry as model_registry
+
+        models = model_registry()
+        for room in rooms:
+            owner_id = str(room.get("owner_user_id") or user["user_id"])
+            active = models.active_profile(owner_id)
+            public = models.public_profile(active) if active else None
+            room["compute"] = (
+                {
+                    "label": public.get("label") or public.get("model"),
+                    "provider": public.get("provider_label") or public.get("provider"),
+                    "model": public.get("model"),
+                    "local": bool(public.get("is_local")),
+                }
+                if public
+                else None
+            )
         return JSONResponse({"ok": True, "rooms": rooms})
 
     @app.get("/api/specialists")
@@ -624,6 +641,99 @@ def create_app() -> FastAPI:
         from messenger.specialist_room import list_specialists
 
         return JSONResponse({"ok": True, "specialists": list_specialists()})
+
+    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        room = store.room(room_id)
+        if not room:
+            return None, JSONResponse(
+                {"ok": False, "error": "not_found"}, status_code=404
+            )
+        if room.get("owner_user_id") != user_id:
+            return None, JSONResponse(
+                {"ok": False, "error": "owner_required"}, status_code=403
+            )
+        return room, None
+
+    @app.post("/api/rooms/{room_id}/invite")
+    def room_invite(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        _, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        room_invite = secrets.token_urlsafe(24)
+        token_hash = hashlib.sha256(room_invite.encode("utf-8")).hexdigest()
+        store.update_room_token(room_id, token_hash)
+        return JSONResponse(
+            {
+                "ok": True,
+                "room_id": room_id,
+                "share_url": (
+                    _public_base_url(request)
+                    + f"/?room={room_id}&invite={room_invite}"
+                ),
+            }
+        )
+
+    @app.post("/api/rooms/{room_id}/agents")
+    async def room_agent_add(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        agent_id = str((body or {}).get("agent_id") or "").strip().lower()
+        from analyst_ledger.friend_personalities import PERSONALITIES_BY_ID
+
+        if agent_id not in PERSONALITIES_BY_ID:
+            return JSONResponse(
+                {"ok": False, "error": "unknown_agent"}, status_code=400
+            )
+        config = dict(room.get("config") or {})
+        agents = [
+            str(value)
+            for value in (config.get("agents") or config.get("specialists") or [])
+            if str(value) in PERSONALITIES_BY_ID
+        ]
+        if agent_id not in agents:
+            agents.append(agent_id)
+        config["agents"] = agents
+        # Keep older specialist-room orchestration compatible with the room roster.
+        config["specialists"] = agents
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse(
+            {"ok": True, "room": updated, "agents": agents}
+        )
+
+    @app.delete("/api/rooms/{room_id}/agents/{agent_id}")
+    def room_agent_remove(
+        room_id: str,
+        agent_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        config = dict(room.get("config") or {})
+        agents = [
+            str(value)
+            for value in (config.get("agents") or config.get("specialists") or [])
+            if str(value) != agent_id
+        ]
+        config["agents"] = agents
+        config["specialists"] = agents
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse(
+            {"ok": True, "room": updated, "agents": agents}
+        )
 
     @app.post("/api/rooms/{room_id}/specialist-run")
     async def specialist_run(
@@ -642,9 +752,11 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         if not store.user_in_room(room_id, user["user_id"]):
             return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        if str(room.get("kind") or "people") != "specialist":
+        config = room.get("config") if isinstance(room.get("config"), dict) else {}
+        room_agents = config.get("agents") or config.get("specialists") or []
+        if str(room.get("kind") or "people") != "specialist" and not room_agents:
             return JSONResponse(
-                {"ok": False, "error": "not_a_specialist_room"}, status_code=400
+                {"ok": False, "error": "room_has_no_agents"}, status_code=400
             )
         action = str(body.get("action") or "").strip().lower()
         topic = str(body.get("topic") or "")

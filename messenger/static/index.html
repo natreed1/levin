@@ -10,7 +10,7 @@
   <div id="auth-screen" class="auth-screen hidden">
     <div class="auth-card">
       <h1>Workflow</h1>
-      <p class="sub">Rooms · Agent threads · Automations · Review · Tracking</p>
+      <p class="sub">Rooms for people, agents, and ongoing work</p>
       <div class="room-tabs auth-tabs">
         <button type="button" id="tab-login" class="active">Log in</button>
         <button type="button" id="tab-signup" class="ghost">Create account</button>
@@ -66,7 +66,7 @@
         <span id="who-label" class="muted"></span>
       </div>
       <nav class="rail-nav" aria-label="Primary">
-        <button type="button" class="nav-btn active" data-tab="chats">Chats</button>
+        <button type="button" class="nav-btn active" data-tab="chats">Rooms</button>
         <button type="button" class="nav-btn" data-tab="automations">Automations</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
@@ -82,27 +82,38 @@
       <section id="tab-chats" class="tab-panel">
         <div class="chats-layout">
           <aside class="thread-rail">
-            <div class="rail-section people">
+            <div class="rail-section rooms-section">
               <header class="section-head">
-                <h2>Rooms</h2>
+                <div>
+                  <h2>Your rooms</h2>
+                  <p>People and work, together</p>
+                </div>
                 <button type="button" id="new-room-btn" class="ghost tiny" title="Create room">+</button>
               </header>
-              <ul id="people-list" class="thread-list"></ul>
+              <ul id="room-list" class="thread-list room-list"></ul>
             </div>
-            <div class="rail-section agents">
+            <div class="rail-section agent-dock">
               <header class="section-head">
-                <h2>Agents</h2>
+                <div>
+                  <h2>Agents</h2>
+                  <p>Drag one into a room</p>
+                </div>
               </header>
-              <ul id="agents-list" class="thread-list"></ul>
+              <ul id="agent-palette" class="agent-palette"></ul>
             </div>
           </aside>
-          <div class="chat-stage">
+          <div class="chat-stage" id="chat-stage">
             <header class="stage-header">
               <div>
                 <p class="eyebrow" id="stage-kind">Room</p>
-                <h1 id="stage-title">Select a chat</h1>
+                <h1 id="stage-title">Select a room</h1>
+                <div class="room-context">
+                  <span id="compute-badge" class="compute-badge hidden"></span>
+                  <div id="room-members" class="room-members"></div>
+                </div>
               </div>
               <div class="header-actions">
+                <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
                 <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
                 <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
                 <button type="button" id="specialist-idea-btn" class="ghost hidden">Ideas</button>
@@ -113,6 +124,10 @@
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
               <span id="specialist-run-text">Specialists running — safe to leave this room.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
+            </div>
+            <div id="model-status" class="model-status hidden" role="status" aria-live="polite">
+              <h4>Available Models</h4>
+              <div id="model-status-list"></div>
             </div>
             <div id="share-box" class="share-box hidden">
               <label for="share-url">Invite link</label>
@@ -134,15 +149,7 @@
           <form id="new-room-form" method="dialog">
             <h3>New room</h3>
             <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <fieldset class="scope-fieldset">
-              <legend>Type</legend>
-              <label class="scope-option"><input type="radio" name="room-kind" value="people" checked /> Shared room</label>
-              <label class="scope-option"><input type="radio" name="room-kind" value="specialist" /> Specialist workshop</label>
-            </fieldset>
-            <div id="specialist-picker" class="hidden">
-              <p class="muted tiny-hint">Pick at least two sides. They’ll present recent work, debate a topic, and synthesize ideas.</p>
-              <div id="specialist-checkboxes" class="specialist-checks"></div>
-            </div>
+            <p class="muted tiny-hint">Invite friends after creating it, or drag agents into it from the room rail.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -439,6 +446,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=31"></script>
+  <script src="/static/app.js?v=33"></script>
 </body>
 </html>

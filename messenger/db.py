@@ -564,6 +564,37 @@ class MessageStore:
                 conn.close()
         return _room_row(row) if row else None
 
+    def update_room_config(
+        self,
+        room_id: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        config_json = json.dumps(config if isinstance(config, dict) else {}, ensure_ascii=False)
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE rooms SET config_json = ? WHERE room_id = ?",
+                    (config_json, room_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return self.room(room_id) if cur.rowcount else None
+
+    def update_room_token(self, room_id: str, token_hash: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE rooms SET token_hash = ? WHERE room_id = ?",
+                    (token_hash, room_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
     def room_token_ok(self, room_id: str, token_hash: str) -> bool:
         room = self.room(room_id)
         return bool(room and hmac.compare_digest(str(room["token_hash"]), token_hash))

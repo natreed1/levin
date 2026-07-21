@@ -75,7 +75,11 @@ def _room_specialists(room: dict[str, Any]) -> List[FriendPersonality]:
             config = json.loads(room["config_json"])
         except Exception:
             config = {}
-    ids = config.get("specialists") if isinstance(config, dict) else None
+    ids = (
+        config.get("agents") or config.get("specialists")
+        if isinstance(config, dict)
+        else None
+    )
     return resolve_specialists(ids)
 
 

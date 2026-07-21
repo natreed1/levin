@@ -212,6 +212,39 @@ def test_owner_scoped_room_membership(tmp_path: Path, monkeypatch):
     assert room and room["owner_user_id"]
 
 
+def test_room_agents_can_be_added_drag_target_style(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="agents@example.com", name="Agents")
+    created = client.post("/api/rooms", json={"title": "Research", "name": "Agents"})
+    assert created.status_code == 200
+    room_id = created.json()["room_id"]
+
+    unknown = client.post(
+        f"/api/rooms/{room_id}/agents", json={"agent_id": "unknown"}
+    )
+    assert unknown.status_code == 400
+
+    added = client.post(
+        f"/api/rooms/{room_id}/agents", json={"agent_id": "qwen-bull"}
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["agents"] == ["qwen-bull"]
+
+    mine = client.get("/api/rooms/mine")
+    room = next(r for r in mine.json()["rooms"] if r["room_id"] == room_id)
+    assert room["config"]["agents"] == ["qwen-bull"]
+    assert room["config"]["specialists"] == ["qwen-bull"]
+    assert "compute" in room
+
+    invite = client.post(f"/api/rooms/{room_id}/invite", json={})
+    assert invite.status_code == 200
+    assert f"room={room_id}" in invite.json()["share_url"]
+
+    removed = client.delete(f"/api/rooms/{room_id}/agents/qwen-bull")
+    assert removed.status_code == 200
+    assert removed.json()["agents"] == []
+
+
 def test_specialist_workshop_create_and_debate(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _signup_and_login(client, email="spec@example.com", name="Spec")
