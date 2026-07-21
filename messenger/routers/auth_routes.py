@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from messenger.auth import (
+    COOKIE_NAME,
     hash_auth_token,
     hash_password,
     new_auth_token,
@@ -25,6 +26,7 @@ from messenger.deps import (
     current_user_optional,
     get_store,
     identity_optional,
+    resolve_identity,
     set_session_cookie,
 )
 from messenger.emailer import (
@@ -111,7 +113,7 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
     user_data_dir(user_id)
 
     if skip_verify:
-        identity = identity_optional(request)
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         room_id = (identity or {}).get("room_id") or "legacy"
         resp = JSONResponse(
             {
@@ -130,11 +132,13 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
         )
         set_session_cookie(
             resp,
+            store=store,
             name=user["display_name"],
             room_id=room_id,
             can_create=True,
             user_id=user["user_id"],
             email=user["email"],
+            revoke_sid=(identity or {}).get("sid"),
         )
         return resp
 
@@ -180,6 +184,11 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
         return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
     email = normalize_email(str(body.get("email") or ""))
     password = str(body.get("password") or "")
+    client_ip = request.client.host if request.client else "unknown"
+    login_key = f"login:{client_ip}:{email or ''}"
+    login_limiter = getattr(request.app.state, "login_limiter", None)
+    if login_limiter is not None and not login_limiter.allow(login_key):
+        return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
     user = store.user_by_email(email)
@@ -195,7 +204,7 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
             },
             status_code=403,
         )
-    identity = identity_optional(request)
+    identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
     room_id = (identity or {}).get("room_id") or "legacy"
     resp = JSONResponse(
         {
@@ -210,17 +219,29 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
     )
     set_session_cookie(
         resp,
+        store=store,
         name=user["display_name"],
         room_id=room_id,
         can_create=True,
         user_id=user["user_id"],
         email=user["email"],
+        revoke_sid=(identity or {}).get("sid"),
     )
     return resp
 
 
 @router.post("/logout")
-def logout() -> JSONResponse:
+def logout(
+    request: Request, store: MessageStore = Depends(get_store)
+) -> JSONResponse:
+    identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+    if not identity:
+        return JSONResponse(
+            {"ok": False, "error": "unauthorized"}, status_code=401
+        )
+    sid = (identity.get("sid") or "").strip()
+    if sid:
+        store.delete_session(sid)
     resp = JSONResponse({"ok": True})
     clear_session_cookie(resp)
     return resp
@@ -426,6 +447,7 @@ async def reset_password(
     store.update_password(str(row["user_id"]), password_hash)
     # Verifying email via a successful reset is reasonable if they got the mail.
     store.mark_email_verified(str(row["user_id"]))
+    store.delete_sessions_for_user(str(row["user_id"]))
     return JSONResponse(
         {"ok": True, "message": "Password updated. You can log in."}
     )

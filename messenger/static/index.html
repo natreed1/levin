@@ -70,7 +70,7 @@
         <button type="button" class="nav-btn" data-tab="automations">Automations</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
-        <button type="button" class="nav-btn" data-tab="model">Model</button>
+        <button type="button" class="nav-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="rail-foot">
         <button type="button" id="logout-btn" class="ghost">Log out</button>
@@ -304,69 +304,141 @@
         <p id="track-error" class="error" hidden></p>
       </section>
 
-      <!-- MODEL (per-user providers: Claude, GPT, Ollama, …) -->
-      <section id="tab-model" class="tab-panel hidden">
+      <!-- SETTINGS → Models -->
+      <section id="tab-settings" class="tab-panel hidden">
         <header class="page-header">
           <div>
-            <p class="eyebrow">Your keys</p>
-            <h1>Model</h1>
+            <p class="eyebrow">Your account</p>
+            <h1>Settings</h1>
           </div>
           <div class="header-actions">
-            <button type="button" id="model-refresh-btn" class="ghost">Refresh</button>
-            <button type="button" id="model-unlink-btn" class="ghost danger">Disconnect</button>
+            <button type="button" id="settings-refresh-btn" class="ghost">Refresh</button>
           </div>
         </header>
         <p class="muted" style="max-width:42rem;margin:0 1.25rem 1rem;">
-          Specialists use <strong>your</strong> provider — Claude, GPT, OpenRouter, or a local Ollama tunnel.
-          Keys stay on this account; other users bring their own.
+          Models are saved on <strong>this account</strong>. Specialists use your active model —
+          Claude, GPT, or a local open-source model found on your computer.
         </p>
-        <div class="cards">
-          <div class="card">
-            <h3>Status</h3>
-            <p id="model-status-line" class="muted">Not linked</p>
-            <p id="model-models-line" class="muted tiny-hint" hidden></p>
+
+        <div class="settings-block">
+          <div class="settings-block-head">
+            <h2 class="section-title" style="margin:0;">Active</h2>
+            <p id="settings-active-line" class="muted">None</p>
           </div>
-          <div class="card">
-            <h3>Connect</h3>
+        </div>
+
+        <div class="settings-block">
+          <div class="settings-block-head">
+            <h2 class="section-title" style="margin:0;">Frontier</h2>
+            <button type="button" id="frontier-add-btn" class="ghost tiny">Add</button>
+          </div>
+          <ul id="frontier-list" class="profile-list"></ul>
+          <div id="frontier-form" class="card settings-form hidden">
+            <h3>Add frontier model</h3>
             <label>Provider
-              <select id="model-provider">
+              <select id="frontier-provider">
                 <option value="anthropic">Claude (Anthropic)</option>
                 <option value="openai">GPT (OpenAI)</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="ollama">Local Ollama (tunnel)</option>
-                <option value="custom">Custom OpenAI-compatible</option>
               </select>
             </label>
-            <p id="model-provider-hint" class="muted tiny-hint"></p>
-            <label id="model-base-url-wrap">Base URL
-              <input id="model-base-url" type="url" placeholder="https://….trycloudflare.com/v1" autocomplete="off" />
-            </label>
+            <p id="frontier-hint" class="muted tiny-hint"></p>
             <label>API key
-              <input id="model-api-key" type="password" placeholder="sk-… or gateway token" autocomplete="off" />
+              <input id="frontier-api-key" type="password" placeholder="sk-…" autocomplete="off" />
             </label>
             <label>Model
-              <input id="model-id" type="text" list="model-id-suggestions" value="claude-sonnet-4-20250514" />
-              <datalist id="model-id-suggestions"></datalist>
+              <input id="frontier-model" type="text" list="frontier-model-suggestions" value="claude-sonnet-4-20250514" />
+              <datalist id="frontier-model-suggestions"></datalist>
             </label>
             <div class="card-actions">
-              <button type="button" id="model-link-btn">Save &amp; test</button>
+              <button type="button" id="frontier-save-btn">Save &amp; test</button>
+              <button type="button" id="frontier-cancel-btn" class="ghost">Cancel</button>
             </div>
-            <p id="model-error" class="error" hidden></p>
+            <p id="frontier-error" class="error" hidden></p>
           </div>
-          <div class="card" id="model-ollama-help">
-            <h3>Local Ollama only</h3>
-            <ol class="muted tiny-hint" style="margin:0;padding-left:1.2rem;line-height:1.5;">
-              <li>Install Ollama and pull <code>qwen3:8b</code></li>
-              <li>From the Workflow repo: <code>./scripts/secure_qwen_tunnel.sh</code></li>
-              <li>Paste the printed HTTPS <code>/v1</code> URL + token here</li>
-              <li>Leave the tunnel running while you debate</li>
-            </ol>
+        </div>
+
+        <div class="settings-block">
+          <div class="settings-block-head">
+            <h2 class="section-title" style="margin:0;">Open source</h2>
+            <button type="button" id="os-add-btn" class="ghost tiny">Add your own</button>
+          </div>
+          <ul id="os-list" class="profile-list"></ul>
+          <p id="settings-error" class="error" hidden></p>
+        </div>
+
+        <!-- Open-source wizard -->
+        <div id="os-wizard" class="wizard-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="os-wizard-title">
+          <div class="wizard-panel">
+            <header class="wizard-head">
+              <h2 id="os-wizard-title">Add a local model</h2>
+              <button type="button" id="os-wizard-close" class="ghost tiny" aria-label="Close">×</button>
+            </header>
+            <div id="os-step-companion" class="wizard-step">
+              <p>To use a model on this computer, install the Local Companion once. After that, Workflow can find models and keep the connection for you.</p>
+              <ol class="muted tiny-hint" style="padding-left:1.2rem;line-height:1.55;">
+                <li>On this computer run: <code>python -m messenger.companion_app</code></li>
+                <li>Paste the printed URL and token below</li>
+                <li>Click Link companion</li>
+              </ol>
+              <label>Companion URL
+                <input id="companion-url" type="url" placeholder="http://127.0.0.1:8791" value="http://127.0.0.1:8791" />
+              </label>
+              <label>Token
+                <input id="companion-token" type="password" placeholder="Companion token" autocomplete="off" />
+              </label>
+              <div class="card-actions">
+                <button type="button" id="companion-link-btn">Link companion</button>
+              </div>
+              <p id="companion-error" class="error" hidden></p>
+            </div>
+            <div id="os-step-search" class="wizard-step hidden">
+              <p class="muted">Find models already on this computer (Ollama or LM Studio).</p>
+              <div class="card-actions">
+                <button type="button" id="os-search-btn">Find models on this computer</button>
+              </div>
+              <div id="os-empty" class="wizard-empty hidden">
+                <p id="os-empty-msg" class="muted">No models found.</p>
+                <p class="card-actions">
+                  <a id="os-install-ollama" class="ghost" href="https://ollama.com/download" target="_blank" rel="noopener">Install Ollama</a>
+                  <button type="button" id="os-pull-btn">Download recommended model</button>
+                  <button type="button" id="os-search-retry" class="ghost">Search again</button>
+                </p>
+                <p id="os-pull-status" class="muted tiny-hint" hidden></p>
+              </div>
+              <ul id="os-candidates" class="profile-list"></ul>
+            </div>
+            <div id="os-step-connect" class="wizard-step hidden">
+              <p>Selected: <strong id="os-selected-label"></strong></p>
+              <ol id="os-connect-checklist" class="connect-checklist muted tiny-hint">
+                <li data-step="runtime">Preparing runtime…</li>
+                <li data-step="gateway">Starting secure gateway…</li>
+                <li data-step="route">Opening reachability route…</li>
+                <li data-step="probe">Testing connection…</li>
+                <li data-step="save">Saving to your account…</li>
+              </ol>
+              <div class="card-actions">
+                <button type="button" id="os-establish-btn">Connect &amp; save</button>
+                <button type="button" id="os-back-btn" class="ghost">Back</button>
+              </div>
+              <p id="os-establish-error" class="error" hidden></p>
+              <details class="tech-details">
+                <summary class="muted tiny-hint">Technical details</summary>
+                <p id="os-tech-details" class="muted tiny-hint">—</p>
+              </details>
+            </div>
+            <div id="os-step-done" class="wizard-step hidden">
+              <p><strong>Ready.</strong> Your local model is saved. Turn it on from the list whenever you want.</p>
+              <div class="card-actions">
+                <button type="button" id="os-done-btn">Done</button>
+                <button type="button" id="os-done-enable-btn">Turn on now</button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
     </main>
   </div>
 
-  <script src="/static/app.js?v=30"></script>
+  <script src="/static/app.js?v=31"></script>
 </body>
 </html>

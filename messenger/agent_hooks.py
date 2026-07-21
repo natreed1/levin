@@ -150,7 +150,7 @@ def _reply_qwen(
         except Exception as exc:  # noqa: BLE001
             return (
                 f"(Live model unavailable: {exc}. "
-                "Add Claude, GPT, or a local tunnel under Model.)"
+                "Add Claude, GPT, or a local model under Settings.)"
             )
 
     for personality in personalities:
@@ -161,7 +161,7 @@ def _reply_qwen(
         if not reply:
             reply = (
                 f"Noted, {author}. You said: {snippet!r}. "
-                "(No model linked — open the Model tab to connect Claude, GPT, or Ollama.)"
+                "(No model linked — open Settings to connect Claude, GPT, or a local model.)"
             )
         msg = store.add_message(
             author=personality.name, body=reply[:2000], room_id=room_id

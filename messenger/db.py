@@ -160,6 +160,19 @@ class MessageStore:
                     """
                 )
                 conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        sid TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"
+                )
+                conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_room_id "
                     "ON messages(room_id, id)"
                 )
@@ -274,6 +287,76 @@ class MessageStore:
                     (password_hash, user_id),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    # --- sessions --------------------------------------------------------------
+
+    def create_session(
+        self,
+        *,
+        sid: str,
+        user_id: Optional[str],
+        expires_at: str,
+    ) -> None:
+        created_at = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO sessions (sid, user_id, created_at, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (sid, user_id, created_at, expires_at),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_session(self, sid: str) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT sid, user_id, created_at, expires_at FROM sessions "
+                    "WHERE sid = ?",
+                    (sid,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        return dict(row)
+
+    def session_is_active(self, sid: str) -> bool:
+        row = self.get_session(sid)
+        if not row:
+            return False
+        expires_at = str(row.get("expires_at") or "")
+        if not expires_at:
+            return False
+        return expires_at >= _utc_now()
+
+    def delete_session(self, sid: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def delete_sessions_for_user(self, user_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ?", (user_id,)
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
             finally:
                 conn.close()
 

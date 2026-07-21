@@ -16,14 +16,27 @@ from .schema import Event, Sensitivity, Surface, sensitivity_allows_egress
 
 # Destinations whose model runs on this machine; everything else (including
 # unknown strings, which run_synthesis routes to Anthropic) counts as external.
-LOCAL_DESTINATIONS = {"qwen", "local_stub"}
+LOCAL_DESTINATIONS = {"qwen", "local_stub", "ollama", "lmstudio"}
+
+# Per-request / per-job override so each Workflow user can point at their own
+# Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
+_QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "qwen_endpoint", default=None
+)
 
 
 def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -> None:
     """Hard gate at the model-call boundary: external models (Anthropic/Bedrock)
     accept an egress ceiling of `internal` at most; local destinations may go up
     to `confidential`; `restricted` never goes to any model."""
-    is_local = destination in LOCAL_DESTINATIONS
+    dest = (destination or "").strip().lower()
+    is_local = dest in LOCAL_DESTINATIONS
+    # Endpoint overrides may mark is_local explicitly via ContextVar metadata.
+    override = _QWEN_ENDPOINT.get() or {}
+    if str(override.get("is_local") or "") in {"1", "true", "yes"}:
+        is_local = True
+    if str(override.get("destination") or "").strip().lower() in LOCAL_DESTINATIONS:
+        is_local = True
     ceiling = Sensitivity.CONFIDENTIAL if is_local else Sensitivity.INTERNAL
     if not sensitivity_allows_egress(max_sensitivity, ceiling):
         raise RuntimeError(
@@ -32,12 +45,6 @@ def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -
             f"'confidential' must stay on a local destination ({', '.join(sorted(LOCAL_DESTINATIONS))}); "
             f"'restricted' content never goes to any model."
         )
-
-# Per-request / per-job override so each Workflow user can point at their own
-# Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
-_QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
-    "qwen_endpoint", default=None
-)
 
 
 @contextmanager

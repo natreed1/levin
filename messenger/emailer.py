@@ -12,6 +12,7 @@ Set MESSENGER_PUBLIC_BASE_URL if links should not use the request host
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -153,33 +154,35 @@ def _send_smtp(*, to: str, subject: str, text: str, html: Optional[str]) -> dict
 
 def send_verification_email(*, to: str, verify_url: str, display_name: str) -> dict[str, Any]:
     subject = "Verify your Workflow email"
+    safe_name = html.escape(display_name or "", quote=True)
     text = (
         f"Hi {display_name},\n\n"
         "Confirm your email to finish creating your Workflow account:\n"
         f"{verify_url}\n\n"
         "This link expires in 24 hours. If you did not sign up, ignore this email.\n"
     )
-    html = (
-        f"<p>Hi {display_name},</p>"
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
         "<p>Confirm your email to finish creating your Workflow account:</p>"
         f'<p><a href="{verify_url}">Verify email</a></p>'
         "<p>This link expires in 24 hours.</p>"
     )
-    return send_email(to=to, subject=subject, text=text, html=html)
+    return send_email(to=to, subject=subject, text=text, html=html_body)
 
 
 def send_password_reset_email(*, to: str, reset_url: str, display_name: str) -> dict[str, Any]:
     subject = "Reset your Workflow password"
+    safe_name = html.escape(display_name or "", quote=True)
     text = (
         f"Hi {display_name},\n\n"
         "Use this link to choose a new password:\n"
         f"{reset_url}\n\n"
         "This link expires in 1 hour. If you did not request a reset, ignore this email.\n"
     )
-    html = (
-        f"<p>Hi {display_name},</p>"
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
         "<p>Use this link to choose a new password:</p>"
         f'<p><a href="{reset_url}">Reset password</a></p>'
         "<p>This link expires in 1 hour.</p>"
     )
-    return send_email(to=to, subject=subject, text=text, html=html)
+    return send_email(to=to, subject=subject, text=text, html=html_body)

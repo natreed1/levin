@@ -244,7 +244,6 @@
 
   $("#logout-btn").addEventListener("click", async () => {
     await api("/api/auth/logout", { method: "POST" });
-    await api("/api/logout", { method: "POST" });
     closeWs();
     state.me = null;
     showAuth();
@@ -279,7 +278,7 @@
     if (tab === "automations") loadAutomations();
     if (tab === "review") loadReview();
     if (tab === "tracking") loadTracking();
-    if (tab === "model") loadModelStatus();
+    if (tab === "settings") loadSettings();
     if (tab === "chats") refreshChatRails();
   }
 
@@ -1097,67 +1096,38 @@
     loadTracking();
   });
 
-  // --- Local model (per-user providers) -------------------------------------
+  // --- Settings → Models -----------------------------------------------------
 
-  const MODEL_PRESETS = {
+  const FRONTIER_PRESETS = {
     anthropic: {
       hint: "Paste your Anthropic API key (sk-ant-…). Billing is on your Anthropic account.",
       model: "claude-sonnet-4-20250514",
       models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-      needsUrl: false,
-      base: "",
     },
     openai: {
       hint: "Paste your OpenAI API key (sk-…). Billing is on your OpenAI account.",
       model: "gpt-4o",
       models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o4-mini"],
-      needsUrl: false,
-      base: "https://api.openai.com/v1",
-    },
-    openrouter: {
-      hint: "One key for many models. Paste your OpenRouter key.",
-      model: "anthropic/claude-sonnet-4",
-      models: ["anthropic/claude-sonnet-4", "openai/gpt-4o", "google/gemini-2.5-flash"],
-      needsUrl: false,
-      base: "https://openrouter.ai/api/v1",
-    },
-    ollama: {
-      hint: "Run ./scripts/secure_qwen_tunnel.sh on your computer, then paste the HTTPS /v1 URL + gateway token.",
-      model: "qwen3:8b",
-      models: ["qwen3:8b", "qwen2.5:7b"],
-      needsUrl: true,
-      base: "",
-    },
-    custom: {
-      hint: "Any OpenAI-compatible /v1 endpoint (Groq, Together, vLLM, …).",
-      model: "gpt-4o",
-      models: [],
-      needsUrl: true,
-      base: "",
     },
   };
 
-  function applyModelProviderUI() {
-    const id = $("#model-provider")?.value || "anthropic";
-    const preset = MODEL_PRESETS[id] || MODEL_PRESETS.anthropic;
-    const hint = $("#model-provider-hint");
+  const settingsState = {
+    profiles: [],
+    activeId: null,
+    companion: null,
+    selectedCandidate: null,
+    draftProfileId: null,
+    recommendedModel: "qwen3:8b",
+  };
+
+  function applyFrontierPreset() {
+    const id = $("#frontier-provider")?.value || "anthropic";
+    const preset = FRONTIER_PRESETS[id] || FRONTIER_PRESETS.anthropic;
+    const hint = $("#frontier-hint");
     if (hint) hint.textContent = preset.hint;
-    const wrap = $("#model-base-url-wrap");
-    if (wrap) {
-      if (preset.needsUrl) show(wrap);
-      else hide(wrap);
-    }
-    const help = $("#model-ollama-help");
-    if (help) {
-      if (id === "ollama") show(help);
-      else hide(help);
-    }
-    const modelInput = $("#model-id");
-    if (modelInput && (!modelInput.value || MODEL_PRESETS[state.lastModelProvider]?.model === modelInput.value)) {
-      modelInput.value = preset.model;
-    }
-    state.lastModelProvider = id;
-    const list = $("#model-id-suggestions");
+    const modelInput = $("#frontier-model");
+    if (modelInput) modelInput.value = preset.model;
+    const list = $("#frontier-model-suggestions");
     if (list) {
       list.innerHTML = "";
       (preset.models || []).forEach((m) => {
@@ -1166,75 +1136,401 @@
         list.appendChild(opt);
       });
     }
-    if (!preset.needsUrl && preset.base) {
-      $("#model-base-url").value = preset.base;
-    } else if (preset.needsUrl && !preset.base) {
-      // leave whatever the user typed
-    }
   }
 
-  async function loadModelStatus() {
-    setError("#model-error", "");
-    applyModelProviderUI();
-    const line = $("#model-status-line");
-    const modelsLine = $("#model-models-line");
-    const { res, data } = await api("/api/model/status");
-    if (!res.ok) {
-      line.textContent = "Could not load model status";
-      hide(modelsLine);
-      return;
-    }
-    if (!data.linked) {
-      line.textContent = data.message || "Not linked — pick a provider below.";
-      hide(modelsLine);
-      return;
-    }
-    const link = data.model_link || {};
-    const reach = data.reachable ? "reachable" : "unreachable";
-    line.textContent = `${link.provider_label || link.provider || "Model"} · ${link.model || ""} · ${reach}`;
-    if (data.models && data.models.length) {
-      modelsLine.textContent = `Seen: ${data.models.slice(0, 8).join(", ")}`;
-      show(modelsLine);
+  function statusDot(ok) {
+    return `<span class="status-dot ${ok ? "ok" : "off"}" aria-hidden="true"></span>`;
+  }
+
+  function renderProfileRow(p, { isActive }) {
+    const li = document.createElement("li");
+    li.className = "profile-row";
+    const ready = p.setup_complete;
+    const label = p.label || p.model || p.provider_label || p.provider;
+    const meta = p.category === "open_source"
+      ? (ready ? (p.enabled ? "Ready · On" : "Ready · Off") : "Needs setup")
+      : (isActive ? "Active" : "Saved");
+    li.innerHTML = `
+      <div class="profile-main">
+        ${statusDot(isActive || p.enabled)}
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <div class="muted tiny-hint">${escapeHtml(p.provider_label || p.provider)} · ${escapeHtml(p.model || "")} · ${escapeHtml(meta)}</div>
+        </div>
+      </div>
+      <div class="profile-actions"></div>
+    `;
+    const actions = li.querySelector(".profile-actions");
+    if (p.category === "frontier") {
+      if (!isActive) {
+        const act = document.createElement("button");
+        act.type = "button";
+        act.className = "ghost tiny";
+        act.textContent = "Set active";
+        act.addEventListener("click", async () => {
+          await api(`/api/settings/models/${p.id}/activate`, { method: "POST" });
+          await loadSettings();
+        });
+        actions.appendChild(act);
+      }
     } else {
-      modelsLine.textContent = data.message || "";
-      show(modelsLine);
+      if (ready) {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = p.enabled ? "tiny" : "ghost tiny";
+        toggle.textContent = p.enabled ? "On" : "Off";
+        toggle.addEventListener("click", async () => {
+          setError("#settings-error", "");
+          const path = p.enabled
+            ? `/api/settings/models/${p.id}/disable`
+            : `/api/settings/models/${p.id}/enable`;
+          const { res, data } = await api(path, { method: "POST" });
+          if (!res.ok) {
+            setError("#settings-error", data?.message || data?.error || "Could not update");
+            return;
+          }
+          await loadSettings();
+        });
+        actions.appendChild(toggle);
+      } else {
+        const finish = document.createElement("button");
+        finish.type = "button";
+        finish.className = "ghost tiny";
+        finish.textContent = "Finish setup";
+        finish.addEventListener("click", () => {
+          settingsState.draftProfileId = p.id;
+          settingsState.selectedCandidate = {
+            id: (p.source && p.source.candidate_id) || p.id,
+            label: p.model,
+            runtime: p.runtime || "ollama",
+            model: p.model,
+          };
+          openOsWizard("connect");
+        });
+        actions.appendChild(finish);
+      }
     }
-    if (link.provider) {
-      $("#model-provider").value = link.provider;
-      applyModelProviderUI();
-    }
-    if (link.base_url) $("#model-base-url").value = link.base_url;
-    if (link.model) $("#model-id").value = link.model;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost tiny danger";
+    del.textContent = "Remove";
+    del.addEventListener("click", async () => {
+      await api(`/api/settings/models/${p.id}`, { method: "DELETE" });
+      await loadSettings();
+    });
+    actions.appendChild(del);
+    return li;
   }
 
-  $("#model-provider")?.addEventListener("change", () => applyModelProviderUI());
-  $("#model-refresh-btn").addEventListener("click", () => loadModelStatus());
-  $("#model-link-btn").addEventListener("click", async () => {
-    setError("#model-error", "");
-    const provider = $("#model-provider").value;
-    const preset = MODEL_PRESETS[provider] || {};
-    const base_url = preset.needsUrl
-      ? $("#model-base-url").value.trim()
-      : (preset.base || $("#model-base-url").value.trim());
-    const api_key = $("#model-api-key").value.trim();
-    const model = $("#model-id").value.trim() || preset.model || "";
-    const { res, data } = await api("/api/model/link", {
+  function escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  async function loadSettings() {
+    setError("#settings-error", "");
+    const { res, data } = await api("/api/settings/models");
+    if (!res.ok) {
+      $("#settings-active-line").textContent = "Could not load settings";
+      return;
+    }
+    settingsState.profiles = data.profiles || [];
+    settingsState.activeId = data.active_profile_id;
+    settingsState.companion = data.companion || {};
+    const active = data.active;
+    if (active) {
+      $("#settings-active-line").textContent =
+        `${active.label || active.model} · ${active.provider_label || active.provider}` +
+        (active.is_local ? " · local" : "");
+    } else {
+      $("#settings-active-line").textContent = "None — add a frontier or local model below";
+    }
+
+    const frontier = $("#frontier-list");
+    const osList = $("#os-list");
+    frontier.innerHTML = "";
+    osList.innerHTML = "";
+    (settingsState.profiles || []).forEach((p) => {
+      const row = renderProfileRow(p, { isActive: p.id === settingsState.activeId });
+      if (p.category === "open_source") osList.appendChild(row);
+      else frontier.appendChild(row);
+    });
+    if (![...frontier.children].length) {
+      frontier.innerHTML = `<li class="muted tiny-hint">No frontier models yet.</li>`;
+    }
+    if (![...osList.children].length) {
+      osList.innerHTML = `<li class="muted tiny-hint">No open-source models yet. Click “Add your own”.</li>`;
+    }
+  }
+
+  function showWizardStep(name) {
+    ["companion", "search", "connect", "done"].forEach((s) => {
+      const el = $(`#os-step-${s}`);
+      if (!el) return;
+      if (s === name) show(el);
+      else hide(el);
+    });
+  }
+
+  function openOsWizard(step) {
+    show($("#os-wizard"));
+    const comp = settingsState.companion || {};
+    if (step === "connect" || step === "done") {
+      showWizardStep(step);
+      if (step === "connect" && settingsState.selectedCandidate) {
+        $("#os-selected-label").textContent =
+          settingsState.selectedCandidate.label || settingsState.selectedCandidate.model || "";
+      }
+      return;
+    }
+    if (!comp.linked || !comp.reachable) showWizardStep("companion");
+    else showWizardStep(step || "search");
+  }
+
+  function closeOsWizard() {
+    hide($("#os-wizard"));
+    settingsState.selectedCandidate = null;
+    settingsState.draftProfileId = null;
+  }
+
+  async function runDiscover() {
+    setError("#settings-error", "");
+    hide($("#os-empty"));
+    const list = $("#os-candidates");
+    list.innerHTML = `<li class="muted">Searching…</li>`;
+    const { res, data } = await api("/api/settings/local-model/discover", { method: "POST" });
+    list.innerHTML = "";
+    if (!res.ok) {
+      if (data?.error === "needs_companion" || data?.error === "companion_unreachable") {
+        showWizardStep("companion");
+        setError("#companion-error", data.message || data.error);
+        return;
+      }
+      list.innerHTML = `<li class="error">${escapeHtml(data?.message || data?.error || "Search failed")}</li>`;
+      return;
+    }
+    settingsState.recommendedModel = data.recommended_model || "qwen3:8b";
+    const candidates = data.candidates || [];
+    if (!candidates.length) {
+      show($("#os-empty"));
+      const ollama = data.ollama || {};
+      if (!ollama.installed) {
+        $("#os-empty-msg").textContent = "Ollama isn’t installed on this computer.";
+        show($("#os-install-ollama"));
+      } else if (!ollama.reachable) {
+        $("#os-empty-msg").textContent = "Ollama is installed but not running. Open the Ollama app, then search again.";
+        hide($("#os-install-ollama"));
+      } else {
+        $("#os-empty-msg").textContent = "No models found. Download a recommended model to get started.";
+        hide($("#os-install-ollama"));
+      }
+      return;
+    }
+    hide($("#os-empty"));
+    candidates.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "profile-row";
+      li.innerHTML = `
+        <div class="profile-main">
+          ${statusDot(true)}
+          <div>
+            <strong>${escapeHtml(c.label)}</strong>
+            <div class="muted tiny-hint">${escapeHtml(c.runtime)}${c.size_bytes ? " · " + Math.round(c.size_bytes / 1e9 * 10) / 10 + " GB" : ""}</div>
+          </div>
+        </div>
+        <div class="profile-actions"></div>
+      `;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tiny";
+      btn.textContent = "Select";
+      btn.addEventListener("click", () => {
+        settingsState.selectedCandidate = {
+          ...c,
+          model: c.label,
+        };
+        settingsState.draftProfileId = null;
+        $("#os-selected-label").textContent = c.label;
+        showWizardStep("connect");
+      });
+      li.querySelector(".profile-actions").appendChild(btn);
+      list.appendChild(li);
+    });
+  }
+
+  async function pollPull(jobId) {
+    const statusEl = $("#os-pull-status");
+    show(statusEl);
+    for (let i = 0; i < 120; i++) {
+      const { res, data } = await api(`/api/settings/local-model/pull/${jobId}`);
+      const job = data?.job || {};
+      statusEl.textContent = job.message || "Downloading…";
+      if (!res.ok || job.status === "error") {
+        statusEl.textContent = job.error || data?.error || "Download failed";
+        return false;
+      }
+      if (job.status === "done") {
+        statusEl.textContent = job.message || "Ready.";
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    statusEl.textContent = "Still downloading — search again when it finishes.";
+    return false;
+  }
+
+  $("#settings-refresh-btn")?.addEventListener("click", () => loadSettings());
+  $("#frontier-add-btn")?.addEventListener("click", () => {
+    applyFrontierPreset();
+    show($("#frontier-form"));
+  });
+  $("#frontier-cancel-btn")?.addEventListener("click", () => hide($("#frontier-form")));
+  $("#frontier-provider")?.addEventListener("change", () => applyFrontierPreset());
+  $("#frontier-save-btn")?.addEventListener("click", async () => {
+    setError("#frontier-error", "");
+    const provider = $("#frontier-provider").value;
+    const api_key = $("#frontier-api-key").value.trim();
+    const model = $("#frontier-model").value.trim();
+    const { res, data } = await api("/api/settings/models", {
       method: "POST",
-      body: JSON.stringify({ provider, base_url, api_key, model }),
+      body: JSON.stringify({ provider, api_key, model, activate: true }),
     });
     if (!res.ok) {
-      setError("#model-error", data?.error || "Link failed");
+      setError("#frontier-error", data?.error || "Save failed");
       return;
     }
-    $("#model-api-key").value = "";
-    await loadModelStatus();
+    $("#frontier-api-key").value = "";
+    hide($("#frontier-form"));
+    await loadSettings();
   });
-  $("#model-unlink-btn").addEventListener("click", async () => {
-    await api("/api/model/link", { method: "DELETE" });
-    $("#model-base-url").value = "";
-    $("#model-api-key").value = "";
-    await loadModelStatus();
+
+  $("#os-add-btn")?.addEventListener("click", async () => {
+    await loadSettings();
+    openOsWizard("search");
+    if ((settingsState.companion || {}).reachable) {
+      showWizardStep("search");
+    }
   });
+  $("#os-wizard-close")?.addEventListener("click", () => closeOsWizard());
+  $("#os-done-btn")?.addEventListener("click", () => {
+    closeOsWizard();
+    loadSettings();
+  });
+  $("#os-search-btn")?.addEventListener("click", () => runDiscover());
+  $("#os-search-retry")?.addEventListener("click", () => runDiscover());
+  $("#os-back-btn")?.addEventListener("click", () => showWizardStep("search"));
+
+  $("#companion-link-btn")?.addEventListener("click", async () => {
+    setError("#companion-error", "");
+    const base_url = $("#companion-url").value.trim();
+    const token = $("#companion-token").value.trim();
+    const { res, data } = await api("/api/companion/link", {
+      method: "POST",
+      body: JSON.stringify({ base_url, token }),
+    });
+    if (!res.ok) {
+      setError("#companion-error", data?.error || "Link failed");
+      return;
+    }
+    await loadSettings();
+    if ((settingsState.companion || {}).reachable) {
+      showWizardStep("search");
+    } else {
+      setError("#companion-error", "Linked, but companion is not reachable. Is it running?");
+    }
+  });
+
+  $("#os-pull-btn")?.addEventListener("click", async () => {
+    hide($("#os-pull-status"));
+    const { res, data } = await api("/api/settings/local-model/pull", {
+      method: "POST",
+      body: JSON.stringify({ model: settingsState.recommendedModel }),
+    });
+    if (!res.ok) {
+      show($("#os-pull-status"));
+      $("#os-pull-status").textContent = data?.message || data?.error || "Pull failed";
+      return;
+    }
+    const jobId = data?.job?.id;
+    if (jobId) {
+      const ok = await pollPull(jobId);
+      if (ok) await runDiscover();
+    }
+  });
+
+  $("#os-establish-btn")?.addEventListener("click", async () => {
+    setError("#os-establish-error", "");
+    const cand = settingsState.selectedCandidate;
+    if (!cand) {
+      setError("#os-establish-error", "Select a model first");
+      return;
+    }
+    $$("#os-connect-checklist li").forEach((li) => li.classList.remove("done", "active"));
+    const mark = (step, cls) => {
+      const li = $(`#os-connect-checklist li[data-step="${step}"]`);
+      if (li) li.classList.add(cls);
+    };
+    mark("runtime", "active");
+    let profileId = settingsState.draftProfileId;
+    if (!profileId) {
+      const draft = await api("/api/settings/models/open-source/draft", {
+        method: "POST",
+        body: JSON.stringify({
+          candidate_id: cand.id,
+          runtime: cand.runtime || "ollama",
+          model: cand.model || cand.label,
+          label: cand.label || cand.model,
+        }),
+      });
+      if (!draft.res.ok) {
+        setError("#os-establish-error", draft.data?.error || "Could not create draft");
+        return;
+      }
+      profileId = draft.data.profile.id;
+      settingsState.draftProfileId = profileId;
+    }
+    mark("runtime", "done");
+    mark("gateway", "active");
+    mark("route", "active");
+    mark("probe", "active");
+    mark("save", "active");
+    const { res, data } = await api(`/api/settings/models/${profileId}/establish`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      setError("#os-establish-error", data?.message || data?.error || "Connect failed");
+      return;
+    }
+    ["runtime", "gateway", "route", "probe", "save"].forEach((s) => mark(s, "done"));
+    const route = data?.profile?.pipeline_route;
+    $("#os-tech-details").textContent = route
+      ? `${route.gateway_mode || ""} · ${route.base_url || ""}`
+      : "Saved.";
+    settingsState.draftProfileId = profileId;
+    showWizardStep("done");
+    await loadSettings();
+  });
+
+  $("#os-done-enable-btn")?.addEventListener("click", async () => {
+    const id = settingsState.draftProfileId;
+    if (!id) {
+      closeOsWizard();
+      return;
+    }
+    const { res, data } = await api(`/api/settings/models/${id}/enable`, { method: "POST" });
+    if (!res.ok) {
+      setError("#os-establish-error", data?.message || data?.error || "Could not turn on");
+      showWizardStep("connect");
+      return;
+    }
+    closeOsWizard();
+    await loadSettings();
+  });
+
+  applyFrontierPreset();
 
   // --- Bootstrap -------------------------------------------------------------
 

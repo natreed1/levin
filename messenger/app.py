@@ -18,12 +18,13 @@ from messenger.auth import (
     COOKIE_NAME,
     invite_ok,
     normalize_name,
-    read_identity,
+    normalize_title,
 )
 from messenger.db import MessageStore
 from messenger.deps import (
     clear_session_cookie,
     current_user,
+    resolve_identity,
     set_session_cookie,
 )
 from messenger.routers import (
@@ -39,18 +40,26 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_LEN = 2000
 RATE_LIMIT_WINDOW = 10.0  # seconds
 RATE_LIMIT_MAX = 20  # messages per window per author
+LOGIN_RATE_LIMIT_WINDOW = 900.0  # 15 minutes
+LOGIN_RATE_LIMIT_MAX = 10
 
 
 class RateLimiter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        window: float = RATE_LIMIT_WINDOW,
+        max_hits: int = RATE_LIMIT_MAX,
+    ) -> None:
+        self._window = float(window)
+        self._max_hits = int(max_hits)
         self._hits: dict[str, list[float]] = {}
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         bucket = self._hits.setdefault(key, [])
-        cutoff = now - RATE_LIMIT_WINDOW
+        cutoff = now - self._window
         self._hits[key] = [t for t in bucket if t >= cutoff]
-        if len(self._hits[key]) >= RATE_LIMIT_MAX:
+        if len(self._hits[key]) >= self._max_hits:
             return False
         self._hits[key].append(now)
         return True
@@ -145,6 +154,9 @@ def create_app() -> FastAPI:
     store = MessageStore()
     hub = RoomHub()
     limiter = RateLimiter()
+    login_limiter = RateLimiter(
+        window=LOGIN_RATE_LIMIT_WINDOW, max_hits=LOGIN_RATE_LIMIT_MAX
+    )
 
     from analyst_ledger.workflow_engine import JobManager
 
@@ -183,6 +195,7 @@ def create_app() -> FastAPI:
     app.state.store = store
     app.state.hub = hub
     app.state.limiter = limiter
+    app.state.login_limiter = login_limiter
     app.state.jobs = jobs
     app.state.scheduler = scheduler
 
@@ -300,7 +313,212 @@ def create_app() -> FastAPI:
         existed = registry.unlink(user["user_id"])
         return JSONResponse({"ok": True, "unlinked": existed})
 
-    # --- Per-user local model (each person tunnels their own Ollama) -----------
+    # --- Settings → Models (multi-profile) ------------------------------------
+
+    @app.get("/api/settings/models")
+    def settings_models_list(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+        from messenger.model_link import registry as model_registry
+
+        payload = model_registry().list_profiles(user["user_id"])
+        payload["companion"] = settings_models.companion_health(user["user_id"])
+        active = model_registry().active_profile(user["user_id"])
+        payload["active"] = (
+            model_registry().public_profile(active) if active else None
+        )
+        return JSONResponse(payload)
+
+    @app.post("/api/settings/models")
+    async def settings_models_add_frontier(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().add_frontier(
+                user["user_id"],
+                provider=str(body.get("provider") or "anthropic"),
+                api_key=str(body.get("api_key") or ""),
+                model=str(body.get("model") or ""),
+                base_url=str(body.get("base_url") or ""),
+                label=str(body.get("label") or ""),
+                activate=bool(body.get("activate", True)),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.post("/api/settings/models/open-source/draft")
+    async def settings_models_os_draft(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().add_open_source_draft(
+                user["user_id"],
+                candidate_id=str(body.get("candidate_id") or body.get("id") or ""),
+                runtime=str(body.get("runtime") or "ollama"),
+                model=str(body.get("model") or body.get("label") or ""),
+                label=str(body.get("label") or ""),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.patch("/api/settings/models/{profile_id}")
+    async def settings_models_patch(
+        profile_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().update_profile(
+                user["user_id"],
+                profile_id,
+                label=body.get("label"),
+                model=body.get("model"),
+                api_key=body.get("api_key"),
+                base_url=body.get("base_url"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.delete("/api/settings/models/{profile_id}")
+    def settings_models_delete(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        existed = model_registry().delete_profile(user["user_id"], profile_id)
+        return JSONResponse({"ok": True, "deleted": existed})
+
+    @app.post("/api/settings/models/{profile_id}/activate")
+    def settings_models_activate(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            profile = model_registry().activate(user["user_id"], profile_id)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.post("/api/settings/models/{profile_id}/establish")
+    def settings_models_establish(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.establish_pipeline(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/rebuild")
+    def settings_models_rebuild(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.rebuild_pipeline(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/enable")
+    def settings_models_enable(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.enable_profile(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/disable")
+    def settings_models_disable(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.disable_profile(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.get("/api/settings/models/status")
+    def settings_models_status(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        return JSONResponse(model_registry().probe(user["user_id"]))
+
+    @app.post("/api/settings/local-model/discover")
+    def settings_local_discover(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.discover(user["user_id"])
+        code = 200 if result.get("ok") is not False else 400
+        if result.get("error") in {"needs_companion", "companion_unreachable"}:
+            code = 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/local-model/pull")
+    async def settings_local_pull(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        result = settings_models.pull_model(
+            user["user_id"], str((body or {}).get("model") or "")
+        )
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.get("/api/settings/local-model/pull/{job_id}")
+    def settings_local_pull_status(
+        job_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.pull_job_status(user["user_id"], job_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    # --- Legacy per-user model aliases (/api/model/*) -------------------------
 
     @app.post("/api/model/link")
     async def model_link_route(
@@ -359,7 +577,7 @@ def create_app() -> FastAPI:
     @app.get("/api/me")
     def me_compat(request: Request) -> JSONResponse:
         """Backward-compatible /api/me → prefer account, fall back to invite session."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (identity or {}).get("user_id") if identity else None
         user = store.user_by_id(user_id) if user_id else None
         if user and identity:
@@ -545,7 +763,7 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (identity or {}).get("user_id") if identity else None
         rate_key = (
             (request.client.host if request.client else "unknown")
@@ -557,7 +775,7 @@ def create_app() -> FastAPI:
         name = normalize_name(str(body.get("name") or "")) or (
             identity["name"] if identity else None
         )
-        title = " ".join(str(body.get("title") or "").strip().split())[:80]
+        title = normalize_title(str(body.get("title") or ""))
         if not name:
             return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
         if not title:
@@ -628,11 +846,13 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=name,
             room_id=room_id,
             can_create=True,
             user_id=user_id,
             email=(identity or {}).get("email") if identity else None,
+            revoke_sid=(identity or {}).get("sid") if identity else None,
         )
         return resp
 
@@ -645,7 +865,7 @@ def create_app() -> FastAPI:
         invite = str(body.get("invite") or "")
         room_id = str(body.get("room_id") or "legacy").strip()
         name = normalize_name(str(body.get("name") or ""))
-        existing = read_identity(request.cookies.get(COOKIE_NAME))
+        existing = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (existing or {}).get("user_id")
         email = (existing or {}).get("email")
         # Prefer account display name when logged in.
@@ -681,18 +901,20 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=name,
             room_id=room_id,
             can_create=can_create,
             user_id=user_id,
             email=email,
+            revoke_sid=(existing or {}).get("sid") if existing else None,
         )
         return resp
 
     @app.post("/api/rooms/select")
     async def select_room(request: Request) -> JSONResponse:
         """Switch the active People room for an authenticated member."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity or not identity.get("user_id"):
             return JSONResponse({"ok": False, "error": "account_required"}, status_code=401)
         try:
@@ -722,11 +944,13 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=identity["name"],
             room_id=room_id,
             can_create=True,
             user_id=user_id,
             email=identity.get("email"),
+            revoke_sid=identity.get("sid"),
         )
         return resp
 
@@ -746,7 +970,15 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "rooms": rooms})
 
     @app.post("/api/logout")
-    def logout() -> JSONResponse:
+    def logout(request: Request) -> JSONResponse:
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+        if not identity:
+            return JSONResponse(
+                {"ok": False, "error": "unauthorized"}, status_code=401
+            )
+        sid = (identity.get("sid") or "").strip()
+        if sid:
+            store.delete_session(sid)
         resp = JSONResponse({"ok": True})
         clear_session_cookie(resp)
         return resp
@@ -765,7 +997,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/messages")
     def messages(request: Request, limit: int = 200) -> JSONResponse:
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         return JSONResponse(
@@ -782,7 +1014,7 @@ def create_app() -> FastAPI:
     @app.post("/api/messages")
     async def post_message(request: Request) -> JSONResponse:
         """HTTP send path for non-WS clients + agent hooks."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         try:
@@ -824,14 +1056,14 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/messages")
     async def delete_messages(request: Request) -> JSONResponse:
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         return JSONResponse(await _clear_chat(identity["name"], identity["room_id"]))
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
-        identity = read_identity(websocket.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(websocket.cookies.get(COOKIE_NAME), store)
         if not identity:
             await websocket.close(code=4401)
             return

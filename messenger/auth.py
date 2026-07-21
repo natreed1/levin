@@ -13,9 +13,12 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 COOKIE_NAME = "messenger_session"
 MAX_NAME_LEN = 40
+MAX_TITLE_LEN = 80
 MAX_EMAIL_LEN = 254
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 _PBKDF2_ITERATIONS = 260_000
+# Reject HTML / attribute breakout characters in user-facing labels.
+_FORBIDDEN_LABEL_CHARS = frozenset("<>\"'`")
 
 
 def invite_token() -> str:
@@ -45,11 +48,23 @@ def invite_ok(candidate: str) -> bool:
     return hmac.compare_digest(candidate.strip(), expected)
 
 
-def normalize_name(name: str) -> Optional[str]:
-    cleaned = " ".join((name or "").strip().split())
-    if not cleaned or len(cleaned) > MAX_NAME_LEN:
+def _normalize_label(value: str, *, max_len: int) -> Optional[str]:
+    cleaned = " ".join((value or "").strip().split())
+    if not cleaned or len(cleaned) > max_len:
+        return None
+    if any(ch in _FORBIDDEN_LABEL_CHARS for ch in cleaned):
+        return None
+    if any(ord(ch) < 32 for ch in cleaned):
         return None
     return cleaned
+
+
+def normalize_name(name: str) -> Optional[str]:
+    return _normalize_label(name, max_len=MAX_NAME_LEN)
+
+
+def normalize_title(title: str) -> Optional[str]:
+    return _normalize_label(title, max_len=MAX_TITLE_LEN)
 
 
 def normalize_email(email: str) -> Optional[str]:
@@ -94,6 +109,10 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected)
 
 
+def new_session_id() -> str:
+    return secrets.token_urlsafe(24)
+
+
 def mint_session(
     name: str,
     room_id: str = "legacy",
@@ -101,21 +120,26 @@ def mint_session(
     can_create: bool = False,
     user_id: Optional[str] = None,
     email: Optional[str] = None,
-) -> str:
+    sid: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return (signed_cookie_value, session_id)."""
+    session_id = (sid or "").strip() or new_session_id()
     payload: Dict[str, Any] = {
         "name": name,
         "room_id": room_id or "legacy",
         "can_create": bool(can_create),
         "iat": int(time.time()),
+        "sid": session_id,
     }
     if user_id:
         payload["user_id"] = str(user_id)
     if email:
         payload["email"] = str(email)
-    return _serializer().dumps(payload)
+    return _serializer().dumps(payload), session_id
 
 
 def read_identity(cookie_value: Optional[str]) -> Optional[Dict[str, str]]:
+    """Verify signature only. Callers must also check the session registry."""
     if not cookie_value:
         return None
     try:
@@ -123,6 +147,10 @@ def read_identity(cookie_value: Optional[str]) -> Optional[Dict[str, str]]:
     except (BadSignature, SignatureExpired):
         return None
     if not isinstance(data, dict):
+        return None
+    sid = str(data.get("sid") or "").strip()
+    if not sid or len(sid) > 80:
+        # Pre-registry cookies fail closed.
         return None
     name = normalize_name(str(data.get("name") or ""))
     if not name:
@@ -134,6 +162,7 @@ def read_identity(cookie_value: Optional[str]) -> Optional[Dict[str, str]]:
         "name": name,
         "room_id": room_id,
         "can_create": "1" if data.get("can_create") else "",
+        "sid": sid,
     }
     user_id = str(data.get("user_id") or "").strip()
     if user_id:

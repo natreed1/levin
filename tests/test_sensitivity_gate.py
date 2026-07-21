@@ -34,6 +34,7 @@ def test_gate_external_destinations_cap_at_internal():
 def test_gate_local_destinations_allow_confidential():
     assert_destination_allowed("qwen", Sensitivity.CONFIDENTIAL)
     assert_destination_allowed("local_stub", Sensitivity.CONFIDENTIAL)
+    assert_destination_allowed("ollama", Sensitivity.CONFIDENTIAL)
 
 
 def test_gate_restricted_blocked_everywhere():
