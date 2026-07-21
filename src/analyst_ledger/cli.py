@@ -200,6 +200,24 @@ def cmd_sync(args: argparse.Namespace) -> int:
             export_dir=Path(args.dir).expanduser() if args.dir else None,
         )
         return 0
+    if source == "messenger":
+        from .messenger_sync import sync_messenger
+
+        result = sync_messenger(limit=args.limit, tag=not args.no_tag)
+        status = result.get("status")
+        if status == "disabled":
+            print("messenger: sync disabled (ANALYST_MESSENGER_SYNC=off)")
+            return 0
+        if status == "skipped":
+            print(f"messenger: skip ({result.get('reason')})")
+            return 0
+        print(
+            f"messenger: {result['ingested']} new message(s) across "
+            f"{result['rooms']} room(s); {result['tagged']} ask(s) tagged"
+        )
+        for err in result.get("errors") or []:
+            print(f"  warn: {err}")
+        return 0
     if source == "all":
         total = 0
         # Obsidian (optional)
@@ -553,6 +571,16 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("--once", action="store_true")
     gd.add_argument("--poll", type=float, default=5.0)
     gd.set_defaults(func=cmd_sync)
+
+    msgr = sync_sub.add_parser(
+        "messenger",
+        help="Pull hosted messenger rooms into the local ledger (read-only, idempotent)",
+    )
+    msgr.add_argument("--limit", type=int, default=200, help="Max messages per room")
+    msgr.add_argument(
+        "--no-tag", action="store_true", help="Skip the actionable tagger on ingest"
+    )
+    msgr.set_defaults(func=cmd_sync)
 
     sall = sync_sub.add_parser("all", help="Run one-shot sync for all configured sources")
     sall.add_argument("--vault", default=None)
