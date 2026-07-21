@@ -25,6 +25,7 @@ from .friend_personalities import (
     DEFAULT_PERSONALITY,
     MENTION_RE,
     PERSONALITIES,
+    PERSONALITIES_BY_ID,
     FriendPersonality,
     match_personality,
     strip_personality_mentions,
@@ -42,7 +43,9 @@ from .messenger_bridge import (
     _request,
     _save_jar,
     ensure_session_as,
+    list_bot_rooms,
     list_raw_messages,
+    list_room_messages,
     messenger_configured,
 )
 from .paths import data_dir
@@ -60,7 +63,33 @@ from .web_search import (
 QWEN_THREAD_ID = "qwen"
 QWEN_NAME = "Qwen"
 RESEARCH_INTENT_RE = re.compile(
-    r"(?<!\w)(?:research|look\s+up|search|dig\s+into)\b",
+    r"(?<!\w)(?:"
+    r"research|search|google|look\s+up|look\s+into|look\s+for|"
+    r"dig\s+into|dig\s+up|find\s+out|pull\s+up|"
+    r"what'?s\s+the\s+latest|latest\s+on|any\s+(?:recent\s+)?news"
+    r")\b",
+    re.IGNORECASE,
+)
+# Softer action verbs that only imply research when paired with a current-info
+# noun (e.g. "find the filings", "verify their margins", "check recent news").
+_RESEARCH_ACTION_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"find|verify|confirm|fact[-\s]?check|double[-\s]?check|check|"
+    r"pull|fetch|get|see\s+if|tell\s+me|show\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+_CURRENT_INFO_RE = re.compile(
+    r"\b(?:latest|recent|current|today|this\s+(?:week|month|quarter|year)|"
+    r"news|filing|filings|10-?k|10-?q|8-?k|sec|earnings|results|guidance|"
+    r"revenue|margin|margins|profit|profits|valuation|price|shares|report|"
+    r"reports|announce|announced|update|updates|outlook|forecast)\b",
+    re.IGNORECASE,
+)
+# Follow-ups that ask the bot to carry out a just-stated request.
+_FOLLOWUP_DO_RE = re.compile(
+    r"(?<!\w)(?:do\s+(?:this|that|it|so|the\s+same)|go\s+ahead|please\s+do|"
+    r"can\s+you\s+do\s+(?:this|that|it)|same|as\s+well|you\s+too)\b",
     re.IGNORECASE,
 )
 CONTEXT_REFERENCE_RE = re.compile(
@@ -73,6 +102,10 @@ STRUCTURED_FINANCE_RE = re.compile(
 )
 _TICK_LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
+# A research job runs in a daemon thread; if it takes longer than this (or the
+# process restarted mid-run) the "researching" flag is treated as stale so new
+# requests are not blocked forever.
+STALE_RESEARCH_SECONDS = 240.0
 
 
 def _today_utc() -> str:
@@ -120,9 +153,19 @@ def _state_path() -> Path:
     return path
 
 
-def _default_state() -> Dict[str, Any]:
+_ROOM_FIELDS = (
+    "last_replied_id",
+    "research_status",
+    "research_progress",
+    "research_query",
+    "research_started_at",
+    "research_trigger_id",
+    "research_error",
+)
+
+
+def _default_room_state() -> Dict[str, Any]:
     return {
-        "enabled": False,
         "last_replied_id": 0,
         "research_status": "idle",
         "research_progress": "",
@@ -130,6 +173,31 @@ def _default_state() -> Dict[str, Any]:
         "research_started_at": None,
         "research_trigger_id": None,
         "research_error": "",
+    }
+
+
+def _normalize_room_state(data: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(data.get("research_status") or "idle")
+    if status not in {"idle", "researching", "failed"}:
+        status = "idle"
+    return {
+        "last_replied_id": int(data.get("last_replied_id") or 0),
+        "research_status": status,
+        "research_progress": str(data.get("research_progress") or ""),
+        "research_query": str(data.get("research_query") or ""),
+        "research_started_at": data.get("research_started_at"),
+        "research_trigger_id": data.get("research_trigger_id"),
+        "research_error": str(data.get("research_error") or ""),
+    }
+
+
+def _default_state() -> Dict[str, Any]:
+    # Legacy room progress lives at the top level for backward compatibility;
+    # created rooms live under ``rooms``.
+    return {
+        "enabled": False,
+        **_default_room_state(),
+        "rooms": {},
         "last_finance_symbol": None,
         "last_finance_intent": None,
     }
@@ -146,18 +214,15 @@ def load_state() -> Dict[str, Any]:
         return dict(base)
     if not isinstance(data, dict):
         return dict(base)
-    status = str(data.get("research_status") or "idle")
-    if status not in {"idle", "researching", "failed"}:
-        status = "idle"
+    rooms: Dict[str, Any] = {}
+    for rid, rstate in (data.get("rooms") or {}).items():
+        if isinstance(rstate, dict):
+            rooms[str(rid)] = _normalize_room_state(rstate)
+    legacy = _normalize_room_state(data)
     return {
         "enabled": bool(data.get("enabled")),
-        "last_replied_id": int(data.get("last_replied_id") or 0),
-        "research_status": status,
-        "research_progress": str(data.get("research_progress") or ""),
-        "research_query": str(data.get("research_query") or ""),
-        "research_started_at": data.get("research_started_at"),
-        "research_trigger_id": data.get("research_trigger_id"),
-        "research_error": str(data.get("research_error") or ""),
+        **legacy,
+        "rooms": rooms,
         "last_finance_symbol": data.get("last_finance_symbol"),
         "last_finance_intent": data.get("last_finance_intent"),
     }
@@ -165,15 +230,14 @@ def load_state() -> Dict[str, Any]:
 
 def save_state(state: Dict[str, Any]) -> None:
     path = _state_path()
+    rooms: Dict[str, Any] = {}
+    for rid, rstate in (state.get("rooms") or {}).items():
+        if isinstance(rstate, dict):
+            rooms[str(rid)] = _normalize_room_state(rstate)
     payload = {
         "enabled": bool(state.get("enabled")),
-        "last_replied_id": int(state.get("last_replied_id") or 0),
-        "research_status": str(state.get("research_status") or "idle"),
-        "research_progress": str(state.get("research_progress") or ""),
-        "research_query": str(state.get("research_query") or ""),
-        "research_started_at": state.get("research_started_at"),
-        "research_trigger_id": state.get("research_trigger_id"),
-        "research_error": str(state.get("research_error") or ""),
+        **_normalize_room_state(state),
+        "rooms": rooms,
         "last_finance_symbol": state.get("last_finance_symbol"),
         "last_finance_intent": state.get("last_finance_intent"),
     }
@@ -181,46 +245,116 @@ def save_state(state: Dict[str, Any]) -> None:
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _update_research(**fields: Any) -> Dict[str, Any]:
-    """Merge research activity fields into persisted state (thread-safe)."""
+def _read_raw_locked() -> Dict[str, Any]:
+    path = _state_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return raw
+
+
+def room_progress(state: Dict[str, Any], room_id: str) -> Dict[str, Any]:
+    """Per-room progress from a loaded state dict."""
+    if room_id == "legacy":
+        return _normalize_room_state(state)
+    room = (state.get("rooms") or {}).get(room_id)
+    return _normalize_room_state(room or {})
+
+
+def _write_raw_locked(raw: Dict[str, Any]) -> None:
+    rooms: Dict[str, Any] = {}
+    for rid, rstate in (raw.get("rooms") or {}).items():
+        if isinstance(rstate, dict):
+            rooms[str(rid)] = _normalize_room_state(rstate)
+    payload = {
+        "enabled": bool(raw.get("enabled")),
+        **_normalize_room_state(raw),
+        "rooms": rooms,
+        "last_finance_symbol": raw.get("last_finance_symbol"),
+        "last_finance_intent": raw.get("last_finance_intent"),
+    }
+    _state_path().write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _update_room(room_id: str, **fields: Any) -> Dict[str, Any]:
+    """Merge per-room progress fields into persisted state (thread-safe)."""
+    updates = {k: v for k, v in fields.items() if k in _ROOM_FIELDS}
     with _STATE_LOCK:
-        path = _state_path()
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, json.JSONDecodeError):
-            raw = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        merged = {**_default_state(), **raw, **fields}
-        path.write_text(
-            json.dumps(
-                {
-                    "enabled": bool(merged.get("enabled")),
-                    "last_replied_id": int(merged.get("last_replied_id") or 0),
-                    "research_status": str(merged.get("research_status") or "idle"),
-                    "research_progress": str(merged.get("research_progress") or ""),
-                    "research_query": str(merged.get("research_query") or ""),
-                    "research_started_at": merged.get("research_started_at"),
-                    "research_trigger_id": merged.get("research_trigger_id"),
-                    "research_error": str(merged.get("research_error") or ""),
-                    "last_finance_symbol": merged.get("last_finance_symbol"),
-                    "last_finance_intent": merged.get("last_finance_intent"),
-                },
-                indent=2,
+        raw = _read_raw_locked()
+        if room_id == "legacy":
+            current = _normalize_room_state(raw)
+            current.update(updates)
+            raw.update(current)
+        else:
+            rooms = raw.get("rooms")
+            if not isinstance(rooms, dict):
+                rooms = {}
+            current = _normalize_room_state(rooms.get(room_id) or {})
+            current.update(updates)
+            rooms[room_id] = current
+            raw["rooms"] = rooms
+        _write_raw_locked(raw)
+        return dict(current)
+
+
+def _update_research(room_id: str = "legacy", **fields: Any) -> Dict[str, Any]:
+    """Backward-compatible research updater; defaults to the legacy room."""
+    return _update_room(room_id, **fields)
+
+
+def reset_inflight_research() -> None:
+    """Clear any ``researching`` flags left over from a prior process.
+
+    Research runs in daemon threads that die with the process, so on startup any
+    persisted ``researching`` status is stale and would otherwise block new
+    requests until the timeout elapses.
+    """
+    st = load_state()
+    for room_id in ["legacy", *list(st.get("rooms") or {})]:
+        prog = room_progress(st, room_id)
+        if (prog.get("research_status") or "idle") == "researching":
+            _update_room(
+                room_id,
+                research_status="idle",
+                research_progress="",
+                research_started_at=None,
+                research_trigger_id=None,
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        return {
-            "enabled": bool(merged.get("enabled")),
-            "last_replied_id": int(merged.get("last_replied_id") or 0),
-            "research_status": str(merged.get("research_status") or "idle"),
-            "research_progress": str(merged.get("research_progress") or ""),
-            "research_query": str(merged.get("research_query") or ""),
-            "research_started_at": merged.get("research_started_at"),
-            "research_trigger_id": merged.get("research_trigger_id"),
-            "research_error": str(merged.get("research_error") or ""),
-        }
+
+
+def _active_research_view(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Surface the most relevant research activity across all watched rooms.
+
+    Prefers a room that is actively researching, then a failed one, else legacy.
+    """
+    candidates: List[tuple[str, Dict[str, Any]]] = [
+        ("legacy", room_progress(state, "legacy"))
+    ]
+    for rid in (state.get("rooms") or {}):
+        candidates.append((rid, room_progress(state, rid)))
+
+    def _rank(item: tuple[str, Dict[str, Any]]) -> tuple[int, float]:
+        _rid, prog = item
+        status = prog.get("research_status") or "idle"
+        weight = {"researching": 2, "failed": 1, "idle": 0}.get(status, 0)
+        started = prog.get("research_started_at") or 0
+        return (weight, float(started or 0))
+
+    _rid, prog = max(candidates, key=_rank)
+    return {
+        "research_status": prog.get("research_status") or "idle",
+        "research_progress": prog.get("research_progress") or "",
+        "research_query": prog.get("research_query") or "",
+        "research_started_at": prog.get("research_started_at"),
+        "research_trigger_id": prog.get("research_trigger_id"),
+        "research_error": prog.get("research_error") or "",
+        "research_room_id": _rid,
+    }
 
 
 def qwen_endpoint_info() -> Dict[str, str]:
@@ -297,12 +431,7 @@ def qwen_status() -> Dict[str, Any]:
         ],
         "last_replied_id": st["last_replied_id"],
         "endpoint": probe,
-        "research_status": st.get("research_status") or "idle",
-        "research_progress": st.get("research_progress") or "",
-        "research_query": st.get("research_query") or "",
-        "research_started_at": st.get("research_started_at"),
-        "research_trigger_id": st.get("research_trigger_id"),
-        "research_error": st.get("research_error") or "",
+        **_active_research_view(st),
         "hint": (
             "Add Qwen from the Friend room, then mention @Qwen or "
             "@Qwen-Contrarian. Add 'research' for background web research."
@@ -353,9 +482,18 @@ def set_qwen_in_conversation(enabled: bool) -> Dict[str, Any]:
     return qwen_status()
 
 
-def _post_as_qwen(body: str) -> Dict[str, Any]:
-    ensure_session_as(QWEN_NAME, cookie_key="qwen")
-    opener = _opener_for("qwen")
+def _room_cookie_key(cookie_key: str, room_id: str) -> str:
+    """Per-room cookie jar so the bot can sit in many rooms at once."""
+    if room_id == "legacy":
+        return cookie_key
+    safe = "".join(c for c in room_id if c.isalnum() or c in "-_") or "room"
+    return f"{cookie_key}__{safe}"
+
+
+def _post_as_qwen(body: str, room_id: str = "legacy") -> Dict[str, Any]:
+    cookie_key = _room_cookie_key("qwen", room_id)
+    ensure_session_as(QWEN_NAME, cookie_key=cookie_key, room_id=room_id)
+    opener = _opener_for(cookie_key)
     data = _request(
         "POST",
         "/api/messages",
@@ -371,12 +509,13 @@ def _post_as_qwen(body: str) -> Dict[str, Any]:
 
 
 def _post_as_personality(
-    personality: FriendPersonality, body: str
+    personality: FriendPersonality, body: str, room_id: str = "legacy"
 ) -> Dict[str, Any]:
     if personality.id == DEFAULT_PERSONALITY.id:
-        return _post_as_qwen(body)
-    ensure_session_as(personality.name, cookie_key=personality.cookie_key)
-    opener = _opener_for(personality.cookie_key)
+        return _post_as_qwen(body, room_id)
+    cookie_key = _room_cookie_key(personality.cookie_key, room_id)
+    ensure_session_as(personality.name, cookie_key=cookie_key, room_id=room_id)
+    opener = _opener_for(cookie_key)
     data = _request(
         "POST",
         "/api/messages",
@@ -391,9 +530,70 @@ def _post_as_personality(
     return data.get("message") or {}
 
 
+def _wants_current_info(text: str) -> bool:
+    """True if the message asks for something that needs a live lookup."""
+    value = text or ""
+    if RESEARCH_INTENT_RE.search(value):
+        return True
+    # "find the filings", "verify their margins", "check recent news", etc.
+    if _RESEARCH_ACTION_RE.search(value) and _CURRENT_INFO_RE.search(value):
+        return True
+    # Explicit finance intent about current data (filings / news).
+    if classify_finance_intent(value) in {"filings", "news"}:
+        return True
+    return False
+
+
 def _is_research_request(body: str) -> bool:
     text = body or ""
-    return bool(MENTION_RE.search(text) and RESEARCH_INTENT_RE.search(text))
+    return bool(MENTION_RE.search(text) and _wants_current_info(text))
+
+
+_NONANSWER_RE = re.compile(
+    r"^(?:hi|hello|hey|greetings|good\s+(?:morning|afternoon|evening)|"
+    r"i'?m\s+here|i\s+am\s+here|sure[!,. ]|of\s+course)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_nonanswer(reply: str, symbol: Optional[str] = None) -> bool:
+    """Detect vacuous 'how can I help' style replies with no real content."""
+    text = (reply or "").strip()
+    if len(text) < 40:
+        return True
+    low = text.lower()
+    filler = (
+        _NONANSWER_RE.match(text)
+        or "feel free to ask" in low
+        or "how can i help" in low
+        or "let me know if" in low[:60]
+    )
+    if filler and (not symbol or symbol.upper() not in text.upper()):
+        return True
+    return False
+
+
+def _deterministic_research_brief(
+    symbol: str, hits: List[Dict[str, Any]]
+) -> str:
+    """Grounded fallback: verifiable market facts + the top sources found."""
+    parts: List[str] = []
+    try:
+        brief = build_financial_brief(symbol)
+    except Exception:  # noqa: BLE001
+        brief = ""
+    if brief:
+        parts.append(brief)
+    sources: List[str] = []
+    for hit in hits[:5]:
+        url = str(hit.get("url") or "").strip()
+        if not url:
+            continue
+        title = str(hit.get("title") or "").strip()
+        sources.append(f"- {title}: {url}" if title else f"- {url}")
+    if sources:
+        parts.append("Top sources I found:\n" + "\n".join(sources))
+    return "\n\n".join(p for p in parts if p).strip()
 
 
 def _context_snippet(
@@ -619,17 +819,26 @@ def _run_research_job(
     trigger: Dict[str, Any],
     context: List[Dict[str, Any]],
     personality: FriendPersonality = DEFAULT_PERSONALITY,
+    room_id: str = "legacy",
 ) -> None:
+    def _upd(**fields: Any) -> Dict[str, Any]:
+        return _update_room(room_id, **fields)
+
     trigger_id = int(trigger.get("id") or 0)
     trigger_body = str(trigger.get("body") or "").strip()
     context_text = _format_context_lines(context)
     try:
-        _update_research(research_progress="Drafting search queries…")
+        _upd(research_progress="Drafting search queries…")
         prior_state = load_state()
+        # Prefer a company named in *this* request (tickers + aliases), then the
+        # surrounding chat, then remembered state, and only as a last resort a
+        # network SEC name lookup (which can false-match ordinary words).
+        # Never let a stale symbol override a company the user explicitly named.
         symbol = (
             resolve_symbol(trigger_body, allow_network=False)
+            or resolve_symbol("", context_text, allow_network=False)
             or prior_state.get("last_finance_symbol")
-            or resolve_symbol(trigger_body, context_text)
+            or resolve_symbol(trigger_body, context_text, allow_network=True)
         )
         direct_intent = classify_finance_intent(trigger_body)
         intent = (
@@ -647,23 +856,23 @@ def _run_research_job(
         queries.extend(model_queries)
         queries = list(dict.fromkeys(q for q in queries if q))[:4]
         topic = queries[0] if queries else trigger_body
-        _update_research(research_query=topic, research_progress="Searching…")
+        _upd(research_query=topic, research_progress="Searching…")
 
         all_hits: List[Dict[str, Any]] = []
         seen_urls: set[str] = set()
         for q in queries:
-            _update_research(research_progress=f"Searching: {q[:80]}")
+            _upd(research_progress=f"Searching: {q[:80]}")
             for hit in bing_search(q, limit=5):
                 url = str(hit.get("url") or "")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_hits.append(hit)
 
-        _update_research(research_progress="Reading results…")
+        _upd(research_progress="Reading results…")
         ranked_hits = rank_search_hits(all_hits, intent=intent)
         trusted_hits = enrich_trusted_hits(ranked_hits[:8], max_pages=2)
         hits_text = format_hits_for_prompt(trusted_hits)
-        _update_research(research_progress="Writing reply…")
+        _upd(research_progress="Writing reply…")
         if intent == "outlook" and symbol:
             evidence = build_outlook_evidence(symbol)
             evidence["trusted_sources"] = [
@@ -723,14 +932,19 @@ def _run_research_job(
                 synthesis_context, trigger_body, source_text, personality
             )
         reply = _clean_model_reply(reply, personality)
+        if symbol and _looks_like_nonanswer(reply, symbol):
+            fallback = _deterministic_research_brief(symbol, trusted_hits)
+            if fallback:
+                reply = fallback
         if not reply:
             raise RuntimeError("empty research reply")
 
-        posted = _post_as_personality(personality, reply)
+        posted = _post_as_personality(personality, reply, room_id)
         posted_id = int(posted.get("id") or 0)
         st = load_state()
-        if posted_id > int(st.get("last_replied_id") or 0):
-            _update_research(
+        prior = room_progress(st, room_id)
+        if posted_id > int(prior.get("last_replied_id") or 0):
+            _upd(
                 last_replied_id=posted_id,
                 research_status="idle",
                 research_progress="",
@@ -740,7 +954,7 @@ def _run_research_job(
                 research_trigger_id=None,
             )
         else:
-            _update_research(
+            _upd(
                 research_status="idle",
                 research_progress="",
                 research_error="",
@@ -752,11 +966,11 @@ def _run_research_job(
         err = str(exc)[:240]
         try:
             _post_as_personality(
-                personality, f"Couldn't finish research: {err}"
+                personality, f"Couldn't finish research: {err}", room_id
             )
         except Exception:  # noqa: BLE001
             pass
-        _update_research(
+        _upd(
             research_status="failed",
             research_progress="",
             research_error=err,
@@ -769,6 +983,7 @@ def _start_research(
     trigger: Dict[str, Any],
     raw: List[Dict[str, Any]],
     personality: FriendPersonality = DEFAULT_PERSONALITY,
+    room_id: str = "legacy",
 ) -> Dict[str, Any]:
     context = _context_snippet(raw, trigger, n=8)
     trigger_id = int(trigger.get("id") or 0)
@@ -777,28 +992,27 @@ def _start_research(
     )
     topic_hint = re.sub(r"\s+", " ", topic_hint).strip(" .,!?") or "your request"
 
-    ack = _post_as_personality(personality, "On it — researching…")
+    ack = _post_as_personality(personality, "On it — researching…", room_id)
     ack_id = int(ack.get("id") or trigger_id or 0)
 
-    st = load_state()
-    st["last_replied_id"] = max(int(st.get("last_replied_id") or 0), trigger_id, ack_id)
-    st["research_status"] = "researching"
-    st["research_progress"] = "Starting…"
-    st["research_query"] = topic_hint
-    st["research_started_at"] = time.time()
-    st["research_trigger_id"] = trigger_id
-    st["research_error"] = ""
-    save_state(st)
-
-    args = (
-        (trigger, context)
-        if personality.id == DEFAULT_PERSONALITY.id
-        else (trigger, context, personality)
+    prior = room_progress(load_state(), room_id)
+    _update_room(
+        room_id,
+        last_replied_id=max(
+            int(prior.get("last_replied_id") or 0), trigger_id, ack_id
+        ),
+        research_status="researching",
+        research_progress="Starting…",
+        research_query=topic_hint,
+        research_started_at=time.time(),
+        research_trigger_id=trigger_id,
+        research_error="",
     )
+
     thread = threading.Thread(
         target=_run_research_job,
-        args=args,
-        name=f"{personality.id}-research-{trigger_id}",
+        args=(trigger, context, personality, room_id),
+        name=f"{personality.id}-research-{room_id}-{trigger_id}",
         daemon=True,
     )
     thread.start()
@@ -807,25 +1021,22 @@ def _start_research(
         "enabled": True,
         "replied": True,
         "research": True,
+        "room_id": room_id,
         "personality": personality.id,
         "trigger_id": trigger_id,
         "message": ack,
     }
 
 
-def _load_room_messages() -> List[Dict[str, Any]]:
-    try:
-        return list_raw_messages(limit=80)
-    except MessengerBridgeError:
-        ensure_session_as(QWEN_NAME, cookie_key="qwen")
-        opener = _opener_for("qwen")
-        data = _request("GET", "/api/messages?limit=80", opener=opener)
-        _save_jar(opener)
-        return [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+def _load_room_messages(room_id: str = "legacy") -> List[Dict[str, Any]]:
+    cookie_key = _room_cookie_key("qwen", room_id)
+    return list_room_messages(
+        room_id, cookie_key=cookie_key, name=QWEN_NAME, limit=80
+    )
 
 
 def tick_qwen() -> Dict[str, Any]:
-    """Reply as the exact Qwen personality mentioned since the last response."""
+    """Reply as the mentioned Qwen personality across every watched room."""
     if not _TICK_LOCK.acquire(blocking=False):
         return {"ok": True, "skipped": "busy"}
     try:
@@ -835,43 +1046,124 @@ def tick_qwen() -> Dict[str, Any]:
         if not messenger_configured():
             return {"ok": False, "error": "messenger not configured", "replied": False}
 
-        raw = _load_room_messages()
-        trigger = _find_pending_mention(raw, int(st.get("last_replied_id") or 0))
-        if not trigger:
-            return {"ok": True, "enabled": True, "replied": False}
+        try:
+            rooms = list_bot_rooms()
+        except MessengerBridgeError:
+            rooms = [{"room_id": "legacy"}]
+        room_ids = list(
+            dict.fromkeys(str(r.get("room_id") or "legacy") for r in rooms)
+        ) or ["legacy"]
 
-        body = str(trigger.get("body") or "")
-        personality = match_personality(body)
-        if personality is None:
-            return {"ok": True, "enabled": True, "replied": False}
-        personality_names = {item.name for item in PERSONALITIES}
-        human_context = [
-            message
-            for message in _context_snippet(raw, trigger, n=12)
-            if str(message.get("author") or "") not in personality_names
-        ]
-        recent_context = _format_context_lines(human_context)
-        finance_symbol = resolve_symbol(
-            body, recent_context, allow_network=False
-        )
-        finance_intent = classify_finance_intent(f"{recent_context}\n{body}")
-        if finance_symbol:
-            st["last_finance_symbol"] = finance_symbol
-        if finance_intent != "general":
-            st["last_finance_intent"] = finance_intent
-        if finance_symbol or finance_intent != "general":
-            save_state(st)
-        if _is_research_request(body):
-            if (st.get("research_status") or "idle") == "researching":
+        results: List[Dict[str, Any]] = []
+        replied_any = False
+        for room_id in room_ids:
+            try:
+                res = _tick_room(room_id) or {
+                    "ok": True,
+                    "room_id": room_id,
+                    "replied": False,
+                }
+            except MessengerBridgeError as exc:
+                res = {"ok": False, "room_id": room_id, "error": str(exc)}
+            results.append(res)
+            if res.get("replied"):
+                replied_any = True
+
+        # Promote a representative room result to the top level: prefer a room
+        # that replied, then one that was skipped, else the first.
+        primary = next(
+            (r for r in results if r.get("replied")),
+            next((r for r in results if r.get("skipped")), None),
+        ) or (results[0] if results else {})
+        summary = {
+            "ok": True,
+            "enabled": True,
+            "replied": replied_any,
+            "rooms": results,
+        }
+        for key in (
+            "research",
+            "personality",
+            "trigger_id",
+            "message",
+            "skipped",
+            "room_id",
+        ):
+            if key in primary:
+                summary[key] = primary[key]
+        return summary
+    finally:
+        _TICK_LOCK.release()
+
+
+def _tick_room(room_id: str) -> Dict[str, Any]:
+    """Handle one pending mention in a single room (called under the tick lock)."""
+    st = load_state()
+    progress = room_progress(st, room_id)
+    raw = _load_room_messages(room_id)
+    trigger = _find_pending_mention(raw, int(progress.get("last_replied_id") or 0))
+    if not trigger:
+        return {"ok": True, "room_id": room_id, "replied": False}
+
+    body = str(trigger.get("body") or "")
+    personality = match_personality(body)
+    if personality is None:
+        return {"ok": True, "room_id": room_id, "replied": False}
+    personality_names = {item.name for item in PERSONALITIES}
+    human_context = [
+        message
+        for message in _context_snippet(raw, trigger, n=12)
+        if str(message.get("author") or "") not in personality_names
+    ]
+    recent_context = _format_context_lines(human_context)
+    finance_symbol = resolve_symbol(body, recent_context, allow_network=False)
+    finance_intent = classify_finance_intent(f"{recent_context}\n{body}")
+    # Finance memory is shared across rooms.
+    if finance_symbol:
+        st["last_finance_symbol"] = finance_symbol
+    if finance_intent != "general":
+        st["last_finance_intent"] = finance_intent
+    if finance_symbol or finance_intent != "general":
+        save_state(st)
+    research_trigger = trigger
+    do_research = _is_research_request(body)
+    # Follow-ups like "@Qwen can you do this" inherit the most recent human
+    # request that needed a live lookup, so the agent actually searches.
+    if not do_research and MENTION_RE.search(body) and _FOLLOWUP_DO_RE.search(body):
+        for prior in reversed(human_context[:-1]):
+            prior_body = str(prior.get("body") or "")
+            if _wants_current_info(prior_body):
+                do_research = True
+                merged = strip_personality_mentions(prior_body).strip()
+                research_trigger = {
+                    **trigger,
+                    "body": f"{merged} ({strip_personality_mentions(body).strip()})",
+                }
+                break
+    if do_research:
+        if (progress.get("research_status") or "idle") == "researching":
+            started = progress.get("research_started_at")
+            stale = bool(started) and (
+                time.time() - float(started) >= STALE_RESEARCH_SECONDS
+            )
+            if not stale:
                 return {
                     "ok": True,
-                    "enabled": True,
+                    "room_id": room_id,
                     "replied": False,
                     "skipped": "researching",
                 }
-            return _start_research(trigger, raw, personality)
+            # Hung job in this process: clear and start fresh.
+            _update_room(
+                room_id,
+                research_status="idle",
+                research_progress="",
+                research_started_at=None,
+                research_trigger_id=None,
+            )
+        return _start_research(research_trigger, raw, personality, room_id)
 
-        system = (
+    system = (
             f"You are {personality.name}, a participant in a casual group chat. "
             f"{personality.prompt} Today is {_today_utc()} UTC. "
             f"Someone mentioned you with {personality.mention}. "
@@ -884,34 +1176,34 @@ def tick_qwen() -> Dict[str, Any]:
             "the evidence. Never compare quantities with different units or unrelated "
             "periods. A falsification test must name evidence that could disprove the "
             "claim or caution being tested. Never turn missing evidence into an "
-            "affirmative claim. "
-            "Reply briefly and naturally in plain text. "
-            "Do not provide personalized trading advice. "
-            "Do not repeat your mention in the reply unless useful."
+        "affirmative claim. "
+        "Reply briefly and naturally in plain text. "
+        "Do not provide personalized trading advice. "
+        "Do not repeat your mention in the reply unless useful."
+    )
+    messages = _build_chat_messages(raw, trigger, personality)
+    try:
+        reply = _call_openai_compatible_messages(
+            messages, max_tokens=512, system=system, temperature=0.2
         )
-        messages = _build_chat_messages(raw, trigger, personality)
-        try:
-            reply = _call_openai_compatible_messages(
-                messages, max_tokens=512, system=system, temperature=0.2
-            )
-        except RuntimeError as exc:
-            raise MessengerBridgeError(str(exc), status=503) from exc
-        reply = _clean_model_reply(reply, personality)
-        if not reply:
-            raise MessengerBridgeError("Qwen returned an empty reply")
+    except RuntimeError as exc:
+        raise MessengerBridgeError(str(exc), status=503) from exc
+    reply = _clean_model_reply(reply, personality)
+    if not reply:
+        raise MessengerBridgeError("Qwen returned an empty reply")
 
-        posted = _post_as_personality(personality, reply)
-        st = load_state()
-        st["last_replied_id"] = int(posted.get("id") or trigger.get("id") or 0)
-        save_state(st)
-        return {
-            "ok": True,
-            "enabled": True,
-            "replied": True,
-            "research": False,
-            "personality": personality.id,
-            "trigger_id": trigger.get("id"),
-            "message": posted,
-        }
-    finally:
-        _TICK_LOCK.release()
+    posted = _post_as_personality(personality, reply, room_id)
+    _update_room(
+        room_id,
+        last_replied_id=int(posted.get("id") or trigger.get("id") or 0),
+    )
+    return {
+        "ok": True,
+        "enabled": True,
+        "replied": True,
+        "research": False,
+        "room_id": room_id,
+        "personality": personality.id,
+        "trigger_id": trigger.get("id"),
+        "message": posted,
+    }

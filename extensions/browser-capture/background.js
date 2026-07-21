@@ -3,7 +3,7 @@
  * Modes: allowlist sites (toggleable) | deep research (any https) | denylist | excludes
  */
 
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8788/api/ingest-browser";
+const DEFAULT_ENDPOINT = "http://127.0.0.1:8790/api/ingest-browser";
 
 /** Preset research sites — each can be toggled on/off in the popup */
 const SITE_PRESETS = [
@@ -56,6 +56,8 @@ const DENIED_SCHEMES = [
 
 let lastKey = "";
 let lastAt = 0;
+let lastScopeSessionId = "";
+let cachedScope = { session_id: null, capture_scope: null, at: 0 };
 
 function suffixMatch(hostname, suffixes) {
   const h = (hostname || "").toLowerCase();
@@ -65,6 +67,29 @@ function suffixMatch(hostname, suffixes) {
 
 function hostDenied(hostname) {
   return suffixMatch(hostname, DENY_SUFFIXES);
+}
+
+/** Local Workflow / Analyst Ledger UIs — never capture, never surface as errors. */
+function isLedgerAppUrl(url, endpoint) {
+  try {
+    const u = new URL(url);
+    const h = (u.hostname || "").toLowerCase();
+    if (h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
+      return false;
+    }
+    const port = parseInt(u.port, 10) || (u.protocol === "https:" ? 443 : 80);
+    const ports = new Set([8788, 8790]);
+    try {
+      const ep = new URL(endpoint || DEFAULT_ENDPOINT);
+      const epPort = parseInt(ep.port, 10) || 80;
+      ports.add(epPort);
+    } catch {
+      /* ignore */
+    }
+    return ports.has(port);
+  } catch {
+    return false;
+  }
 }
 
 function defaultSiteEnabled() {
@@ -136,6 +161,7 @@ async function settings() {
     "deepResearch",
     "siteEnabled",
     "excludedHosts",
+    "selectedTabIds",
     "lastStatus",
   ]);
   return {
@@ -145,8 +171,50 @@ async function settings() {
     deepResearch: !!stored.deepResearch,
     siteEnabled: stored.siteEnabled || defaultSiteEnabled(),
     excludedHosts: Array.isArray(stored.excludedHosts) ? stored.excludedHosts : [],
+    selectedTabIds: Array.isArray(stored.selectedTabIds)
+      ? stored.selectedTabIds.map(Number).filter((n) => Number.isFinite(n))
+      : [],
     lastStatus: stored.lastStatus || null,
   };
+}
+
+function summaryUrl(endpoint) {
+  try {
+    const u = new URL(endpoint || DEFAULT_ENDPOINT);
+    return `${u.origin}/api/tracking/summary`;
+  } catch {
+    return "http://127.0.0.1:8790/api/tracking/summary";
+  }
+}
+
+async function fetchSessionScope(force) {
+  const now = Date.now();
+  if (!force && cachedScope.at && now - cachedScope.at < 4000) {
+    return cachedScope;
+  }
+  const cfg = await settings();
+  try {
+    const res = await fetch(summaryUrl(cfg.endpoint), {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      cachedScope = { session_id: null, capture_scope: null, at: now, error: "HTTP " + res.status };
+      return cachedScope;
+    }
+    const data = await res.json();
+    const active = data && data.active_session;
+    cachedScope = {
+      session_id: active ? active.session_id : null,
+      capture_scope: active ? active.capture_scope || "active_tab" : null,
+      at: now,
+    };
+    return cachedScope;
+  } catch (err) {
+    cachedScope = { session_id: null, capture_scope: null, at: now, error: String(err) };
+    return cachedScope;
+  }
 }
 
 async function setStatus(ok, message, extra) {
@@ -164,7 +232,7 @@ async function setStatus(ok, message, extra) {
  * Decide whether this URL may be captured.
  * manual=true bypasses allowlist (still respects denylist + excludes).
  */
-function decideCapture(url, cfg, reason) {
+function decideCapture(url, cfg, reason, scope) {
   const manual = reason === "manual";
   let host = "";
   let scheme = "";
@@ -182,6 +250,9 @@ function decideCapture(url, cfg, reason) {
   if (scheme !== "http:" && scheme !== "https:") {
     return { ok: false, error: "Only http(s) pages can be captured" };
   }
+  if (isLedgerAppUrl(url, cfg.endpoint)) {
+    return { ok: false, skipped: true, reason: "ledger_app", host };
+  }
   if (hostDenied(host)) {
     return {
       ok: false,
@@ -192,11 +263,30 @@ function decideCapture(url, cfg, reason) {
     return { ok: false, error: "Excluded: " + host + " (remove in popup)" };
   }
 
+  const captureScope = scope || null;
+  if (!manual && captureScope === "notes_only") {
+    return { ok: false, skipped: true, reason: "notes_only", host };
+  }
+
   const onPreset = isPresetHost(host) && sitePresetEnabled(host, cfg.siteEnabled);
+  if (captureScope === "research_sites") {
+    if (onPreset || manual) return { ok: true, allowAny: false, host };
+    return {
+      ok: false,
+      error: "Research sites scope — " + host + " is not an enabled preset",
+    };
+  }
+
   if (onPreset) {
     return { ok: true, allowAny: false, host };
   }
-  if (manual || cfg.deepResearch) {
+  if (
+    manual ||
+    cfg.deepResearch ||
+    captureScope === "active_tab" ||
+    captureScope === "all_tabs" ||
+    captureScope === "selected_tabs"
+  ) {
     return { ok: true, allowAny: true, host };
   }
   return {
@@ -208,15 +298,47 @@ function decideCapture(url, cfg, reason) {
   };
 }
 
-async function ingest(url, title, reason, scrape) {
+async function shouldCaptureTab(tab, cfg, reason, scopeInfo) {
+  if (!tab || !tab.url) return { ok: false, error: "No tab url" };
+  const scope = scopeInfo && scopeInfo.capture_scope;
+  if (!scopeInfo.session_id && reason !== "manual") {
+    // No Workflow tracking session — fall back to extension-only rules
+    return decideCapture(tab.url, cfg, reason, null);
+  }
+  if (reason !== "manual" && scope === "notes_only") {
+    return { ok: false, skipped: true, reason: "notes_only" };
+  }
+  if (reason !== "manual" && scope === "selected_tabs") {
+    const id = Number(tab.id);
+    if (!cfg.selectedTabIds.includes(id)) {
+      return { ok: false, skipped: true, reason: "not_selected" };
+    }
+  }
+  if (
+    reason !== "manual" &&
+    scope === "active_tab" &&
+    reason !== "all_tabs_snapshot" &&
+    tab.active === false
+  ) {
+    return { ok: false, skipped: true, reason: "inactive_tab" };
+  }
+  return decideCapture(tab.url, cfg, reason === "all_tabs_snapshot" ? "manual" : reason, scope);
+}
+
+async function ingest(url, title, reason, scrape, tabMeta) {
   const cfg = await settings();
   if (!cfg.enabled) {
     await setStatus(false, "Capture is disabled in the popup");
     return { ok: false, error: "disabled" };
   }
 
-  const decision = decideCapture(url, cfg, reason);
+  const scopeInfo = await fetchSessionScope(false);
+  const tab = tabMeta || { url, title, active: true, id: null };
+  const decision = await shouldCaptureTab(tab, cfg, reason, scopeInfo);
   if (!decision.ok) {
+    if (decision.skipped) {
+      return { ok: true, skipped: true, reason: decision.reason };
+    }
     await setStatus(false, decision.error, { url, host: decision.host });
     return { ok: false, error: decision.error };
   }
@@ -228,6 +350,7 @@ async function ingest(url, title, reason, scrape) {
     key === lastKey &&
     now - lastAt < 60000 &&
     reason !== "manual" &&
+    reason !== "all_tabs_snapshot" &&
     !(richScrape && (reason === "hydrate" || reason === "content"))
   ) {
     return { ok: true, deduped: true };
@@ -239,11 +362,11 @@ async function ingest(url, title, reason, scrape) {
     const body = {
       url,
       title: title || "",
-      auto_session: cfg.autoSession,
+      auto_session: cfg.autoSession && !scopeInfo.session_id,
       sensitivity: "internal",
       allow_any: !!decision.allowAny,
-      deep_research: !!cfg.deepResearch,
-      manual: reason === "manual",
+      deep_research: !!cfg.deepResearch || scopeInfo.capture_scope === "all_tabs",
+      manual: reason === "manual" || reason === "all_tabs_snapshot",
     };
     if (scrape && typeof scrape === "object") {
       body.scrape = scrape;
@@ -252,6 +375,7 @@ async function ingest(url, title, reason, scrape) {
     const res = await fetch(cfg.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
@@ -272,40 +396,77 @@ async function ingest(url, title, reason, scrape) {
     await setStatus(true, msg, {
       url,
       symbol: sym,
-      session_id: data.session_id,
+      session_id: data.session_id || scopeInfo.session_id,
       reason,
+      capture_scope: scopeInfo.capture_scope,
     });
     return { ok: true, data };
   } catch (err) {
     await setStatus(
       false,
-      "Cannot reach dashboard — is it running on :8788?",
+      "Cannot reach Workflow — is it running on :8790 (or set Endpoint)?",
       { url }
     );
     return { ok: false, error: String(err) };
   }
 }
 
+async function snapshotAllTabs(scopeInfo) {
+  if (!scopeInfo || !scopeInfo.session_id || scopeInfo.capture_scope !== "all_tabs") {
+    return { ok: true, skipped: true };
+  }
+  if (lastScopeSessionId === scopeInfo.session_id) {
+    return { ok: true, deduped: true };
+  }
+  lastScopeSessionId = scopeInfo.session_id;
+  const tabs = await chrome.tabs.query({});
+  let logged = 0;
+  for (const tab of tabs) {
+    if (!tab.url) continue;
+    const r = await ingest(tab.url, tab.title, "all_tabs_snapshot", null, tab);
+    if (r && r.ok && !r.skipped && !r.deduped) logged += 1;
+  }
+  await setStatus(true, `All-tabs snapshot: logged ${logged} page(s)`, {
+    session_id: scopeInfo.session_id,
+  });
+  return { ok: true, logged };
+}
+
+async function maybeSnapshotForScope() {
+  const scopeInfo = await fetchSessionScope(true);
+  if (scopeInfo.capture_scope === "all_tabs") {
+    return snapshotAllTabs(scopeInfo);
+  }
+  if (!scopeInfo.session_id) {
+    lastScopeSessionId = "";
+  }
+  return scopeInfo;
+}
+
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
+    await maybeSnapshotForScope();
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    if (tab.url) await ingest(tab.url, tab.title, "tab_activated");
+    if (tab.url) await ingest(tab.url, tab.title, "tab_activated", null, tab);
   } catch {
     /* ignore */
   }
 });
 
 chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" && tab.active && tab.url) {
+  const scopeInfo = await fetchSessionScope(false);
+  const trackAll = scopeInfo.capture_scope === "all_tabs" || scopeInfo.capture_scope === "selected_tabs";
+  if (changeInfo.status === "complete" && tab.url && (tab.active || trackAll)) {
     try {
-      await ingest(tab.url, tab.title, "tab_complete");
+      await maybeSnapshotForScope();
+      await ingest(tab.url, tab.title, "tab_complete", null, tab);
     } catch {
       /* ignore */
     }
   }
-  if (changeInfo.url && tab.active) {
+  if (changeInfo.url && (tab.active || trackAll)) {
     try {
-      await ingest(changeInfo.url, tab.title, "url_changed");
+      await ingest(changeInfo.url, tab.title, "url_changed", null, { ...tab, url: changeInfo.url });
     } catch {
       /* ignore */
     }
@@ -316,7 +477,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
   if (details.frameId !== 0) return;
   try {
     const tab = await chrome.tabs.get(details.tabId);
-    if (tab.active) await ingest(details.url, tab.title, "history");
+    if (tab.active) await ingest(details.url, tab.title, "history", null, tab);
   } catch {
     /* ignore */
   }
@@ -336,19 +497,63 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: false, error: "No active tab" });
         return;
       }
-      const r = await ingest(tab.url, tab.title, "manual", null);
+      const r = await ingest(tab.url, tab.title, "manual", null, tab);
       sendResponse(r);
     });
     return true;
   }
+  if (msg && msg.kind === "refresh_scope") {
+    maybeSnapshotForScope()
+      .then((r) => sendResponse({ ok: true, scope: r }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg && msg.kind === "list_open_tabs") {
+    chrome.tabs.query({}, async (tabs) => {
+      const cfg = await settings();
+      const selected = new Set(cfg.selectedTabIds);
+      const rows = [];
+      for (const tab of tabs) {
+        if (!tab.url) continue;
+        let host = "";
+        try {
+          host = new URL(tab.url).hostname;
+        } catch {
+          continue;
+        }
+        if (isLedgerAppUrl(tab.url, cfg.endpoint)) continue;
+        if (DENIED_SCHEMES.some((s) => tab.url.toLowerCase().startsWith(s))) continue;
+        rows.push({
+          id: tab.id,
+          title: (tab.title || host || "Tab").slice(0, 80),
+          host,
+          url: tab.url,
+          active: !!tab.active,
+          selected: selected.has(Number(tab.id)),
+        });
+      }
+      sendResponse({ ok: true, tabs: rows });
+    });
+    return true;
+  }
+  if (msg && msg.kind === "set_selected_tabs") {
+    const ids = Array.isArray(msg.tabIds)
+      ? msg.tabIds.map(Number).filter((n) => Number.isFinite(n))
+      : [];
+    chrome.storage.local.set({ selectedTabIds: ids }, () => {
+      sendResponse({ ok: true, selectedTabIds: ids });
+    });
+    return true;
+  }
   if (msg && msg.kind === "get_capture_config") {
-    settings()
-      .then((cfg) =>
+    Promise.all([settings(), fetchSessionScope(true)])
+      .then(([cfg, scope]) =>
         sendResponse({
           ok: true,
           presets: SITE_PRESETS,
           deny: DENY_SUFFIXES,
           ...cfg,
+          session: scope,
         })
       )
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
@@ -378,5 +583,11 @@ chrome.runtime.onInstalled.addListener(() => {
     deepResearch: false,
     siteEnabled: defaultSiteEnabled(),
     excludedHosts: [],
+    selectedTabIds: [],
   });
 });
+
+// Pick up a newly started all_tabs session even if the user stays on one page.
+setInterval(() => {
+  maybeSnapshotForScope().catch(() => {});
+}, 8000);

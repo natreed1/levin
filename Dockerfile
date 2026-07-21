@@ -1,7 +1,6 @@
-# Prefer building from repo root (see ../Dockerfile). This file remains for
-# messenger-only local image builds that vendor analyst_ledger via pip from src
-# when the build context is the repository root:
-#   docker build -f messenger/Dockerfile -t workflow-messenger .
+# Unified Workflow Messenger — build from the repository root:
+#   fly deploy --config messenger/fly.toml --dockerfile Dockerfile
+# Or: docker build -f Dockerfile -t workflow-messenger .
 
 FROM python:3.12-slim
 

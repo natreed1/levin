@@ -1,10 +1,10 @@
-"""Named Qwen personalities available in the Friend messenger room."""
+"""Named Qwen personalities available in Friend / specialist rooms."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -14,14 +14,44 @@ class FriendPersonality:
     mention: str
     cookie_key: str
     prompt: str
+    role: str = "analyst"  # analyst | bull | bear | synthesizer
 
 
-PERSONALITIES = (
+_PERSONALITY_DEFS = (
+    FriendPersonality(
+        id="qwen",
+        name="Qwen",
+        mention="@Qwen",
+        cookie_key="qwen",
+        role="analyst",
+        prompt=(
+            "Your role is an evidence-led balanced analyst. Answer directly, separate "
+            "verified facts from inference, present the strongest credible bull and "
+            "bear considerations, and name the evidence needed to resolve uncertainty. "
+            "Correct stale premises explicitly. Never invent a fact, date, number, "
+            "source, product, or company initiative."
+        ),
+    ),
+    FriendPersonality(
+        id="qwen-bull",
+        name="Qwen Bull",
+        mention="@Qwen-Bull",
+        cookie_key="qwen-bull",
+        role="bull",
+        prompt=(
+            "Your role is the constructive bull case specialist. Steelman the upside: "
+            "name the specific thesis, the mechanism that creates value, and the "
+            "evidence that would confirm it. Acknowledge the strongest bear risk in "
+            "one sentence, then return to what would make the bull case right. Never "
+            "invent a fact, date, number, source, product, or company initiative."
+        ),
+    ),
     FriendPersonality(
         id="qwen-contrarian",
         name="Qwen Contrarian",
         mention="@Qwen-Contrarian",
         cookie_key="qwen-contrarian",
+        role="bear",
         prompt=(
             "Your role is the evidence-led contrarian. Identify the specific claim "
             "you are challenging, distinguish verified facts from inference, expose "
@@ -37,24 +67,31 @@ PERSONALITIES = (
         ),
     ),
     FriendPersonality(
-        id="qwen",
-        name="Qwen",
-        mention="@Qwen",
-        cookie_key="qwen",
+        id="qwen-synthesizer",
+        name="Qwen Synthesizer",
+        mention="@Qwen-Synthesizer",
+        cookie_key="qwen-synthesizer",
+        role="synthesizer",
         prompt=(
-            "Your role is an evidence-led balanced analyst. Answer directly, separate "
-            "verified facts from inference, present the strongest credible bull and "
-            "bear considerations, and name the evidence needed to resolve uncertainty. "
-            "Correct stale premises explicitly. Never invent a fact, date, number, "
-            "source, product, or company initiative."
+            "Your role is the synthesizer. After hearing multiple specialist views, "
+            "extract shared facts, name the real disagreement, and propose 2–4 "
+            "concrete research ideas or next checks that would move the debate. "
+            "Prefer falsifiable questions over opinions. Never invent a fact, date, "
+            "number, source, product, or company initiative."
         ),
     ),
+)
+
+# Stable public order (tests / UI). Mention matching uses longest-first separately.
+PERSONALITIES = _PERSONALITY_DEFS
+_MENTION_ORDER = tuple(
+    sorted(_PERSONALITY_DEFS, key=lambda p: len(p.mention), reverse=True)
 )
 
 PERSONALITIES_BY_ID = {personality.id: personality for personality in PERSONALITIES}
 DEFAULT_PERSONALITY = PERSONALITIES_BY_ID["qwen"]
 
-# Longest mentions must come first so "@Qwen-Contrarian" never resolves as "@Qwen".
+
 def _mention_pattern(personality: FriendPersonality) -> str:
     """Build a mention pattern, rejecting spaced forms of dashed child names."""
     child_suffixes = [
@@ -74,7 +111,7 @@ def _mention_pattern(personality: FriendPersonality) -> str:
 
 MENTION_RE = re.compile(
     r"(?<!\w)(?:"
-    + "|".join(_mention_pattern(p) for p in PERSONALITIES)
+    + "|".join(_mention_pattern(p) for p in _MENTION_ORDER)
     + r")(?![\w-])",
     re.IGNORECASE,
 )
@@ -109,3 +146,30 @@ def mentioned_personalities(text: str) -> List[FriendPersonality]:
 
 def strip_personality_mentions(text: str) -> str:
     return MENTION_RE.sub(" ", text or "")
+
+
+def resolve_specialists(ids: Optional[Sequence[str]] = None) -> List[FriendPersonality]:
+    """Resolve specialist ids; default to bull + contrarian + synthesizer."""
+    if not ids:
+        ids = ("qwen-bull", "qwen-contrarian", "qwen-synthesizer")
+    out: List[FriendPersonality] = []
+    seen = set()
+    for raw in ids:
+        key = str(raw or "").strip().lower()
+        personality = PERSONALITIES_BY_ID.get(key)
+        if personality and personality.id not in seen:
+            seen.add(personality.id)
+            out.append(personality)
+    return out
+
+
+def specialists_public() -> List[dict]:
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "mention": p.mention,
+            "role": p.role,
+        }
+        for p in sorted(PERSONALITIES, key=lambda x: x.name)
+    ]

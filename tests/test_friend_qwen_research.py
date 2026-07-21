@@ -20,6 +20,40 @@ def test_research_intent_detection():
     assert not fq._is_research_request("email@qwen.com research")
 
 
+def test_research_intent_natural_finance_phrasing():
+    # Natural asks to find/verify/check current data must trigger research.
+    assert fq._is_research_request(
+        "@Qwen can you find Alibaba's recent filings and verify their margins"
+    )
+    assert fq._is_research_request("@Qwen check the latest news on TSLA")
+    assert fq._is_research_request("@Qwen-Contrarian verify their revenue")
+    # Opinions and small talk must not trigger a research pass.
+    assert not fq._is_research_request("@Qwen what do you think about pizza")
+    assert not fq._is_research_request("@Qwen I think Alibaba is a great buy")
+
+
+def test_alibaba_resolves_to_baba_offline():
+    from analyst_ledger.finance_research import resolve_symbol
+
+    assert resolve_symbol("find Alibaba filings", allow_network=False) == "BABA"
+    assert resolve_symbol("what about Netflix", allow_network=False) == "NFLX"
+
+
+def test_nonanswer_fallback_uses_deterministic_brief(monkeypatch):
+    monkeypatch.setattr(
+        fq, "build_financial_brief", lambda s: f"Verified evidence\n- {s} price"
+    )
+    assert fq._looks_like_nonanswer("Hello everyone! How can I help?", "BABA")
+    assert not fq._looks_like_nonanswer(
+        "BABA trades at 114.97 with a 52-week range of 91.99 to 192.67.", "BABA"
+    )
+    brief = fq._deterministic_research_brief(
+        "BABA", [{"title": "Yahoo BABA", "url": "https://finance.yahoo.com/quote/BABA/"}]
+    )
+    assert "Verified evidence" in brief
+    assert "https://finance.yahoo.com/quote/BABA/" in brief
+
+
 def test_context_snippet_includes_last_lines():
     raw = [
         {"id": 1, "author": "Nat", "body": "one"},
@@ -87,7 +121,7 @@ def test_research_path_acks_and_returns_without_blocking(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
-    def slow_job(trigger, context):
+    def slow_job(trigger, context, *args):
         started.set()
         release.wait(timeout=2)
         fq._update_research(
@@ -100,10 +134,11 @@ def test_research_path_acks_and_returns_without_blocking(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(fq, "messenger_configured", lambda: True)
+    monkeypatch.setattr(fq, "list_bot_rooms", lambda: [{"room_id": "legacy"}])
     monkeypatch.setattr(
         fq,
         "_load_room_messages",
-        lambda: [
+        lambda room_id="legacy": [
             {"id": 1, "author": "Nat", "body": "talking about AI chips"},
             {"id": 2, "author": "Nat", "body": "@Qwen research this"},
         ],
@@ -111,7 +146,8 @@ def test_research_path_acks_and_returns_without_blocking(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fq,
         "_post_as_qwen",
-        lambda body: posts.append(body) or {"id": 10 + len(posts), "body": body},
+        lambda body, room_id="legacy": posts.append(body)
+        or {"id": 10 + len(posts), "body": body},
     )
     monkeypatch.setattr(fq, "_run_research_job", slow_job)
 
@@ -137,10 +173,13 @@ def test_quick_reply_still_sync(tmp_path, monkeypatch):
     fq.save_state({**fq._default_state(), "enabled": True, "last_replied_id": 0})
 
     monkeypatch.setattr(fq, "messenger_configured", lambda: True)
+    monkeypatch.setattr(fq, "list_bot_rooms", lambda: [{"room_id": "legacy"}])
     monkeypatch.setattr(
         fq,
         "_load_room_messages",
-        lambda: [{"id": 3, "author": "Friend", "body": "@Qwen ping"}],
+        lambda room_id="legacy": [
+            {"id": 3, "author": "Friend", "body": "@Qwen ping"}
+        ],
     )
     monkeypatch.setattr(
         fq,
@@ -148,7 +187,7 @@ def test_quick_reply_still_sync(tmp_path, monkeypatch):
         lambda *a, **k: "pong",
     )
     monkeypatch.setattr(
-        fq, "_post_as_qwen", lambda body: {"id": 4, "body": body}
+        fq, "_post_as_qwen", lambda body, room_id="legacy": {"id": 4, "body": body}
     )
 
     result = fq.tick_qwen()
@@ -164,10 +203,11 @@ def test_contrarian_mention_routes_prompt_and_author(tmp_path, monkeypatch):
 
     captured = {}
     monkeypatch.setattr(fq, "messenger_configured", lambda: True)
+    monkeypatch.setattr(fq, "list_bot_rooms", lambda: [{"room_id": "legacy"}])
     monkeypatch.setattr(
         fq,
         "_load_room_messages",
-        lambda: [
+        lambda room_id="legacy": [
             {
                 "id": 3,
                 "author": "Friend",
@@ -180,7 +220,7 @@ def test_contrarian_mention_routes_prompt_and_author(tmp_path, monkeypatch):
         captured["system"] = kwargs["system"]
         return "Here is the counterargument."
 
-    def post(personality, body):
+    def post(personality, body, room_id="legacy"):
         captured["personality"] = personality
         captured["body"] = body
         return {"id": 4, "body": body}
@@ -195,6 +235,48 @@ def test_contrarian_mention_routes_prompt_and_author(tmp_path, monkeypatch):
     assert captured["body"] == "Here is the counterargument."
 
 
+def test_tick_replies_in_created_room_with_per_room_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANALYST_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fq, "data_dir", lambda: tmp_path)
+    fq.save_state({**fq._default_state(), "enabled": True, "last_replied_id": 0})
+
+    monkeypatch.setattr(fq, "messenger_configured", lambda: True)
+    monkeypatch.setattr(
+        fq,
+        "list_bot_rooms",
+        lambda: [{"room_id": "legacy"}, {"room_id": "ROOM123"}],
+    )
+
+    room_messages = {
+        "legacy": [],
+        "ROOM123": [{"id": 7, "author": "Friend", "body": "@Qwen ping"}],
+    }
+    monkeypatch.setattr(
+        fq, "_load_room_messages", lambda room_id="legacy": room_messages[room_id]
+    )
+    monkeypatch.setattr(
+        fq, "_call_openai_compatible_messages", lambda *a, **k: "pong"
+    )
+
+    posted: list[tuple] = []
+
+    def post(personality, body, room_id="legacy"):
+        posted.append((room_id, body))
+        return {"id": 8, "body": body}
+
+    monkeypatch.setattr(fq, "_post_as_personality", post)
+
+    result = fq.tick_qwen()
+
+    assert result["replied"] is True
+    assert result["room_id"] == "ROOM123"
+    assert posted == [("ROOM123", "pong")]
+    # Per-room last_replied advanced only for the created room.
+    state = fq.load_state()
+    assert fq.room_progress(state, "ROOM123")["last_replied_id"] == 8
+    assert fq.room_progress(state, "legacy")["last_replied_id"] == 0
+
+
 def test_format_hits_for_prompt():
     text = format_hits_for_prompt(
         [{"title": "A", "url": "https://a.example", "snippet": "s"}]
@@ -204,7 +286,7 @@ def test_format_hits_for_prompt():
 
 
 def test_model_reply_removes_personality_label_and_mention():
-    personality = fq.PERSONALITIES[0]
+    personality = fq.PERSONALITIES_BY_ID["qwen-contrarian"]
     assert (
         fq._clean_model_reply(
             "@Qwen-Contrarian: The evidence is incomplete.", personality
@@ -310,10 +392,13 @@ def test_skip_while_researching(tmp_path, monkeypatch):
         }
     )
     monkeypatch.setattr(fq, "messenger_configured", lambda: True)
+    monkeypatch.setattr(fq, "list_bot_rooms", lambda: [{"room_id": "legacy"}])
     monkeypatch.setattr(
         fq,
         "_load_room_messages",
-        lambda: [{"id": 5, "author": "Nat", "body": "@Qwen research more"}],
+        lambda room_id="legacy": [
+            {"id": 5, "author": "Nat", "body": "@Qwen research more"}
+        ],
     )
     started = []
     monkeypatch.setattr(fq, "_start_research", lambda *a, **k: started.append(1))
@@ -360,7 +445,7 @@ def test_followup_company_name_routes_to_outlook_pipeline(tmp_path, monkeypatch)
     monkeypatch.setattr(
         fq,
         "_post_as_personality",
-        lambda personality, body: {"id": 9, "body": body},
+        lambda personality, body, room_id="legacy": {"id": 9, "body": body},
     )
 
     fq._run_research_job(
@@ -372,7 +457,7 @@ def test_followup_company_name_routes_to_outlook_pipeline(tmp_path, monkeypatch)
                 "body": "I like Apple stock as a buy",
             }
         ],
-        fq.PERSONALITIES[0],
+        fq.PERSONALITIES_BY_ID["qwen-contrarian"],
     )
     assert captured == {
         "symbol": "AAPL",

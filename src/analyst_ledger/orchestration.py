@@ -24,6 +24,7 @@ ALLOWED_ACTIONS = frozenset(
         "sec_filings",
         "recent_notes",
         "find_files",
+        "public_web_search",
     }
 )
 

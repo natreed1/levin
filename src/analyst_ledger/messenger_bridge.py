@@ -145,8 +145,17 @@ def _request(
     return body
 
 
-def ensure_session_as(name: str, *, cookie_key: str = "user") -> str:
-    """Join (or re-join) the cloud room as ``name`` using a dedicated cookie jar."""
+def ensure_session_as(
+    name: str,
+    *,
+    cookie_key: str = "user",
+    room_id: str = "legacy",
+) -> str:
+    """Join (or re-join) a cloud room as ``name`` using a dedicated cookie jar.
+
+    The server invite grants the bot access to *any* room, so pass ``room_id``
+    to watch created rooms as well as the legacy Friend thread.
+    """
     invite = messenger_invite()
     if not invite:
         raise MessengerBridgeError(
@@ -163,13 +172,17 @@ def ensure_session_as(name: str, *, cookie_key: str = "user") -> str:
         if exc.status != 401:
             raise
         me = {"ok": False}
-    if me.get("ok") and me.get("name") == display:
+    if (
+        me.get("ok")
+        and me.get("name") == display
+        and str(me.get("room_id") or "legacy") == room_id
+    ):
         _save_jar(opener)
         return display
     joined = _request(
         "POST",
         "/api/join",
-        payload={"invite": invite, "name": display},
+        payload={"invite": invite, "name": display, "room_id": room_id},
         opener=opener,
     )
     if not joined.get("ok"):
@@ -179,6 +192,58 @@ def ensure_session_as(name: str, *, cookie_key: str = "user") -> str:
         )
     _save_jar(opener)
     return str(joined.get("name") or display)
+
+
+def list_bot_rooms() -> List[Dict[str, Any]]:
+    """All rooms the bot can watch (legacy + created). Server-invite gated."""
+    invite = messenger_invite()
+    if not invite:
+        return [{"room_id": "legacy", "title": "Friend room", "created_at": None}]
+    from urllib.parse import quote
+
+    try:
+        data = _request("GET", f"/api/rooms/list?key={quote(invite)}")
+    except MessengerBridgeError:
+        # Older messenger builds without the endpoint: fall back to legacy only.
+        return [{"room_id": "legacy", "title": "Friend room", "created_at": None}]
+    rooms = [r for r in (data.get("rooms") or []) if isinstance(r, dict)]
+    if not any(str(r.get("room_id")) == "legacy" for r in rooms):
+        rooms.insert(
+            0, {"room_id": "legacy", "title": "Friend room", "created_at": None}
+        )
+    return rooms
+
+
+def list_room_messages(
+    room_id: str, *, cookie_key: str, name: str, limit: int = 80
+) -> List[Dict[str, Any]]:
+    """Raw messages for ``room_id`` using the bot's per-room session."""
+    ensure_session_as(name, cookie_key=cookie_key, room_id=room_id)
+    opener = _opener_for(cookie_key)
+    data = _request("GET", f"/api/messages?limit={int(limit)}", opener=opener)
+    _save_jar(opener)
+    if not data.get("ok"):
+        raise MessengerBridgeError(
+            f"Could not load room messages: {data.get('error') or 'unknown'}"
+        )
+    return [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+
+
+def post_room_message(
+    room_id: str, *, cookie_key: str, name: str, body: str
+) -> Dict[str, Any]:
+    """Post ``body`` to ``room_id`` as ``name`` using a per-room session."""
+    ensure_session_as(name, cookie_key=cookie_key, room_id=room_id)
+    opener = _opener_for(cookie_key)
+    data = _request(
+        "POST", "/api/messages", payload={"body": body}, opener=opener
+    )
+    _save_jar(opener)
+    if not data.get("ok"):
+        raise MessengerBridgeError(
+            f"{name} could not post: {data.get('error') or 'unknown'}"
+        )
+    return data.get("message") or {}
 
 
 def ensure_session() -> str:

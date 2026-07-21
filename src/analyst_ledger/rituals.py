@@ -625,7 +625,8 @@ def create_automations_with_claude(
         "must include name, description, runner, schedule, watchlist, steps, and budget. "
         "Allowed runners: morning_yf_scan, generic_watchlist_scan, sec_filings_check, "
         "note_digest. Each step must contain exactly one allowed action: fetch_quote, "
-        "fetch_calendar, fetch_headlines, sec_filings, recent_notes. Do not invent tools, "
+        "fetch_calendar, fetch_headlines, sec_filings, recent_notes, public_web_search. "
+        "Do not invent tools, "
         "shell commands, code, trades, or market facts. Names must use letters, digits, "
         "underscore, or dash.\n\nRecent history:\n"
         + json.dumps(context, ensure_ascii=False)

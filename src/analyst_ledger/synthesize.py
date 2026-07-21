@@ -6,12 +6,59 @@ import json
 import os
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Dict, Iterator, List, Optional
 
 from .ledger import Ledger
 from .redact import build_synthesis_prompt
 from .schema import Event, Sensitivity, Surface
 
+# Per-request / per-job override so each Workflow user can point at their own
+# Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
+_QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "qwen_endpoint", default=None
+)
+
+
+@contextmanager
+def use_llm_endpoint(endpoint: Optional[Dict[str, str]]) -> Iterator[None]:
+    """Temporarily route chat calls to a user's linked provider."""
+    if not endpoint:
+        yield
+        return
+    token = _QWEN_ENDPOINT.set(endpoint)
+    try:
+        yield
+    finally:
+        _QWEN_ENDPOINT.reset(token)
+
+
+# Backward-compatible alias used by specialist / messenger code.
+use_qwen_endpoint = use_llm_endpoint
+
+
+def call_chat_messages(
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: int = 2048,
+    system: Optional[str] = None,
+    temperature: float = 0.0,
+) -> str:
+    """Dispatch to Anthropic or OpenAI-compatible based on active endpoint override."""
+    override = _QWEN_ENDPOINT.get() or {}
+    kind = (override.get("kind") or "").strip().lower()
+    provider = (override.get("provider") or "").strip().lower()
+    if kind == "anthropic" or provider == "anthropic":
+        return _call_anthropic_messages(
+            messages, max_tokens=max_tokens, system=system
+        )
+    return _call_openai_compatible_messages(
+        messages,
+        max_tokens=max_tokens,
+        system=system,
+        temperature=temperature,
+    )
 
 def run_synthesis(
     ledger: Ledger,
@@ -153,22 +200,28 @@ def _call_anthropic_messages(
     system: Optional[str] = None,
 ) -> str:
     """Call Claude with an explicit multi-turn message list."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    override = _QWEN_ENDPOINT.get() or {}
+    api_key = (
+        (override.get("api_key") or "").strip()
+        or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    )
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Use --dry-run, --destination local_stub, "
-            "or set the key (prefer ZDR-enabled commercial org)."
+            "No Anthropic API key. Add Claude under the Model tab, "
+            "or set ANTHROPIC_API_KEY."
         )
     try:
         import anthropic
     except ImportError as exc:
         raise RuntimeError(
-            "anthropic package not installed. pip install 'analyst-ledger[anthropic]' "
-            "or use --destination local_stub"
+            "anthropic package not installed. pip install anthropic "
+            "or use an OpenAI-compatible provider under Model."
         ) from exc
 
-    # Prefer an explicit dated model id; override with ANALYST_CLAUDE_MODEL.
-    model = os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-4-20250514").strip()
+    model = (
+        (override.get("model") or "").strip()
+        or os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-4-20250514").strip()
+    )
     client = anthropic.Anthropic(api_key=api_key)
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -204,25 +257,29 @@ def _call_openai_compatible_messages(
     """
     Call an OpenAI-compatible chat endpoint (Ollama, vLLM, MLX server, etc.).
 
-    Defaults target a local Qwen3 8B deployment:
-      ANALYST_QWEN_BASE_URL  (default http://127.0.0.1:11434/v1)
-      ANALYST_QWEN_MODEL     (default qwen3:8b)
-      ANALYST_QWEN_API_KEY   (optional; many local servers ignore auth)
+    Resolution order:
+      1. use_qwen_endpoint(...) context (per-user Model link)
+      2. ANALYST_QWEN_* / OPENAI_* env (local self-host / operator override)
+      3. default http://127.0.0.1:11434/v1 + qwen3:8b
     """
+    override = _QWEN_ENDPOINT.get() or {}
     base_url = (
-        os.environ.get("ANALYST_QWEN_BASE_URL")
+        (override.get("base_url") or "").strip()
+        or os.environ.get("ANALYST_QWEN_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
         or "http://127.0.0.1:11434/v1"
     ).rstrip("/")
     model = (
-        os.environ.get("ANALYST_QWEN_MODEL")
+        (override.get("model") or "").strip()
+        or os.environ.get("ANALYST_QWEN_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or "qwen3:8b"
     ).strip()
     if model.lower() in {"qwen2.5:7b", "qwen2.5-7b"}:
         model = "qwen3:8b"
     api_key = (
-        os.environ.get("ANALYST_QWEN_API_KEY")
+        (override.get("api_key") or "").strip()
+        or os.environ.get("ANALYST_QWEN_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or "local"
     ).strip()
@@ -242,13 +299,17 @@ def _call_openai_compatible_messages(
     if model.lower().startswith("qwen3"):
         payload["reasoning_effort"] = "none"
     data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    # ngrok free tier serves an HTML interstitial to browsers; API clients need this.
+    if "ngrok" in base_url.lower():
+        headers["ngrok-skip-browser-warning"] = "1"
     req = urllib.request.Request(
         f"{base_url}/chat/completions",
         data=data,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -258,9 +319,12 @@ def _call_openai_compatible_messages(
         err = exc.read().decode("utf-8", "replace")
         raise RuntimeError(f"Qwen endpoint HTTP {exc.code}: {err}") from exc
     except urllib.error.URLError as exc:
+        hint = (
+            "Link your local model under the Model tab (run the tunnel on your computer), "
+            "or set ANALYST_QWEN_BASE_URL for a self-hosted server."
+        )
         raise RuntimeError(
-            f"Qwen endpoint unreachable at {base_url}. "
-            "Start Ollama/vLLM (or set ANALYST_QWEN_BASE_URL) and retry."
+            f"Qwen endpoint unreachable at {base_url}. {hint}"
         ) from exc
     choices = body.get("choices") or []
     if not choices:

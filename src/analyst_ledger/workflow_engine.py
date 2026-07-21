@@ -390,6 +390,46 @@ class WorkflowEngine:
                 if len(picked) >= 30:
                     break
             return list(reversed(picked))
+        if action == "public_web_search":
+            from .web_search import bing_search
+
+            step_cfg = None
+            for step in spec.get("steps") or []:
+                if isinstance(step, dict) and "public_web_search" in step:
+                    step_cfg = step.get("public_web_search")
+                    break
+            queries: List[str] = []
+            if isinstance(step_cfg, str) and step_cfg.strip():
+                queries.append(step_cfg.strip()[:200])
+            elif isinstance(step_cfg, list):
+                queries.extend(str(q).strip()[:200] for q in step_cfg if str(q).strip())
+            elif isinstance(step_cfg, dict):
+                raw_q = step_cfg.get("query") or step_cfg.get("queries")
+                if isinstance(raw_q, str) and raw_q.strip():
+                    queries.append(raw_q.strip()[:200])
+                elif isinstance(raw_q, list):
+                    queries.extend(str(q).strip()[:200] for q in raw_q if str(q).strip())
+            if not queries:
+                desc = str(spec.get("description") or "").strip()
+                if desc:
+                    queries.append(desc[:200])
+            if not queries:
+                queries = ["market news"]
+            rows = []
+            for query in queries[:4]:
+                if job:
+                    job.check_cancelled()
+                hits = [] if stub else bing_search(query, limit=5)
+                if stub:
+                    hits = [
+                        {
+                            "title": f"Stub hit for {query}",
+                            "url": "https://example.com/stub",
+                            "snippet": "Offline stub result.",
+                        }
+                    ]
+                rows.append({"query": query, "hits": hits})
+            return rows
         raise RuntimeError(f"Action '{action}' is not allowlisted.")
 
     def _handoff(self, ritual_id: str, final: str) -> None:

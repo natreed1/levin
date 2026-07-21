@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
+
+# Per-request / per-user override used by the cloud messenger multi-tenant mode.
+_data_dir_override: ContextVar[Optional[Path]] = ContextVar(
+    "analyst_ledger_data_dir", default=None
+)
 
 
 def repo_root() -> Path:
@@ -13,6 +20,11 @@ def repo_root() -> Path:
 
 
 def data_dir() -> Path:
+    override = _data_dir_override.get()
+    if override is not None:
+        path = Path(override).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
     raw = os.environ.get("ANALYST_LEDGER_DATA", "").strip()
     if raw:
         path = Path(raw).expanduser().resolve()
@@ -20,6 +32,18 @@ def data_dir() -> Path:
         path = repo_root() / "data"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextmanager
+def use_data_dir(path: Path | str) -> Iterator[Path]:
+    """Temporarily bind ledger paths (rituals, sqlite, events) to ``path``."""
+    resolved = Path(path).expanduser().resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    token = _data_dir_override.set(resolved)
+    try:
+        yield resolved
+    finally:
+        _data_dir_override.reset(token)
 
 
 def events_dir() -> Path:
@@ -35,6 +59,8 @@ def artifacts_dir() -> Path:
 
 
 def sqlite_path() -> Path:
+    if _data_dir_override.get() is not None:
+        return data_dir() / "ledger.sqlite3"
     raw = os.environ.get("ANALYST_LEDGER_DB", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
