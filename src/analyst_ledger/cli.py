@@ -200,6 +200,24 @@ def cmd_sync(args: argparse.Namespace) -> int:
             export_dir=Path(args.dir).expanduser() if args.dir else None,
         )
         return 0
+    if source == "messenger":
+        from .messenger_sync import sync_messenger
+
+        result = sync_messenger(limit=args.limit, tag=not args.no_tag)
+        status = result.get("status")
+        if status == "disabled":
+            print("messenger: sync disabled (ANALYST_MESSENGER_SYNC=off)")
+            return 0
+        if status == "skipped":
+            print(f"messenger: skip ({result.get('reason')})")
+            return 0
+        print(
+            f"messenger: {result['ingested']} new message(s) across "
+            f"{result['rooms']} room(s); {result['tagged']} ask(s) tagged"
+        )
+        for err in result.get("errors") or []:
+            print(f"  warn: {err}")
+        return 0
     if source == "all":
         total = 0
         # Obsidian (optional)
@@ -229,6 +247,34 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return 0
     print(f"error: unknown sync source {source}", file=sys.stderr)
     return 1
+
+
+def cmd_classify_pending(args: argparse.Namespace) -> int:
+    from .classify import classify_pending
+    from .ledger import Ledger
+
+    result = classify_pending(Ledger(), limit=args.limit)
+    print(f"classified {result['classified']} message(s)")
+    return 0
+
+
+def cmd_classify_export(args: argparse.Namespace) -> int:
+    from .classify_export import export_kind_pairs
+    from .ledger import Ledger
+
+    out = export_kind_pairs(Ledger(), out_path=Path(args.out) if args.out else None)
+    print(f"exported -> {out}")
+    return 0
+
+
+def cmd_label_correct(args: argparse.Namespace) -> int:
+    from .ledger import Ledger
+
+    Ledger().correct_message_kind(
+        args.session_id, args.event, args.kind, entity=args.entity
+    )
+    print(f"set kind={args.kind} for {args.event}")
+    return 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -554,12 +600,46 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("--poll", type=float, default=5.0)
     gd.set_defaults(func=cmd_sync)
 
+    msgr = sync_sub.add_parser(
+        "messenger",
+        help="Pull hosted messenger rooms into the local ledger (read-only, idempotent)",
+    )
+    msgr.add_argument("--limit", type=int, default=200, help="Max messages per room")
+    msgr.add_argument(
+        "--no-tag", action="store_true", help="Skip the actionable tagger on ingest"
+    )
+    msgr.set_defaults(func=cmd_sync)
+
     sall = sync_sub.add_parser("all", help="Run one-shot sync for all configured sources")
     sall.add_argument("--vault", default=None)
     sall.add_argument("--folder", default=None)
     sall.add_argument("--dir", default=None)
     sall.add_argument("--all-notes", action="store_true")
     sall.set_defaults(func=cmd_sync)
+
+    cp = sub.add_parser(
+        "classify-pending",
+        help="Qwen-classify captured chat messages that lack a kind label",
+    )
+    cp.add_argument("--limit", type=int, default=20)
+    cp.set_defaults(func=cmd_classify_pending)
+
+    ce = sub.add_parser(
+        "classify-export",
+        help="Export human-confirmed (message -> kind) pairs as JSONL for training",
+    )
+    ce.add_argument("--out", default=None, help="Output JSONL path")
+    ce.set_defaults(func=cmd_classify_export)
+
+    lc = sub.add_parser(
+        "label-correct",
+        help="Correct/confirm a captured message's kind (feeds the training loop)",
+    )
+    lc.add_argument("--session-id", required=True)
+    lc.add_argument("--event", required=True, help="target message event_id")
+    lc.add_argument("--kind", required=True)
+    lc.add_argument("--entity", default=None)
+    lc.set_defaults(func=cmd_label_correct)
 
     # review
     rev = sub.add_parser(

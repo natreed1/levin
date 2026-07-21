@@ -57,6 +57,8 @@ EVENT_TYPES = frozenset(
         "agent_stop",
         "inbox_file",
         "tag",
+        "label",
+        "label_feedback",
         "synthesis_request",
         "synthesis_result",
         "egress_audit",
@@ -163,6 +165,7 @@ class Session:
     ended_at: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     status: str = "open"  # open | closed
+    labels: List[str] = field(default_factory=list)  # topic:/project:/... axis
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
