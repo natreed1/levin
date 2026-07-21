@@ -57,28 +57,31 @@ def _record_run(
     note: str,
     payload_extra: Dict[str, Any],
     artifact_name: str,
+    sensitivity: str = Sensitivity.INTERNAL.value,
 ) -> Dict[str, Any]:
     """Shared bookkeeping: session + note + artifact + ritual_run event."""
     session = ledger.start_session(
         title=title,
         surface=Surface.RITUAL.value,
-        sensitivity=Sensitivity.INTERNAL.value,
+        sensitivity=sensitivity,
         desk_tag="routine",
     )
-    ledger.add_note(note, session_id=session.session_id, surface=Surface.RITUAL.value)
+    ledger.add_note(
+        note, session_id=session.session_id, sensitivity=sensitivity, surface=Surface.RITUAL.value
+    )
 
     out_dir = artifacts_dir() / session.session_id
     out_dir.mkdir(parents=True, exist_ok=True)
     note_path = out_dir / artifact_name
     note_path.write_text(note, encoding="utf-8")
-    ledger.attach_artifact(note_path, session_id=session.session_id)
+    ledger.attach_artifact(note_path, session_id=session.session_id, sensitivity=sensitivity)
 
     ledger.append_event(
         Event(
             type="ritual_run",
             surface=Surface.RITUAL.value,
             session_id=session.session_id,
-            sensitivity=Sensitivity.INTERNAL.value,
+            sensitivity=sensitivity,
             payload={"ritual_id": ritual_id, "runner": runner, **payload_extra},
         )
     )
@@ -267,39 +270,49 @@ def run_note_digest(
     """
     Digest the last N days of hand-written notes into one review note.
 
-    Only notes at `internal` sensitivity or below are included (confidential /
-    restricted never leave their sessions), text is redacted, and notes written
-    by rituals themselves are skipped so the digest never digests itself.
-    Pass destination="anthropic"/"bedrock" to append a model-written summary.
+    Notes at `internal` sensitivity or below are included; with
+    destination="qwen" (local model — content never leaves the machine)
+    `confidential` notes are included too. `restricted` never leaves its
+    session. Text is redacted, and notes written by rituals themselves are
+    skipped so the digest never digests itself.
+    Pass destination="anthropic"/"bedrock"/"qwen" to append a model summary.
     """
     ledger = ledger or Ledger()
     _spec_for(ritual_id, require_approved)
 
+    include_ceiling = (
+        Sensitivity.CONFIDENTIAL if destination == "qwen" else Sensitivity.INTERNAL
+    )
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
     )
     events = ledger.list_events(limit=1000, types=["note"])
     picked: List[Dict[str, Any]] = []
     skipped_sensitive = 0
+    has_confidential = False
     for ev in events:
         if str(ev.get("ts") or "") < cutoff:
             continue
         if ev.get("surface") == Surface.RITUAL.value:
             continue
         level = parse_sensitivity(ev.get("sensitivity"))
-        if not sensitivity_allows_egress(level, Sensitivity.INTERNAL):
+        if not sensitivity_allows_egress(level, include_ceiling):
             skipped_sensitive += 1
             continue
         text = str((ev.get("payload") or {}).get("text") or "").strip()
         if text:
             picked.append({"ts": ev.get("ts"), "text": redact_text(text)[:300]})
+            if level == Sensitivity.CONFIDENTIAL:
+                has_confidential = True
+
     picked.reverse()  # chronological
 
     today = datetime.now().strftime("%Y-%m-%d")
     lines = [
         f"## Note digest {today} (last {days} day(s))",
         "",
-        f"_{len(picked)} note(s) included; {skipped_sensitive} skipped as confidential/restricted._",
+        f"_{len(picked)} note(s) included; {skipped_sensitive} skipped above the "
+        f"'{include_ceiling.value}' ceiling._",
         "",
     ]
     if picked:
@@ -307,23 +320,37 @@ def run_note_digest(
     else:
         lines.append("- (no notes in window)")
 
+    digest_sensitivity = (
+        Sensitivity.CONFIDENTIAL if has_confidential else Sensitivity.INTERNAL
+    )
     narrative_error: Optional[str] = None
-    if destination in {"anthropic", "bedrock"} and picked:
-        from .synthesize import _call_anthropic, _call_bedrock
+    if destination in {"anthropic", "bedrock", "qwen"} and picked:
+        from .synthesize import (
+            _call_anthropic,
+            _call_bedrock,
+            _call_openai_compatible_messages,
+            assert_destination_allowed,
+        )
 
+        assert_destination_allowed(destination, digest_sensitivity)
         prompt = (
             "Summarize this analyst's own research notes from the past week into "
             "3-6 bullets of themes and open questions. Do not invent market facts. "
             "Do not recommend trades.\n\n" + "\n".join(f"- {n['text']}" for n in picked)
         )
         try:
-            narrative = (
-                _call_bedrock(prompt) if destination == "bedrock" else _call_anthropic(prompt)
-            )
+            if destination == "qwen":
+                narrative = _call_openai_compatible_messages(
+                    [{"role": "user", "content": prompt}]
+                ).strip()
+            elif destination == "bedrock":
+                narrative = _call_bedrock(prompt)
+            else:
+                narrative = _call_anthropic(prompt)
             ledger.record_egress(
                 destination=destination,
                 prompt=prompt,
-                max_sensitivity=Sensitivity.INTERNAL.value,
+                max_sensitivity=digest_sensitivity.value,
                 status="ok",
                 detail={"ritual_id": ritual_id, "kind": "note_digest"},
             )
@@ -333,10 +360,16 @@ def run_note_digest(
             ledger.record_egress(
                 destination=destination,
                 prompt=prompt,
-                max_sensitivity=Sensitivity.INTERNAL.value,
+                max_sensitivity=digest_sensitivity.value,
                 status="error",
                 detail={"ritual_id": ritual_id, "error": narrative_error},
             )
+            if destination == "qwen":
+                lines += [
+                    "",
+                    "_(Local model offline — digest above is complete; "
+                    "start Ollama to add a themes summary.)_",
+                ]
 
     lines.append("")
     note = "\n".join(lines)
@@ -354,6 +387,7 @@ def run_note_digest(
             "destination": destination,
         },
         artifact_name="note_digest.md",
+        sensitivity=digest_sensitivity.value,
     )
     result["note_count"] = len(picked)
     return result

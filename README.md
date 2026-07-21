@@ -77,11 +77,19 @@ Real Claude (prefer commercial API + ZDR, or Bedrock):
 
 ```bash
 export ANTHROPIC_API_KEY=...
+export ANALYST_CLAUDE_MODEL=claude-sonnet-5   # default if unset; override as needed
 pip install -e ".[anthropic]"
 analyst synthesize --destination anthropic
 # or
 analyst synthesize --destination bedrock   # needs boto3 + AWS creds
 ```
+
+Sensitivity is enforced at the model-call boundary: external destinations
+(`anthropic`/`bedrock`) refuse anything above `internal`; `confidential`
+content may only go to local destinations (`qwen`, `local_stub`); `restricted`
+never goes to any model. `note_digest` with `destination="qwen"` uses this to
+include confidential notes in a local-only digest (the digest itself is then
+stamped `confidential`).
 
 Workflow agents can also use **Qwen3 8B** via any OpenAI-compatible server
 (Ollama, vLLM, MLX). Choose Claude or Qwen on each automation before the first

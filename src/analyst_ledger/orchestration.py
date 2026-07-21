@@ -10,7 +10,11 @@ from typing import Any, Callable, Dict, List, Optional
 from .ledger import Ledger
 from .models import normalize_agent_model
 from .schema import Sensitivity
-from .synthesize import _call_anthropic_messages, _call_openai_compatible_messages
+from .synthesize import (
+    _call_anthropic_messages,
+    _call_openai_compatible_messages,
+    assert_destination_allowed,
+)
 
 
 ALLOWED_RUNNERS = frozenset(
@@ -148,11 +152,13 @@ class ClaudeGateway:
         session_id: Optional[str] = None,
         max_tokens: int = 2048,
         system: Optional[str] = None,
+        max_sensitivity: Sensitivity = Sensitivity.INTERNAL,
     ) -> ModelResult:
         prompt = json.dumps(
             {"system": system, "messages": messages}, ensure_ascii=False, separators=(",", ":")
         )
         destination = "qwen" if self.model == "qwen3-8b" else "anthropic"
+        assert_destination_allowed(destination, max_sensitivity)
         try:
             if self.responder:
                 output = self.responder(messages, max_tokens, system)
@@ -178,7 +184,7 @@ class ClaudeGateway:
             self.ledger.record_egress(
                 destination=destination,
                 prompt=prompt,
-                max_sensitivity=Sensitivity.INTERNAL.value,
+                max_sensitivity=max_sensitivity.value,
                 status=status,
                 session_id=session_id,
                 detail=detail,
@@ -187,7 +193,7 @@ class ClaudeGateway:
         audit_id = self.ledger.record_egress(
             destination=destination,
             prompt=prompt,
-            max_sensitivity=Sensitivity.INTERNAL.value,
+            max_sensitivity=max_sensitivity.value,
             status=status,
             session_id=session_id,
             detail=detail,
