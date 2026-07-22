@@ -533,7 +533,14 @@ async def update_profile(
         return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
     display_name = normalize_name(str(body.get("display_name") or ""))
     if not display_name:
-        return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_name",
+                "message": "Enter a display name (not just spaces).",
+            },
+            status_code=400,
+        )
 
     store.update_display_name(user["user_id"], display_name)
     store.delete_sessions_for_user(user["user_id"])
