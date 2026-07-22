@@ -32,10 +32,10 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "label": "Claude (Anthropic)",
         "category": "frontier",
         "kind": "anthropic",
-        "default_model": "claude-sonnet-4-20250514",
+        "default_model": "claude-sonnet-5",
         "models": [
-            "claude-sonnet-4-20250514",
-            "claude-opus-4-20250514",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
             "claude-haiku-4-5-20251001",
         ],
         "needs_base_url": False,
@@ -897,7 +897,7 @@ class ModelLinkRegistry:
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read()
-        return ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]
+        return ["claude-sonnet-5", "claude-haiku-4-5-20251001"]
 
 
 _REGISTRY = ModelLinkRegistry()

@@ -1695,8 +1695,8 @@
   const FRONTIER_PRESETS = {
     anthropic: {
       hint: "Paste your Anthropic API key (sk-ant-…). Billing is on your Anthropic account.",
-      model: "claude-sonnet-4-20250514",
-      models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+      model: "claude-sonnet-5",
+      models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
     },
     openai: {
       hint: "Paste your OpenAI API key (sk-…). Billing is on your OpenAI account.",
