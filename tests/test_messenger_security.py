@@ -196,6 +196,23 @@ def test_fly_signup_fails_closed_without_email_provider(tmp_path: Path, monkeypa
     assert result.json()["error"] == "email_delivery_unavailable"
 
 
+@pytest.mark.parametrize("endpoint", ["forgot-password", "resend-verification"])
+def test_fly_email_actions_fail_closed_without_email_provider(
+    tmp_path: Path, monkeypatch, endpoint: str
+):
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "0")
+    client = _client(tmp_path / f"fly-{endpoint}", monkeypatch)
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "0")
+
+    result = client.post(f"/api/auth/{endpoint}", json={"email": "someone@example.com"})
+    assert result.status_code == 503
+    assert result.json()["error"] == "email_delivery_unavailable"
+
+
 def test_account_settings_update_profile_and_password(tmp_path: Path, monkeypatch):
     client = _client(tmp_path / "account", monkeypatch)
     created = _signup_and_login(

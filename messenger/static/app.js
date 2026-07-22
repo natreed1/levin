@@ -254,6 +254,11 @@
       setError("#signup-error", (data && (data.message || data.error)) || "Signup failed");
       return;
     }
+    // AUTO_VERIFY / break-glass signup already sets the session cookie — enter the app.
+    if (data?.auto_verified) {
+      await bootstrap();
+      return;
+    }
     let msg = data?.message || "Check your email to verify, then log in.";
     if (data?.dev_verify_url) {
       msg += ` Dev link: ${data.dev_verify_url}`;
@@ -502,8 +507,8 @@
       li.className = "agent-card";
       li.draggable = true;
       li.dataset.agentId = agent.id;
-      li.title = `Drag ${agent.name} into a room`;
-      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.role)}</span>`;
+      li.title = `${agent.name} — click to add to the open room, or drag onto a room`;
+      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}</span>`;
       li.addEventListener("dragstart", (event) => {
         event.dataTransfer.effectAllowed = "copy";
         event.dataTransfer.setData("application/x-workflow-agent", agent.id);
@@ -511,6 +516,12 @@
         li.classList.add("dragging");
       });
       li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      // Click also adds to the current people room (drag is easy to miss).
+      li.addEventListener("click", async () => {
+        if (state.kind === "people" && state.roomId) {
+          await addAgentToRoom(state.roomId, agent.id);
+        }
+      });
       palette.appendChild(li);
     });
   }
@@ -545,7 +556,16 @@
     }
     await refreshChatRails();
     if (state.kind === "people" && state.roomId === roomId) {
-      updateRoomContext(currentRoom());
+      const room = currentRoom();
+      updateRoomContext(room);
+      updateSpecialistActions(room);
+      const hasAgents = roomAgents(room).length > 0;
+      enableComposer(
+        true,
+        hasAgents
+          ? "Message the room… agents can use your automations"
+          : "Message… @Qwen or @workflow ritual_id"
+      );
     }
   }
 
@@ -627,9 +647,10 @@
     const loopBit = job.continuous
       ? `loop ${job.round_num || "…"}`
       : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
+    const topicBit = job.topic ? ` “${job.topic}”` : "";
     text.textContent = job.continuous
-      ? `Looping “${job.topic || "debate"}” (${loopBit}) — safe to leave; turns keep posting.`
-      : `Running ${job.action} “${job.topic || ""}” (${loopBit}) — safe to leave this room.`;
+      ? `Looping${topicBit || " debate"} (${loopBit}) — safe to leave; turns keep posting.`
+      : `Running ${job.action || "specialists"}${topicBit} (${loopBit}) — safe to leave this room.`;
     show(banner);
     show(stopBtn);
     if (!state.specialistPoll && state.roomId) {
@@ -1603,7 +1624,14 @@
       body: JSON.stringify({ display_name: $("#settings-display-name").value }),
     });
     if (!res.ok) {
-      setError("#profile-settings-error", data?.message || data?.error || "Could not update profile");
+      setError(
+        "#profile-settings-error",
+        data?.message ||
+          (data?.error === "bad_name"
+            ? "Enter a display name (not just spaces)."
+            : data?.error) ||
+          "Could not update profile"
+      );
       return;
     }
     settingsMessage("#profile-settings-message", data.message || "Profile updated.");
