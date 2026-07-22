@@ -519,6 +519,47 @@ dialog::backdrop { background: rgba(0,0,0,0.55); }
 }
 .badge.approved { background: rgba(52,211,153,0.15); color: var(--auto); }
 .badge.draft { background: rgba(251,191,36,0.15); color: var(--track); }
+.badge.kind {
+  background: rgba(61,156,240,0.14);
+  color: var(--accent);
+  font-weight: 500;
+  text-transform: lowercase;
+}
+.badge.kind.human {
+  background: rgba(52,211,153,0.15);
+  color: var(--auto);
+}
+.msg .meta .badge.kind { margin-left: auto; }
+.label-chips { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.event-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.event-row .event-main { flex: 1 1 14rem; min-width: 0; }
+.event-row .event-excerpt {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 36rem;
+}
+.event-row .fix-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.event-row .fix-kind select {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.35rem;
+  max-width: 8.5rem;
+}
 
 .cards {
   display: grid;

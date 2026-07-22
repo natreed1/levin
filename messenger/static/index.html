@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
-  <link rel="stylesheet" href="/static/style.css?v=32" />
+  <link rel="stylesheet" href="/static/style.css?v=33" />
 </head>
 <body>
-  <div id="auth-screen" class="auth-screen hidden">
+  <div id="auth-screen" class="auth-screen">
     <div class="auth-card">
       <h1>Workflow</h1>
-      <p class="sub">Rooms for people, agents, and ongoing work</p>
+      <p class="sub">Log in or create an account to continue</p>
       <div class="room-tabs auth-tabs">
         <button type="button" id="tab-login" class="active">Log in</button>
         <button type="button" id="tab-signup" class="ghost">Create account</button>
@@ -61,15 +61,6 @@
         <p id="reset-error" class="error" hidden></p>
         <button type="submit">Update password</button>
       </form>
-      <details class="guest-join">
-        <summary>Join a room with an invite link (guest)</summary>
-        <form id="guest-join-form">
-          <label>Invite token <input id="guest-invite" type="password" autocomplete="off" /></label>
-          <label>Display name <input id="guest-name" type="text" maxlength="40" /></label>
-          <p id="guest-error" class="error" hidden></p>
-          <button type="submit" class="ghost">Join room</button>
-        </form>
-      </details>
     </div>
   </div>
 
@@ -279,6 +270,9 @@
             <p class="eyebrow">Data</p>
             <h1>Tracking</h1>
           </div>
+          <div class="header-actions">
+            <button type="button" id="classify-pending-btn" class="ghost tiny">Classify pending</button>
+          </div>
         </header>
         <div class="cards">
           <div class="card">
@@ -315,7 +309,7 @@
         <div class="table-wrap">
           <table class="data-table" id="sessions-table">
             <thead>
-              <tr><th>Title</th><th>Surface</th><th>Status</th><th>Started</th></tr>
+              <tr><th>Title</th><th>Labels</th><th>Surface</th><th>Status</th><th>Started</th></tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -606,6 +600,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=35"></script>
+  <script src="/static/app.js?v=36"></script>
 </body>
 </html>

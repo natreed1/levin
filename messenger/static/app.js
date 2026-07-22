@@ -309,26 +309,6 @@
     showAuthPanel("login");
   });
 
-  $("#guest-join-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setError("#guest-error", "");
-    const params = new URLSearchParams(location.search);
-    const roomId = params.get("room") || "legacy";
-    const { res, data } = await api("/api/join", {
-      method: "POST",
-      body: JSON.stringify({
-        invite: $("#guest-invite").value || params.get("invite") || "",
-        name: $("#guest-name").value,
-        room_id: roomId,
-      }),
-    });
-    if (!res.ok) {
-      setError("#guest-error", (data && data.error) || "Join failed");
-      return;
-    }
-    await bootstrap();
-  });
-
   $("#logout-btn").addEventListener("click", async () => {
     await api("/api/auth/logout", { method: "POST" });
     closeWs();
@@ -336,13 +316,27 @@
     showAuth();
   });
 
-  // Prefill invite / handle verify + reset deep links
+  // Capture room invite + handle verify / reset deep links (login required).
   (() => {
     const params = new URLSearchParams(location.search);
-    if (params.get("invite")) $("#guest-invite").value = params.get("invite");
+    const invite = params.get("invite");
+    const room = params.get("room");
+    if (invite && room) {
+      try {
+        sessionStorage.setItem(
+          "flyleaf-pending-invite",
+          JSON.stringify({ invite, room })
+        );
+      } catch {}
+      setAuthBanner("Log in or create an account to join this room.", true);
+    }
     if (params.get("verified") === "1") {
       setAuthBanner("Email verified. You can log in.", true);
-      history.replaceState({}, "", "/");
+      const keep = new URLSearchParams();
+      if (invite) keep.set("invite", invite);
+      if (room) keep.set("room", room);
+      const q = keep.toString();
+      history.replaceState({}, "", q ? `/?${q}` : "/");
     }
     if (params.get("reset")) {
       state.resetToken = params.get("reset");
@@ -351,6 +345,41 @@
       setAuthBanner("Choose a new password.", true);
     }
   })();
+
+  async function consumePendingInvite() {
+    let pending = null;
+    const params = new URLSearchParams(location.search);
+    if (params.get("invite") && params.get("room")) {
+      pending = { invite: params.get("invite"), room: params.get("room") };
+    } else {
+      try {
+        const raw = sessionStorage.getItem("flyleaf-pending-invite");
+        if (raw) pending = JSON.parse(raw);
+      } catch {
+        pending = null;
+      }
+    }
+    if (!pending?.invite || !pending?.room) return null;
+    const { res, data } = await api("/api/join", {
+      method: "POST",
+      body: JSON.stringify({
+        invite: pending.invite,
+        room_id: pending.room,
+      }),
+    });
+    try {
+      sessionStorage.removeItem("flyleaf-pending-invite");
+    } catch {}
+    history.replaceState({}, "", "/");
+    if (!res.ok) {
+      setAuthBanner(
+        (data && (data.message || data.error)) || "Could not join that room.",
+        false
+      );
+      return null;
+    }
+    return data;
+  }
 
   // --- Tabs ------------------------------------------------------------------
 
@@ -2194,17 +2223,28 @@
 
   async function bootstrap() {
     const { res, data } = await api("/api/me");
-    if (!res.ok) {
+    // App shell requires a real account — invite-only / guest sessions stay on login.
+    if (!res.ok || !data?.authenticated) {
       showAuth();
       return;
     }
-    state.me = data;
+    const joined = await consumePendingInvite();
+    const me = joined
+      ? {
+          ...data,
+          authenticated: true,
+          room_id: joined.room_id || data.room_id,
+          room_title: joined.room_title || data.room_title,
+          name: joined.name || data.name,
+        }
+      : data;
+    state.me = me;
     showShell();
     switchTab("chats");
     await refreshChatRails();
     // Auto-open current room if present
-    if (data.room_id) {
-      await selectPeople(data.room_id, data.room_title || "Room");
+    if (me.room_id) {
+      await selectPeople(me.room_id, me.room_title || "Room");
     } else if (state.threads[0]) {
       await selectAgent(state.threads[0].session_id, state.threads[0].title, !!state.threads[0].master);
     } else {

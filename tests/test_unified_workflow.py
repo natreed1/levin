@@ -47,6 +47,7 @@ def _client(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MESSENGER_USERS_DIR", str(tmp_path / "users"))
     monkeypatch.setenv("MESSENGER_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MESSENGER_SCHEDULER", "0")
+    monkeypatch.setenv("MESSENGER_CLASSIFY_SWEEP", "0")
     monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "1")
     monkeypatch.delenv("MESSENGER_COOKIE_SECURE", raising=False)
     monkeypatch.delenv("FLY_APP_NAME", raising=False)

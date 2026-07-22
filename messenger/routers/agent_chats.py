@@ -38,11 +38,23 @@ def list_messages(
         if not session or session.surface != "chat":
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         messages = ledger.list_chat_messages(thread_id, limit=limit)
+        enriched = []
+        for msg in messages:
+            row = dict(msg)
+            eid = str(row.get("event_id") or "")
+            if eid:
+                try:
+                    kind = ledger.latest_kind_for(eid, thread_id)
+                except Exception:  # noqa: BLE001
+                    kind = None
+                if kind:
+                    row["resolved_kind"] = kind
+            enriched.append(row)
         return JSONResponse(
             {
                 "ok": True,
                 "thread_id": thread_id,
-                "messages": messages,
+                "messages": enriched,
                 "title": session.title,
                 "desk_tag": session.desk_tag,
             }

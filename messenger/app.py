@@ -34,7 +34,7 @@ from messenger.routers import (
     review_router,
     tracking_router,
 )
-from messenger.scheduler import CloudScheduler
+from messenger.scheduler import CloudScheduler, ClassifySweep
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_LEN = 2000
@@ -115,6 +115,45 @@ def _public_base_url(request: Request) -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
+
+def _capture_people_room_message(
+    store: MessageStore,
+    *,
+    room_id: str,
+    author: str,
+    text: str,
+    msg: dict[str, Any],
+    identity: dict[str, Any],
+) -> None:
+    """Mirror one People-room message into the room owner's Tracking ledger.
+
+    Non-blocking: must never raise into the chat send path.
+    """
+    try:
+        from analyst_ledger.messenger_sync import capture_room_message
+        from messenger.tenancy import user_context
+
+        owner_user_id = identity.get("user_id")
+        room_title = ""
+        if room_id != "legacy":
+            room = store.room(room_id) or {}
+            owner_user_id = room.get("owner_user_id") or owner_user_id
+            room_title = str(room.get("title") or "")
+        if not owner_user_id:
+            return
+        with user_context(str(owner_user_id)) as led:
+            capture_room_message(
+                led,
+                room_id,
+                author,
+                text,
+                room_title=room_title,
+                messenger_id=msg.get("id"),
+            )
+    except Exception:  # noqa: BLE001 — capture must never break chat
+        pass
+
+
 def _maybe_dispatch_agent_mention(
     app: FastAPI,
     *,
@@ -182,14 +221,28 @@ def create_app() -> FastAPI:
         interval_seconds=float(os.environ.get("MESSENGER_SCHEDULER_INTERVAL", "30")),
         run_stub=not live,
     )
+    classify_enabled = os.environ.get("MESSENGER_CLASSIFY_SWEEP", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    classify_sweep = ClassifySweep(
+        list_user_ids=store.list_user_ids,
+        interval_seconds=float(os.environ.get("MESSENGER_CLASSIFY_INTERVAL", "300")),
+        limit_per_user=int(os.environ.get("MESSENGER_CLASSIFY_LIMIT", "20")),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.loop = asyncio.get_running_loop()
         if scheduler_enabled:
             app.state.scheduler.start()
+        if classify_enabled:
+            app.state.classify_sweep.start()
         yield
         app.state.scheduler.stop()
+        app.state.classify_sweep.stop()
 
     app = FastAPI(
         title="Workflow Messenger",
@@ -204,6 +257,7 @@ def create_app() -> FastAPI:
     app.state.auth_email_limiter = auth_email_limiter
     app.state.jobs = jobs
     app.state.scheduler = scheduler
+    app.state.classify_sweep = classify_sweep
 
     app.include_router(auth_router)
     app.include_router(tracking_router)
@@ -1196,6 +1250,14 @@ def create_app() -> FastAPI:
             owner_user_id = (room or {}).get("owner_user_id") or identity.get("user_id")
         else:
             owner_user_id = identity.get("user_id")
+        _capture_people_room_message(
+            store,
+            room_id=room_id,
+            author=name,
+            text=text,
+            msg=msg,
+            identity=identity,
+        )
         _maybe_dispatch_agent_mention(
             app,
             room_id=room_id,
@@ -1257,6 +1319,14 @@ def create_app() -> FastAPI:
                 if room_id != "legacy":
                     room = store.room(room_id)
                     owner_user_id = (room or {}).get("owner_user_id") or owner_user_id
+                _capture_people_room_message(
+                    store,
+                    room_id=room_id,
+                    author=name,
+                    text=text,
+                    msg=msg,
+                    identity=identity,
+                )
                 _maybe_dispatch_agent_mention(
                     app,
                     room_id=room_id,
