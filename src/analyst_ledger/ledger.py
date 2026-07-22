@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .paths import artifacts_dir, events_dir, sqlite_path, state_path
+from .labels import normalize_labels
 from .schema import (
     SESSION_TAGS,
     ArtifactRef,
@@ -58,7 +59,8 @@ class Ledger:
                     started_at TEXT NOT NULL,
                     ended_at TEXT,
                     tags_json TEXT NOT NULL DEFAULT '[]',
-                    status TEXT NOT NULL DEFAULT 'open'
+                    status TEXT NOT NULL DEFAULT 'open',
+                    labels_json TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -111,6 +113,16 @@ class Ledger:
                 );
                 """
             )
+            # Additive migration: the topical `labels` axis (added 2026-07-20).
+            # Older ledgers created before this column get it via ALTER; new
+            # ledgers already have every base table from the script above.
+            cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "labels_json" not in cols:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def _append_jsonl(self, event: Event) -> Path:
         day = _day_key(event.ts)
@@ -195,6 +207,9 @@ class Ledger:
             ended_at=row["ended_at"],
             tags=json.loads(row["tags_json"] or "[]"),
             status=row["status"],
+            labels=json.loads(
+                (row["labels_json"] if "labels_json" in row.keys() else "[]") or "[]"
+            ),
         )
 
     def start_session(
@@ -531,6 +546,190 @@ class Ledger:
             )
         )
 
+    def add_labels(
+        self, labels: Iterable[str], session_id: Optional[str] = None
+    ) -> Event:
+        """Attach topical labels (``topic:``/``entity:``/``project:``/...) to a session.
+
+        Mirrors :meth:`add_tag`: the values are validated through the
+        controlled/open ``labels`` vocabulary, merged into the session's
+        ``labels_json`` column, and recorded as a ``label`` event. Unknown
+        values on a controlled axis raise ``LabelError``.
+        """
+        norm = normalize_labels(labels)
+        if not norm:
+            raise ValueError("no labels provided")
+        sid = session_id or self.get_active_session_id()
+        if not sid:
+            raise RuntimeError("No active session.")
+        session = self.get_session(sid)
+        if not session:
+            raise RuntimeError(f"Session '{sid}' not found.")
+        merged = sorted(set(session.labels) | set(norm))
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET labels_json = ? WHERE session_id = ?",
+                (json.dumps(merged), sid),
+            )
+        return self.append_event(
+            Event(
+                type="label",
+                surface=session.surface,
+                session_id=sid,
+                sensitivity=session.sensitivity,
+                payload={"labels": merged, "added": norm},
+            )
+        )
+
+    def record_ask_labels(
+        self,
+        session_id: str,
+        labels: Iterable[str],
+        *,
+        source: str = "chat",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Event:
+        """Record message-level labels (e.g. a detected actionable ask) as a
+        ``label`` event WITHOUT taking any action and WITHOUT touching the
+        session's topical labels.
+
+        This is the framework-capture path: it makes an ask legible (and mineable
+        for later model training) while the agent stays passive — nothing is run.
+        """
+        norm = normalize_labels(labels)
+        session = self.get_session(session_id)
+        sensitivity = session.sensitivity if session else Sensitivity.INTERNAL.value
+        surface = session.surface if session else Surface.CHAT.value
+        payload: Dict[str, Any] = {"labels": norm, "source": source}
+        if meta:
+            payload.update(meta)
+        return self.append_event(
+            Event(
+                type="label",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload=payload,
+            )
+        )
+
+    def correct_message_kind(
+        self,
+        session_id: str,
+        target_event_id: str,
+        kind: str,
+        *,
+        entity: Optional[str] = None,
+        auto_kind: Optional[str] = None,
+        source: str = "human",
+    ) -> List[str]:
+        """Record a human correction/confirmation of a captured message's kind.
+
+        Writes a superseding ``label`` event (``source``, tied to the message via
+        ``target_event_id``) plus a ``label_feedback`` event capturing the
+        auto->corrected transition — the gold-labeled example that feeds training.
+        """
+        labels = [f"kind:{kind}"]
+        if entity:
+            labels.append(f"entity:{entity}")
+        norm = normalize_labels(labels)  # validates kind against the controlled set
+        session = self.get_session(session_id)
+        sensitivity = session.sensitivity if session else Sensitivity.INTERNAL.value
+        surface = session.surface if session else Surface.CHAT.value
+        self.append_event(
+            Event(
+                type="label",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload={
+                    "labels": norm,
+                    "source": source,
+                    "target_event_id": target_event_id,
+                },
+            )
+        )
+        self.append_event(
+            Event(
+                type="label_feedback",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload={
+                    "target_event_id": target_event_id,
+                    "auto_kind": auto_kind,
+                    "corrected_kind": kind,
+                    "source": source,
+                },
+            )
+        )
+        return norm
+
+    def latest_kind_for(
+        self, target_event_id: str, session_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Current kind for a message: the latest label event tied to it, with a
+        human correction preferred over an auto label."""
+        best = None  # (priority, ts, kind)
+        for ev in self.list_events(session_id=session_id, limit=1000):
+            if ev.get("type") != "label":
+                continue
+            payload = ev.get("payload") or {}
+            if payload.get("target_event_id") != target_event_id:
+                continue
+            kinds = [
+                str(lbl).split(":", 1)[1]
+                for lbl in (payload.get("labels") or [])
+                if str(lbl).startswith("kind:")
+            ]
+            if not kinds:
+                continue
+            priority = 1 if payload.get("source") == "human" else 0
+            candidate = (priority, ev.get("ts") or "", kinds[0])
+            if best is None or candidate > best:
+                best = candidate
+        return best[2] if best else None
+
+    def confirmed_kind_examples(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Recent human-confirmed (message text -> kind) pairs, newest first.
+
+        Used both as few-shot examples for the classifier and as the export set
+        for fine-tuning a small kind classifier later.
+        """
+        events = self.list_events(limit=2000)
+        text_by_id: Dict[str, str] = {}
+        for ev in events:
+            if ev.get("type") == "chat_message":
+                text_by_id[ev.get("event_id")] = str(
+                    (ev.get("payload") or {}).get("content") or ""
+                )
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+        for ev in events:  # newest-first
+            if ev.get("type") != "label":
+                continue
+            payload = ev.get("payload") or {}
+            if payload.get("source") != "human":
+                continue
+            target = payload.get("target_event_id")
+            if not target or target in seen:
+                continue
+            kinds = [
+                str(lbl).split(":", 1)[1]
+                for lbl in (payload.get("labels") or [])
+                if str(lbl).startswith("kind:")
+            ]
+            if not kinds:
+                continue
+            text = text_by_id.get(target)
+            if not text:
+                continue
+            seen.add(target)
+            out.append({"text": text, "kind": kinds[0]})
+            if len(out) >= limit:
+                break
+        return out
+
     def attach_artifact(
         self,
         file_path: Path,
@@ -717,6 +916,10 @@ class Ledger:
                     "ended_at": row["ended_at"],
                     "tags": json.loads(row["tags_json"] or "[]"),
                     "status": row["status"],
+                    "labels": json.loads(
+                        (row["labels_json"] if "labels_json" in row.keys() else "[]")
+                        or "[]"
+                    ),
                 }
             )
         return out

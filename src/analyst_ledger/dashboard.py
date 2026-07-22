@@ -2829,7 +2829,7 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
     session = ledger.get_session(thread_id)
     if not session or session.surface != "chat":
         raise RuntimeError(f"Chat thread '{thread_id}' not found.")
-    ledger.append_chat_message(thread_id, role="user", content=content)
+    user_event = ledger.append_chat_message(thread_id, role="user", content=content)
     if router_enabled():
         # File finder first: its gate (location verb + file noun) is stricter
         # than ritual routing, so it only wins clearly file-flavored asks.
@@ -2865,6 +2865,39 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
                 "workflow_run",
                 lambda job: execute_routed_run(ledger, thread_id, routed, stub=stub),
             ).public()
+        # Layer 0.5 — classify the message (framework only; the agent does NOT
+        # act). Deterministic-only here so sending never blocks on a model call;
+        # a background sweep (classify_pending) fills in Qwen kinds for the fuzzy
+        # ones. Records kind/entity/topic labels tied to this message.
+        # Kill-switch: ANALYST_CHAT_ACTIONABLE=off.
+        try:
+            from .actionable import actionable_enabled
+            from .classify import classify_message
+
+            classified = (
+                classify_message(content, allow_qwen=False)
+                if actionable_enabled()
+                else None
+            )
+        except Exception:  # noqa: BLE001 — tagging must never break chat
+            classified = None
+        if classified and classified.get("labels"):
+            try:
+                ledger.record_ask_labels(
+                    thread_id,
+                    classified["labels"],
+                    source="chat_classify",
+                    meta={
+                        "classification": {
+                            "kind": classified["kind"],
+                            "entity": classified["entity"],
+                            "source": classified["source"],
+                        },
+                        "target_event_id": user_event.event_id,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — never block chat on tagging
+                pass
     if session.desk_tag == "chat:master":
         return jobs.start(
             "chat:master",
@@ -2879,6 +2912,33 @@ def _api_chat_message(ledger: Ledger, jobs: Any, data: dict) -> dict:
             ritual_id, request=content, stub=False, job=job
         ),
     ).public()
+
+
+def _api_label_correct(ledger: Ledger, data: dict) -> dict:
+    """Record a human correction/confirmation of a captured message's kind.
+
+    Powers an inline "fix this tag" control: the confirmed label supersedes the
+    auto one and is saved as a training example (see ledger.correct_message_kind).
+    """
+    session_id = str(data.get("session_id") or "")
+    target_event_id = str(data.get("event_id") or data.get("target_event_id") or "")
+    kind = str(data.get("kind") or "").strip()
+    if not (session_id and target_event_id and kind):
+        raise ValueError("session_id, event_id and kind are required")
+    entity = data.get("entity")
+    auto_kind = data.get("auto_kind")
+    labels = ledger.correct_message_kind(
+        session_id,
+        target_event_id,
+        kind,
+        entity=str(entity) if entity else None,
+        auto_kind=str(auto_kind) if auto_kind else None,
+    )
+    return {
+        "ok": True,
+        "labels": labels,
+        "kind": ledger.latest_kind_for(target_event_id, session_id),
+    }
 
 
 def _api_arena_start(ledger: Ledger, jobs: Any, data: dict) -> dict:
@@ -3172,6 +3232,17 @@ def make_app(ledger: Optional[Ledger] = None):
                 data = _parse_json_body(environ)
                 return _json_response(
                     start_response, _api_chat_message(ledger, jobs, data)
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response, {"error": str(exc)}, status="400 Bad Request"
+                )
+
+        if path == "/api/label/correct" and method == "POST":
+            try:
+                data = _parse_json_body(environ)
+                return _json_response(
+                    start_response, _api_label_correct(ledger, data)
                 )
             except Exception as exc:  # noqa: BLE001
                 return _json_response(
