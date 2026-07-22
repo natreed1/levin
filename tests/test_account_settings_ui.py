@@ -21,6 +21,8 @@ def test_account_settings_sections_are_present():
         assert f'data-settings-panel="{section}"' in html
     assert 'id="profile-settings-form"' in html
     assert 'id="change-password-form"' in html
+    assert 'id="email-2fa-form"' in html
+    assert 'id="otp-form"' in html
     assert 'id="logout-other-sessions-btn"' in html
 
 
@@ -30,6 +32,8 @@ def test_account_settings_actions_and_layout_are_wired():
     assert 'api("/api/auth/profile"' in js
     assert 'api("/api/auth/change-password"' in js
     assert 'api("/api/auth/logout-other-sessions"' in js
+    assert 'api("/api/auth/email-2fa"' in js
+    assert 'api("/api/auth/verify-2fa"' in js
     assert "flyleaf-theme" in js
     assert ".settings-layout" in css
     assert 'html[data-theme="light"]' in css

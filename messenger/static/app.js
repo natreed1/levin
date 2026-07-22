@@ -97,6 +97,7 @@
   function showAuthPanel(which) {
     const panels = {
       login: "#login-form",
+      otp: "#otp-form",
       signup: "#signup-form",
       forgot: "#forgot-form",
       reset: "#reset-form",
@@ -112,7 +113,24 @@
       $("#tab-signup").classList.toggle("active", which === "signup");
       show($("#tab-login"));
       show($("#tab-signup"));
+    } else if (which === "otp") {
+      hide($("#tab-login"));
+      hide($("#tab-signup"));
     }
+  }
+
+  function beginOtpChallenge(data) {
+    state.otpChallengeId = data.challenge_id || "";
+    $("#otp-challenge-id").value = state.otpChallengeId;
+    $("#otp-code").value = data.dev_otp_code || "";
+    const email = data.email || $("#login-email").value || "your email";
+    $("#otp-hint").textContent = `Enter the 6-digit code we sent to ${email}.`;
+    setError("#otp-error", "");
+    let banner = data.message || "Check your email for a sign-in code.";
+    if (data.dev_otp_code) banner += ` Dev code: ${data.dev_otp_code}`;
+    setAuthBanner(banner, true);
+    showAuthPanel("otp");
+    $("#otp-code").focus();
   }
 
   $("#tab-login").addEventListener("click", () => {
@@ -130,6 +148,11 @@
     showAuthPanel("forgot");
   });
   $("#forgot-back-btn").addEventListener("click", () => showAuthPanel("login"));
+  $("#otp-back-btn")?.addEventListener("click", () => {
+    state.otpChallengeId = null;
+    $("#otp-challenge-id").value = "";
+    showAuthPanel("login");
+  });
 
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -152,7 +175,50 @@
       setError("#login-error", (data && (data.message || data.error)) || "Login failed");
       return;
     }
+    if (data?.requires_2fa) {
+      beginOtpChallenge(data);
+      return;
+    }
     await bootstrap();
+  });
+
+  $("#otp-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#otp-error", "");
+    const challengeId = $("#otp-challenge-id").value || state.otpChallengeId || "";
+    const { res, data } = await api("/api/auth/verify-2fa", {
+      method: "POST",
+      body: JSON.stringify({
+        challenge_id: challengeId,
+        code: $("#otp-code").value,
+      }),
+    });
+    if (!res.ok) {
+      setError("#otp-error", (data && (data.message || data.error)) || "Invalid code");
+      return;
+    }
+    state.otpChallengeId = null;
+    await bootstrap();
+  });
+
+  $("#resend-otp-btn")?.addEventListener("click", async () => {
+    const challengeId = $("#otp-challenge-id").value || state.otpChallengeId || "";
+    if (!challengeId) {
+      setError("#otp-error", "Sign in again to request a new code.");
+      return;
+    }
+    const { res, data } = await api("/api/auth/resend-2fa", {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: challengeId }),
+    });
+    if (!res.ok) {
+      setError("#otp-error", (data && (data.message || data.error)) || "Could not resend");
+      return;
+    }
+    if (data?.dev_otp_code) $("#otp-code").value = data.dev_otp_code;
+    let msg = data?.message || "A new code is on the way.";
+    if (data?.dev_otp_code) msg += ` Dev code: ${data.dev_otp_code}`;
+    setAuthBanner(msg, true);
   });
 
   $("#resend-verify-btn").addEventListener("click", async () => {
@@ -746,12 +812,21 @@
     const role = payload.role || "assistant";
     const div = document.createElement("div");
     div.className = "msg" + (role === "user" ? " mine" : " agent");
+    if (ev.event_id) div.dataset.eventId = ev.event_id;
+    if (ev.session_id) div.dataset.sessionId = ev.session_id;
     div.innerHTML =
       '<div class="meta"><span class="author"></span><span class="time"></span></div>' +
       '<div class="body"></div>';
     div.querySelector(".author").textContent = role;
     div.querySelector(".time").textContent = fmtTime(ev.ts);
     div.querySelector(".body").textContent = payload.content || "";
+    const kind = ev.resolved_kind || payload.resolved_kind;
+    if (kind) {
+      const chip = document.createElement("span");
+      chip.className = "badge kind";
+      chip.textContent = kind;
+      div.querySelector(".meta").appendChild(chip);
+    }
     $("#messages").appendChild(div);
     $("#messages").scrollTop = $("#messages").scrollHeight;
   }
@@ -1210,21 +1285,139 @@
     notes_only: "Notes only",
   };
 
+  let trackingVocab = { kinds: ["research", "build", "observation", "idea", "question"] };
+
   function selectedCaptureScope() {
     const el = document.querySelector('input[name="capture-scope"]:checked');
     return (el && el.value) || "active_tab";
   }
 
+  function labelChipsHtml(labels) {
+    const list = Array.isArray(labels) ? labels : [];
+    if (!list.length) return '<span class="muted">—</span>';
+    return (
+      '<span class="label-chips">' +
+      list
+        .map((lbl) => `<span class="badge kind">${escapeHtml(lbl)}</span>`)
+        .join("") +
+      "</span>"
+    );
+  }
+
+  function eventTargetId(ev) {
+    if (ev.type === "chat_message") return ev.event_id || "";
+    const payload = ev.payload || {};
+    return payload.target_event_id || "";
+  }
+
+  function renderEventRow(ev) {
+    const li = document.createElement("li");
+    li.className = "event-row";
+    const payload = ev.payload || {};
+    const scope =
+      ev.type === "session_start" && payload.capture_scope
+        ? ` · ${payload.capture_scope}`
+        : "";
+    const kind = ev.resolved_kind || "";
+    const labels = Array.isArray(payload.labels) ? payload.labels.join(" · ") : "";
+    const source = payload.source ? ` · ${payload.source}` : "";
+    const mainBits = [`${fmtTime(ev.ts)} · ${ev.type} · ${ev.surface || ""}${scope}`];
+    if (kind) mainBits.push(`kind:${kind}`);
+    else if (labels) mainBits.push(labels);
+    if (source && (ev.type === "label" || kind)) mainBits.push(source.trim());
+
+    const main = document.createElement("div");
+    main.className = "event-main";
+    main.textContent = mainBits.filter(Boolean).join(" · ");
+    if (ev.message_excerpt) {
+      const ex = document.createElement("span");
+      ex.className = "event-excerpt";
+      ex.textContent = ev.message_excerpt;
+      main.appendChild(ex);
+    }
+    li.appendChild(main);
+
+    if (kind) {
+      const chip = document.createElement("span");
+      chip.className = "badge kind" + (payload.source === "human" ? " human" : "");
+      chip.textContent = kind;
+      li.appendChild(chip);
+    }
+
+    const targetId = eventTargetId(ev);
+    const canFix =
+      targetId &&
+      ev.session_id &&
+      (ev.type === "chat_message" || ev.type === "label") &&
+      (kind || ev.type === "chat_message");
+    if (canFix) {
+      const fix = document.createElement("div");
+      fix.className = "fix-kind";
+      const sel = document.createElement("select");
+      sel.setAttribute("aria-label", "Fix kind");
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "Fix kind…";
+      sel.appendChild(blank);
+      (trackingVocab.kinds || []).forEach((k) => {
+        const opt = document.createElement("option");
+        opt.value = k;
+        opt.textContent = k;
+        if (k === kind) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost tiny";
+      btn.textContent = "Save";
+      btn.addEventListener("click", async () => {
+        const next = sel.value;
+        if (!next) return;
+        setError("#track-error", "");
+        const { res, data } = await api("/api/tracking/labels/correct", {
+          method: "POST",
+          body: JSON.stringify({
+            session_id: ev.session_id,
+            event_id: targetId,
+            kind: next,
+            auto_kind: kind || undefined,
+          }),
+        });
+        if (!res.ok) {
+          setError("#track-error", data?.error || "Failed to correct kind");
+          return;
+        }
+        loadTracking();
+      });
+      fix.appendChild(sel);
+      fix.appendChild(btn);
+      li.appendChild(fix);
+    }
+    return li;
+  }
+
   async function loadTracking() {
     setError("#track-error", "");
+    const vocab = await api("/api/tracking/labels/vocab");
+    if (vocab.res.ok && vocab.data?.kinds) {
+      trackingVocab = {
+        kinds: vocab.data.kinds,
+        topics: vocab.data.topics || [],
+        intents: vocab.data.intents || [],
+        states: vocab.data.states || [],
+      };
+    }
     const summary = await api("/api/tracking/summary");
     if (!summary.res.ok) {
       setError("#track-error", summary.data?.error || "Failed to load tracking");
       return;
     }
     const active = summary.data?.active_session;
+    const activeLabels = Array.isArray(active?.labels) && active.labels.length
+      ? ` · ${active.labels.join(", ")}`
+      : "";
     $("#active-session").textContent = active
-      ? `${active.title} (${active.session_id})`
+      ? `${active.title} (${active.session_id})${activeLabels}`
       : "None";
     const scopeHint = $("#active-scope");
     if (active && active.capture_scope) {
@@ -1259,6 +1452,7 @@
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(row.title)}</td>
+        <td>${labelChipsHtml(row.labels)}</td>
         <td>${escapeHtml(row.surface)}</td>
         <td>${escapeHtml(row.status)}</td>
         <td>${escapeHtml(fmtTime(row.started_at))}</td>`;
@@ -1269,13 +1463,7 @@
     const el = $("#events-list");
     el.innerHTML = "";
     (events.data?.events || []).forEach((ev) => {
-      const li = document.createElement("li");
-      const scope =
-        ev.type === "session_start" && ev.payload && ev.payload.capture_scope
-          ? ` · ${ev.payload.capture_scope}`
-          : "";
-      li.textContent = `${fmtTime(ev.ts)} · ${ev.type} · ${ev.surface || ""}${scope}`;
-      el.appendChild(li);
+      el.appendChild(renderEventRow(ev));
     });
   }
 
@@ -1309,6 +1497,21 @@
     $("#session-note").value = "";
     loadTracking();
   });
+  const classifyBtn = $("#classify-pending-btn");
+  if (classifyBtn) {
+    classifyBtn.addEventListener("click", async () => {
+      setError("#track-error", "");
+      const { res, data } = await api("/api/tracking/classify-pending", {
+        method: "POST",
+        body: JSON.stringify({ limit: 20 }),
+      });
+      if (!res.ok) {
+        setError("#track-error", data?.error || "Classify failed");
+        return;
+      }
+      loadTracking();
+    });
+  }
 
   // --- Account settings ------------------------------------------------------
 
@@ -1346,6 +1549,16 @@
     const count = Number(data.session_count || 1);
     $("#settings-session-count").textContent =
       `${count} active session${count === 1 ? "" : "s"}, including this browser.`;
+    const twoFaOn = !!data.email_2fa_enabled;
+    state.email2faEnabled = twoFaOn;
+    const twoFaStatus = $("#settings-2fa-status");
+    if (twoFaStatus) {
+      twoFaStatus.textContent = twoFaOn
+        ? "On. We’ll email a one-time code every time you log in."
+        : "Off. We’ll email a one-time code at each login when enabled.";
+    }
+    const toggleBtn = $("#toggle-2fa-btn");
+    if (toggleBtn) toggleBtn.textContent = twoFaOn ? "Disable email 2FA" : "Enable email 2FA";
   }
 
   $$(".settings-nav-btn").forEach((button) => {
@@ -1392,6 +1605,30 @@
     }
     $("#change-password-form").reset();
     settingsMessage("#password-settings-message", data.message || "Password changed.");
+    await loadAccountSettings();
+  });
+
+  $("#email-2fa-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setError("#twofa-settings-error", "");
+    settingsMessage("#twofa-settings-message", "");
+    const enable = !state.email2faEnabled;
+    const { res, data } = await api("/api/auth/email-2fa", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: enable,
+        password: $("#settings-2fa-password").value,
+      }),
+    });
+    if (!res.ok) {
+      setError(
+        "#twofa-settings-error",
+        data?.message || data?.error || "Could not update two-factor settings"
+      );
+      return;
+    }
+    $("#email-2fa-form").reset();
+    settingsMessage("#twofa-settings-message", data.message || "Updated.");
     await loadAccountSettings();
   });
 

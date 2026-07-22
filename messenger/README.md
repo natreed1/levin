@@ -37,6 +37,8 @@ Guest room join (invite link) still works for People chats without a full accoun
 
 Signup sends a verification email; login is blocked until verified.
 Forgot password sends a one-hour reset link.
+Optional email two-factor authentication (Settings → Security) emails a 6-digit
+code at each login after the password succeeds.
 
 Configure outbound mail (Fly secrets recommended):
 
@@ -52,9 +54,10 @@ fly secrets set -a levin \
 ```
 
 Without a mail backend, local emails are logged to the server console and
-signup/forgot responses include `dev_verify_url` / `dev_reset_url` for testing.
-On Fly, account creation fails closed until Resend or SMTP is configured; the
-server never exposes verification or reset links in production responses.
+signup/forgot responses include `dev_verify_url` / `dev_reset_url` for testing
+(and `dev_otp_code` when email 2FA is on). On Fly, account creation fails closed
+until Resend or SMTP is configured; the server never exposes verification,
+reset, or OTP codes in production responses.
 
 ## Tabs
 

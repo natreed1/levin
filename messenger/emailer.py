@@ -186,3 +186,21 @@ def send_password_reset_email(*, to: str, reset_url: str, display_name: str) -> 
         "<p>This link expires in 1 hour.</p>"
     )
     return send_email(to=to, subject=subject, text=text, html=html_body)
+
+
+def send_login_otp_email(*, to: str, code: str, display_name: str) -> dict[str, Any]:
+    subject = "Your Workflow sign-in code"
+    safe_name = html.escape(display_name or "", quote=True)
+    safe_code = html.escape(code or "", quote=True)
+    text = (
+        f"Hi {display_name},\n\n"
+        f"Your sign-in code is: {code}\n\n"
+        "It expires in 10 minutes. If you did not try to sign in, change your password.\n"
+    )
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
+        f"<p>Your sign-in code is:</p>"
+        f'<p style="font-size:1.5rem;letter-spacing:0.2em"><strong>{safe_code}</strong></p>'
+        "<p>It expires in 10 minutes.</p>"
+    )
+    return send_email(to=to, subject=subject, text=text, html=html_body)

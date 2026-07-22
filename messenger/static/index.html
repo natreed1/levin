@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
-  <link rel="stylesheet" href="/static/style.css?v=31" />
+  <link rel="stylesheet" href="/static/style.css?v=32" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen hidden">
@@ -25,6 +25,19 @@
         <p class="auth-links">
           <button type="button" id="show-forgot-btn" class="linkish">Forgot password?</button>
           <button type="button" id="resend-verify-btn" class="linkish hidden">Resend verification</button>
+        </p>
+      </form>
+      <form id="otp-form" class="hidden">
+        <p class="sub" id="otp-hint">Enter the 6-digit code we emailed you.</p>
+        <label>Sign-in code
+          <input id="otp-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="one-time-code" required />
+        </label>
+        <input type="hidden" id="otp-challenge-id" value="" />
+        <p id="otp-error" class="error" hidden></p>
+        <button type="submit">Verify and continue</button>
+        <p class="auth-links">
+          <button type="button" id="resend-otp-btn" class="linkish">Resend code</button>
+          <button type="button" id="otp-back-btn" class="linkish">Back to log in</button>
         </p>
       </form>
       <form id="signup-form" class="hidden">
@@ -381,6 +394,22 @@
                 <p id="password-settings-message" class="auth-banner" hidden></p>
                 <p id="password-settings-error" class="error" hidden></p>
               </form>
+              <div class="settings-subcard">
+                <div>
+                  <strong>Email two-factor authentication</strong>
+                  <p id="settings-2fa-status" class="muted tiny-hint">Off. We’ll email a one-time code at each login when enabled.</p>
+                </div>
+                <form id="email-2fa-form" class="settings-account-form">
+                  <label>Confirm password
+                    <input id="settings-2fa-password" type="password" autocomplete="current-password" required />
+                  </label>
+                  <div class="card-actions">
+                    <button type="submit" id="toggle-2fa-btn">Enable email 2FA</button>
+                  </div>
+                  <p id="twofa-settings-message" class="auth-banner" hidden></p>
+                  <p id="twofa-settings-error" class="error" hidden></p>
+                </form>
+              </div>
               <div class="settings-subcard">
                 <div>
                   <strong>Active sessions</strong>

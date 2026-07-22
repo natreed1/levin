@@ -113,6 +113,13 @@ def new_session_id() -> str:
     return secrets.token_urlsafe(24)
 
 
+def new_otp_code(*, digits: int = 6) -> str:
+    """Return a numeric one-time code (zero-padded)."""
+    if digits < 4 or digits > 10:
+        raise ValueError("digits must be between 4 and 10")
+    return f"{secrets.randbelow(10 ** digits):0{digits}d}"
+
+
 def mint_session(
     name: str,
     room_id: str = "legacy",

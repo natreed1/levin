@@ -133,6 +133,11 @@ class MessageStore:
                         "UPDATE users SET email_verified_at = created_at "
                         "WHERE email_verified_at IS NULL"
                     )
+                if "email_2fa_enabled" not in user_cols:
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN email_2fa_enabled "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -145,6 +150,16 @@ class MessageStore:
                     )
                     """
                 )
+                token_cols = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA table_info(auth_tokens)"
+                    ).fetchall()
+                }
+                if "code_hash" not in token_cols:
+                    conn.execute(
+                        "ALTER TABLE auth_tokens ADD COLUMN code_hash TEXT"
+                    )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_auth_tokens_user "
                     "ON auth_tokens(user_id, purpose)"
@@ -236,6 +251,7 @@ class MessageStore:
             return None
         data = dict(row)
         data["email_verified"] = bool(data.get("email_verified_at"))
+        data["email_2fa_enabled"] = bool(int(data.get("email_2fa_enabled") or 0))
         return data
 
     def user_by_email(self, email: str) -> dict[str, Any] | None:
@@ -244,7 +260,7 @@ class MessageStore:
             try:
                 row = conn.execute(
                     "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at FROM users WHERE email = ?",
+                    "email_verified_at, email_2fa_enabled FROM users WHERE email = ?",
                     (email,),
                 ).fetchone()
             finally:
@@ -257,7 +273,7 @@ class MessageStore:
             try:
                 row = conn.execute(
                     "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at FROM users WHERE user_id = ?",
+                    "email_verified_at, email_2fa_enabled FROM users WHERE user_id = ?",
                     (user_id,),
                 ).fetchone()
             finally:
@@ -297,6 +313,18 @@ class MessageStore:
                 conn.execute(
                     "UPDATE users SET display_name = ? WHERE user_id = ?",
                     (display_name, user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def set_email_2fa_enabled(self, user_id: str, enabled: bool) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE users SET email_2fa_enabled = ? WHERE user_id = ?",
+                    (1 if enabled else 0, user_id),
                 )
                 conn.commit()
             finally:
@@ -405,6 +433,7 @@ class MessageStore:
         user_id: str,
         purpose: str,
         expires_at: str,
+        code_hash: Optional[str] = None,
     ) -> None:
         created_at = _utc_now()
         with self._lock:
@@ -419,16 +448,24 @@ class MessageStore:
                 conn.execute(
                     """
                     INSERT INTO auth_tokens
-                        (token_hash, user_id, purpose, created_at, expires_at, used_at)
-                    VALUES (?, ?, ?, ?, ?, NULL)
+                        (token_hash, user_id, purpose, created_at, expires_at,
+                         used_at, code_hash)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?)
                     """,
-                    (token_hash, user_id, purpose, created_at, expires_at),
+                    (
+                        token_hash,
+                        user_id,
+                        purpose,
+                        created_at,
+                        expires_at,
+                        code_hash,
+                    ),
                 )
                 conn.commit()
             finally:
                 conn.close()
 
-    def consume_auth_token(
+    def get_auth_token(
         self, *, token_hash: str, purpose: str
     ) -> dict[str, Any] | None:
         now = _utc_now()
@@ -437,7 +474,60 @@ class MessageStore:
             try:
                 row = conn.execute(
                     """
-                    SELECT token_hash, user_id, purpose, created_at, expires_at, used_at
+                    SELECT token_hash, user_id, purpose, created_at, expires_at,
+                           used_at, code_hash
+                    FROM auth_tokens WHERE token_hash = ? AND purpose = ?
+                    """,
+                    (token_hash, purpose),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        data = dict(row)
+        if data.get("used_at"):
+            return None
+        if str(data.get("expires_at") or "") < now:
+            return None
+        return data
+
+    def refresh_auth_token_code(
+        self,
+        *,
+        token_hash: str,
+        purpose: str,
+        code_hash: str,
+        expires_at: str,
+    ) -> bool:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE auth_tokens
+                    SET code_hash = ?, expires_at = ?, created_at = ?
+                    WHERE token_hash = ? AND purpose = ?
+                      AND used_at IS NULL AND expires_at >= ?
+                    """,
+                    (code_hash, expires_at, now, token_hash, purpose, now),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def consume_auth_token(
+        self, *, token_hash: str, purpose: str, code_hash: Optional[str] = None
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT token_hash, user_id, purpose, created_at, expires_at,
+                           used_at, code_hash
                     FROM auth_tokens WHERE token_hash = ? AND purpose = ?
                     """,
                     (token_hash, purpose),
@@ -448,6 +538,14 @@ class MessageStore:
                 if data.get("used_at"):
                     return None
                 if str(data.get("expires_at") or "") < now:
+                    return None
+                expected_code = data.get("code_hash")
+                if expected_code:
+                    if not code_hash or not hmac.compare_digest(
+                        str(expected_code), str(code_hash)
+                    ):
+                        return None
+                elif code_hash:
                     return None
                 conn.execute(
                     "UPDATE auth_tokens SET used_at = ? WHERE token_hash = ?",
