@@ -715,6 +715,15 @@ async def resend_verification(
             {"ok": False, "error": "rate_limited", "message": "Please try again later."},
             status_code=429,
         )
+    if not email_delivery_available() and not expose_dev_links():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_delivery_unavailable",
+                "message": "Verification email is temporarily unavailable. Please try again later.",
+            },
+            status_code=503,
+        )
     user = store.user_by_email(email)
     # Always look successful to avoid email enumeration.
     payload: dict[str, Any] = {
@@ -818,6 +827,17 @@ async def forgot_password(
         return JSONResponse(
             {"ok": False, "error": "rate_limited", "message": "Please try again later."},
             status_code=429,
+        )
+    # Fail closed on Fly (and any host) when mail cannot leave the process — same
+    # posture as signup. Avoid promising a reset email that will never arrive.
+    if not email_delivery_available() and not expose_dev_links():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_delivery_unavailable",
+                "message": "Password reset is temporarily unavailable. Please try again later.",
+            },
+            status_code=503,
         )
     payload: dict[str, Any] = {
         "ok": True,

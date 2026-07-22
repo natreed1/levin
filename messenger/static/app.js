@@ -254,6 +254,11 @@
       setError("#signup-error", (data && (data.message || data.error)) || "Signup failed");
       return;
     }
+    // AUTO_VERIFY / break-glass signup already sets the session cookie — enter the app.
+    if (data?.auto_verified) {
+      await bootstrap();
+      return;
+    }
     let msg = data?.message || "Check your email to verify, then log in.";
     if (data?.dev_verify_url) {
       msg += ` Dev link: ${data.dev_verify_url}`;
