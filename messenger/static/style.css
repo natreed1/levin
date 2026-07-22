@@ -818,14 +818,47 @@ button.tiny, .ghost.tiny {
 .wizard-empty { margin-top: 0.75rem; }
 
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .rail { flex-direction: row; align-items: center; gap: 0.75rem; border-right: none; border-bottom: 1px solid var(--border); }
-  .rail-nav { flex-direction: row; }
-  .rail-brand { border: none; margin: 0; padding: 0; }
-  .rail-foot { border: none; padding: 0; margin-left: auto; }
-  .chats-layout { grid-template-columns: 1fr; grid-template-rows: minmax(170px, 32vh) 1fr; }
-  .thread-rail { border-right: none; border-bottom: 1px solid var(--border); flex-direction: row; }
-  .rooms-section { flex: 1; border: none; border-right: 1px solid var(--border); }
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    width: 100%;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+  .rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-width: 100%;
+    min-width: 0;
+  }
+  .rail-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    gap: 0.3rem;
+  }
+  .nav-btn {
+    padding: 0.4rem 0.65rem;
+    font-size: 0.82rem;
+    white-space: nowrap;
+  }
+  .rail-brand { border: none; margin: 0; padding: 0; flex: 0 0 auto; }
+  .rail-foot { border: none; padding: 0; margin-left: auto; flex: 0 0 auto; }
+  .main { max-width: 100%; }
+  .chats-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(170px, 32vh) 1fr;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .thread-rail { border-right: none; border-bottom: 1px solid var(--border); flex-direction: row; min-width: 0; }
+  .rooms-section { flex: 1; border: none; border-right: 1px solid var(--border); min-width: 0; }
   .agent-dock { width: min(42%, 230px); overflow: auto; }
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav {
