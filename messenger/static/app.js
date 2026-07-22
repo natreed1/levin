@@ -647,9 +647,10 @@
     const loopBit = job.continuous
       ? `loop ${job.round_num || "…"}`
       : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
+    const topicBit = job.topic ? ` “${job.topic}”` : "";
     text.textContent = job.continuous
-      ? `Looping “${job.topic || "debate"}” (${loopBit}) — safe to leave; turns keep posting.`
-      : `Running ${job.action} “${job.topic || ""}” (${loopBit}) — safe to leave this room.`;
+      ? `Looping${topicBit || " debate"} (${loopBit}) — safe to leave; turns keep posting.`
+      : `Running ${job.action || "specialists"}${topicBit} (${loopBit}) — safe to leave this room.`;
     show(banner);
     show(stopBtn);
     if (!state.specialistPoll && state.roomId) {
