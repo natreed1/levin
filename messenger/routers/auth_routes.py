@@ -15,6 +15,7 @@ from messenger.auth import (
     hash_auth_token,
     hash_password,
     new_auth_token,
+    new_otp_code,
     new_user_id,
     normalize_email,
     normalize_name,
@@ -37,6 +38,7 @@ from messenger.emailer import (
     email_backend,
     expose_dev_links,
     public_base_url,
+    send_login_otp_email,
     send_password_reset_email,
     send_verification_email,
 )
@@ -47,6 +49,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 VERIFY_HOURS = 24.0
 RESET_HOURS = 1.0
+LOGIN_2FA_HOURS = 10.0 / 60.0  # 10 minutes
+LOGIN_2FA_PURPOSE = "login_2fa"
 
 
 def _email_action_allowed(request: Request, action: str, email: str) -> bool:
@@ -74,6 +78,56 @@ def _issue_token(store: MessageStore, *, user_id: str, purpose: str, hours: floa
         expires_at=utc_expiry_iso(hours=hours),
     )
     return raw
+
+
+def _issue_login_2fa_challenge(
+    store: MessageStore, *, user: dict[str, Any]
+) -> tuple[str, str]:
+    """Create a login OTP challenge. Returns (challenge_id, otp_code)."""
+    challenge_id = new_auth_token()
+    code = new_otp_code()
+    store.create_auth_token(
+        token_hash=hash_auth_token(challenge_id),
+        user_id=str(user["user_id"]),
+        purpose=LOGIN_2FA_PURPOSE,
+        expires_at=utc_expiry_iso(hours=LOGIN_2FA_HOURS),
+        code_hash=hash_auth_token(code),
+    )
+    return challenge_id, code
+
+
+def _send_login_otp(*, user: dict[str, Any], code: str) -> Optional[str]:
+    try:
+        send_login_otp_email(
+            to=str(user["email"]),
+            code=code,
+            display_name=str(user["display_name"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login otp email failed: %s", exc)
+        return str(exc)
+    return None
+
+
+def _2fa_payload(
+    *,
+    challenge_id: str,
+    user: dict[str, Any],
+    mail_error: Optional[str] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": True,
+        "requires_2fa": True,
+        "challenge_id": challenge_id,
+        "email": user["email"],
+        "message": "Enter the 6-digit code we emailed you to finish signing in.",
+        "email_backend": email_backend(),
+    }
+    if expose_dev_links():
+        # Tests / local console: expose the challenge only; code is in mail log.
+        if mail_error:
+            payload["mail_error"] = mail_error
+    return payload
 
 
 def _verify_link(request: Request, token: str) -> str:
@@ -229,6 +283,25 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
             },
             status_code=403,
         )
+    if user.get("email_2fa_enabled"):
+        if not email_delivery_available() and not expose_dev_links():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "email_delivery_unavailable",
+                    "message": "Two-factor email codes are temporarily unavailable.",
+                },
+                status_code=503,
+            )
+        challenge_id, code = _issue_login_2fa_challenge(store, user=user)
+        mail_error = _send_login_otp(user=user, code=code)
+        payload = _2fa_payload(
+            challenge_id=challenge_id, user=user, mail_error=mail_error
+        )
+        if expose_dev_links():
+            payload["dev_otp_code"] = code
+        return JSONResponse(payload)
+
     identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
     room_id = (identity or {}).get("room_id") or "legacy"
     resp = JSONResponse(
@@ -240,6 +313,7 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
             "name": user["display_name"],
             "room_id": room_id,
             "email_verified": True,
+            "email_2fa_enabled": False,
         }
     )
     set_session_cookie(
@@ -253,6 +327,139 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
         revoke_sid=(identity or {}).get("sid"),
     )
     return resp
+
+
+@router.post("/verify-2fa")
+async def verify_2fa(
+    request: Request, store: MessageStore = Depends(get_store)
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    challenge_id = str(body.get("challenge_id") or "").strip()
+    code = "".join(ch for ch in str(body.get("code") or "") if ch.isdigit())
+    client_ip = request.client.host if request.client else "unknown"
+    login_limiter = getattr(request.app.state, "login_limiter", None)
+    if login_limiter is not None and not login_limiter.allow(
+        f"verify-2fa:{client_ip}:{challenge_id[:16]}"
+    ):
+        return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
+    if not challenge_id or len(code) != 6:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_code",
+                "message": "Enter the 6-digit code from your email.",
+            },
+            status_code=400,
+        )
+    row = store.consume_auth_token(
+        token_hash=hash_auth_token(challenge_id),
+        purpose=LOGIN_2FA_PURPOSE,
+        code_hash=hash_auth_token(code),
+    )
+    if not row:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_code",
+                "message": "That code is invalid or has expired.",
+            },
+            status_code=401,
+        )
+    user = store.user_by_id(str(row["user_id"]))
+    if not user or not user.get("email_2fa_enabled"):
+        return JSONResponse(
+            {"ok": False, "error": "bad_code", "message": "That code is invalid."},
+            status_code=401,
+        )
+    identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+    room_id = (identity or {}).get("room_id") or "legacy"
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "user_id": user["user_id"],
+            "email": user["email"],
+            "display_name": user["display_name"],
+            "name": user["display_name"],
+            "room_id": room_id,
+            "email_verified": True,
+            "email_2fa_enabled": True,
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=user["display_name"],
+        room_id=room_id,
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+        revoke_sid=(identity or {}).get("sid"),
+    )
+    return resp
+
+
+@router.post("/resend-2fa")
+async def resend_2fa(
+    request: Request, store: MessageStore = Depends(get_store)
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    challenge_id = str(body.get("challenge_id") or "").strip()
+    if not challenge_id:
+        return JSONResponse({"ok": False, "error": "bad_challenge"}, status_code=400)
+    token_hash = hash_auth_token(challenge_id)
+    challenge = store.get_auth_token(token_hash=token_hash, purpose=LOGIN_2FA_PURPOSE)
+    if not challenge:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_challenge",
+                "message": "This sign-in challenge expired. Log in again.",
+            },
+            status_code=400,
+        )
+    user = store.user_by_id(str(challenge["user_id"]))
+    if not user:
+        return JSONResponse({"ok": False, "error": "bad_challenge"}, status_code=400)
+    email = str(user["email"])
+    if not _email_action_allowed(request, "resend-2fa", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
+    code = new_otp_code()
+    refreshed = store.refresh_auth_token_code(
+        token_hash=token_hash,
+        purpose=LOGIN_2FA_PURPOSE,
+        code_hash=hash_auth_token(code),
+        expires_at=utc_expiry_iso(hours=LOGIN_2FA_HOURS),
+    )
+    if not refreshed:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_challenge",
+                "message": "This sign-in challenge expired. Log in again.",
+            },
+            status_code=400,
+        )
+    mail_error = _send_login_otp(user=user, code=code)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "requires_2fa": True,
+        "challenge_id": challenge_id,
+        "message": "A new sign-in code is on the way.",
+    }
+    if expose_dev_links():
+        payload["dev_otp_code"] = code
+        if mail_error:
+            payload["mail_error"] = mail_error
+    return JSONResponse(payload)
 
 
 @router.post("/logout")
@@ -293,6 +500,7 @@ def me(
                 "room_id": room_id,
                 "room_title": (room or {}).get("title") or "Private room",
                 "email_verified": bool(full.get("email_verified")),
+                "email_2fa_enabled": bool(full.get("email_2fa_enabled")),
                 "created_at": full.get("created_at"),
                 "session_count": store.count_sessions_for_user(user["user_id"]),
             }
@@ -426,6 +634,66 @@ def logout_other_sessions(
             "revoked": revoked,
             "message": (
                 f"Signed out {revoked} other session{'s' if revoked != 1 else ''}."
+            ),
+        }
+    )
+
+
+@router.post("/email-2fa")
+async def set_email_2fa(
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    enabled = bool(body.get("enabled"))
+    password = str(body.get("password") or "")
+    password_limiter = getattr(request.app.state, "login_limiter", None)
+    if password_limiter is not None and not password_limiter.allow(
+        f"email-2fa:{user['user_id']}"
+    ):
+        return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
+    full = store.user_by_id(user["user_id"]) or {}
+    if not verify_password(password, str(full.get("password_hash") or "")):
+        return JSONResponse(
+            {"ok": False, "error": "bad_password", "message": "Password is incorrect."},
+            status_code=401,
+        )
+    if enabled and not full.get("email_verified"):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_unverified",
+                "message": "Verify your email before enabling email 2FA.",
+            },
+            status_code=400,
+        )
+    if enabled and not email_delivery_available() and not expose_dev_links():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_delivery_unavailable",
+                "message": "Outbound email is not configured, so email 2FA cannot be enabled.",
+            },
+            status_code=503,
+        )
+    store.set_email_2fa_enabled(user["user_id"], enabled)
+    if enabled:
+        # Force re-auth on other browsers after turning 2FA on.
+        store.delete_other_sessions_for_user(
+            user["user_id"], str(user.get("sid") or "")
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "email_2fa_enabled": enabled,
+            "message": (
+                "Email two-factor authentication is on. We’ll email a code at each login."
+                if enabled
+                else "Email two-factor authentication is off."
             ),
         }
     )

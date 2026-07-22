@@ -264,3 +264,97 @@ def test_logout_other_sessions_keeps_current_session(tmp_path: Path, monkeypatch
     assert result.status_code == 200
     assert result.json()["revoked"] == 1
     assert client.get("/api/auth/me").status_code == 200
+
+
+def test_email_2fa_login_requires_otp(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "twofa", monkeypatch)
+    _signup_and_login(client, email="twofa@example.com", name="TwoFA")
+
+    enabled = client.post(
+        "/api/auth/email-2fa",
+        json={"enabled": True, "password": "password12"},
+    )
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["email_2fa_enabled"] is True
+    assert client.get("/api/auth/me").json()["email_2fa_enabled"] is True
+
+    client.post("/api/auth/logout")
+    challenge = client.post(
+        "/api/auth/login",
+        json={"email": "twofa@example.com", "password": "password12"},
+    )
+    assert challenge.status_code == 200, challenge.text
+    body = challenge.json()
+    assert body["requires_2fa"] is True
+    assert body["challenge_id"]
+    assert body["dev_otp_code"]
+    assert client.get("/api/auth/me").status_code == 401
+
+    bad = client.post(
+        "/api/auth/verify-2fa",
+        json={"challenge_id": body["challenge_id"], "code": "000000"},
+    )
+    assert bad.status_code == 401
+
+    ok = client.post(
+        "/api/auth/verify-2fa",
+        json={"challenge_id": body["challenge_id"], "code": body["dev_otp_code"]},
+    )
+    assert ok.status_code == 200, ok.text
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "twofa@example.com"
+
+
+def test_email_2fa_resend_issues_new_code(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "twofa-resend", monkeypatch)
+    _signup_and_login(client, email="resend2fa@example.com", name="Resend")
+    assert client.post(
+        "/api/auth/email-2fa",
+        json={"enabled": True, "password": "password12"},
+    ).status_code == 200
+    client.post("/api/auth/logout")
+
+    first = client.post(
+        "/api/auth/login",
+        json={"email": "resend2fa@example.com", "password": "password12"},
+    ).json()
+    old_code = first["dev_otp_code"]
+    resent = client.post(
+        "/api/auth/resend-2fa",
+        json={"challenge_id": first["challenge_id"]},
+    )
+    assert resent.status_code == 200, resent.text
+    new_code = resent.json()["dev_otp_code"]
+    assert new_code
+    assert client.post(
+        "/api/auth/verify-2fa",
+        json={"challenge_id": first["challenge_id"], "code": old_code},
+    ).status_code == 401
+    assert client.post(
+        "/api/auth/verify-2fa",
+        json={"challenge_id": first["challenge_id"], "code": new_code},
+    ).status_code == 200
+
+
+def test_email_2fa_disable_with_password(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "twofa-off", monkeypatch)
+    _signup_and_login(client, email="off2fa@example.com", name="Off")
+    assert client.post(
+        "/api/auth/email-2fa",
+        json={"enabled": True, "password": "password12"},
+    ).status_code == 200
+    disabled = client.post(
+        "/api/auth/email-2fa",
+        json={"enabled": False, "password": "password12"},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["email_2fa_enabled"] is False
+    client.post("/api/auth/logout")
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "off2fa@example.com", "password": "password12"},
+    )
+    assert login.status_code == 200
+    assert login.json().get("requires_2fa") is not True
+    assert client.get("/api/auth/me").status_code == 200
