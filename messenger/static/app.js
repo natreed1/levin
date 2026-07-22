@@ -21,6 +21,16 @@
     specialistPoll: null,
   };
 
+  const THEME_KEY = "flyleaf-theme";
+  function applyTheme(choice) {
+    const preferred = choice || "system";
+    const resolved = preferred === "system"
+      ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+      : preferred;
+    document.documentElement.dataset.theme = resolved;
+  }
+  applyTheme(localStorage.getItem(THEME_KEY) || "system");
+
   function show(el) {
     if (!el) return;
     el.classList.remove("hidden");
@@ -270,6 +280,7 @@
     }
     if (params.get("reset")) {
       state.resetToken = params.get("reset");
+      history.replaceState({}, "", "/");
       showAuthPanel("reset");
       setAuthBanner("Choose a new password.", true);
     }
@@ -289,7 +300,10 @@
     if (tab === "automations") loadAutomations();
     if (tab === "review") loadReview();
     if (tab === "tracking") loadTracking();
-    if (tab === "settings") loadSettings();
+    if (tab === "settings") {
+      loadAccountSettings();
+      loadSettings();
+    }
     if (tab === "chats") refreshChatRails();
   }
 
@@ -1295,6 +1309,120 @@
     $("#session-note").value = "";
     loadTracking();
   });
+
+  // --- Account settings ------------------------------------------------------
+
+  function settingsMessage(selector, message) {
+    const el = $(selector);
+    if (!el) return;
+    el.textContent = message || "";
+    if (message) show(el);
+    else hide(el);
+  }
+
+  function switchSettingsPanel(name) {
+    $$(".settings-panel").forEach((panel) => {
+      panel.classList.toggle("hidden", panel.id !== `settings-panel-${name}`);
+    });
+    $$(".settings-nav-btn").forEach((button) => {
+      button.classList.toggle("active", button.dataset.settingsPanel === name);
+    });
+    if (name === "models") loadSettings();
+  }
+
+  async function loadAccountSettings() {
+    const { res, data } = await api("/api/auth/me");
+    if (!res.ok || !data?.authenticated) return;
+    state.me = { ...(state.me || {}), ...data };
+    $("#settings-display-name").value = data.display_name || "";
+    $("#settings-email").value = data.email || "";
+    $("#who-label").textContent = data.display_name || data.name || "";
+    const status = $("#settings-email-status");
+    status.textContent = data.email_verified ? "Email verified" : "Email not verified";
+    status.classList.toggle("unverified", !data.email_verified);
+    $("#settings-member-since").textContent = data.created_at
+      ? `Member since ${new Date(data.created_at).toLocaleDateString()}`
+      : "";
+    const count = Number(data.session_count || 1);
+    $("#settings-session-count").textContent =
+      `${count} active session${count === 1 ? "" : "s"}, including this browser.`;
+  }
+
+  $$(".settings-nav-btn").forEach((button) => {
+    button.addEventListener("click", () => switchSettingsPanel(button.dataset.settingsPanel));
+  });
+
+  $("#profile-settings-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setError("#profile-settings-error", "");
+    settingsMessage("#profile-settings-message", "");
+    const { res, data } = await api("/api/auth/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: $("#settings-display-name").value }),
+    });
+    if (!res.ok) {
+      setError("#profile-settings-error", data?.message || data?.error || "Could not update profile");
+      return;
+    }
+    settingsMessage("#profile-settings-message", data.message || "Profile updated.");
+    await loadAccountSettings();
+  });
+
+  $("#change-password-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setError("#password-settings-error", "");
+    settingsMessage("#password-settings-message", "");
+    const current = $("#settings-current-password").value;
+    const next = $("#settings-new-password").value;
+    const confirm = $("#settings-confirm-password").value;
+    if (next !== confirm) {
+      setError("#password-settings-error", "New passwords do not match.");
+      return;
+    }
+    const { res, data } = await api("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: current, new_password: next }),
+    });
+    if (!res.ok) {
+      const message = data?.error === "bad_current_password"
+        ? "Current password is incorrect."
+        : (data?.message || data?.error || "Could not change password");
+      setError("#password-settings-error", message);
+      return;
+    }
+    $("#change-password-form").reset();
+    settingsMessage("#password-settings-message", data.message || "Password changed.");
+    await loadAccountSettings();
+  });
+
+  $("#logout-other-sessions-btn")?.addEventListener("click", async () => {
+    const { res, data } = await api("/api/auth/logout-other-sessions", { method: "POST" });
+    if (!res.ok) {
+      setError("#password-settings-error", data?.error || "Could not sign out other sessions");
+      return;
+    }
+    settingsMessage("#password-settings-message", data.message || "Other sessions signed out.");
+    await loadAccountSettings();
+  });
+
+  const themeSelect = $("#settings-theme");
+  if (themeSelect) {
+    themeSelect.value = localStorage.getItem(THEME_KEY) || "system";
+    themeSelect.addEventListener("change", () => {
+      localStorage.setItem(THEME_KEY, themeSelect.value);
+      applyTheme(themeSelect.value);
+      settingsMessage("#preferences-message", "Appearance saved on this browser.");
+    });
+  }
+  const timezoneInput = $("#settings-timezone");
+  if (timezoneInput) {
+    timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "Browser default";
+  }
+  window.matchMedia("(prefers-color-scheme: light)").addEventListener?.("change", () => {
+    if ((localStorage.getItem(THEME_KEY) || "system") === "system") applyTheme("system");
+  });
+
+  $("#privacy-tracking-btn")?.addEventListener("click", () => switchTab("tracking"));
 
   // --- Settings → Models -----------------------------------------------------
 

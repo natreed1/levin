@@ -6,11 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from messenger.auth import normalize_name, normalize_title
+from messenger.auth import normalize_name, normalize_title, utc_expiry_iso
+from messenger.db import MessageStore
 from messenger.emailer import send_verification_email
 
 
-def _client(tmp_path: Path, monkeypatch, *, login_max: int | None = None):
+def _client(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    login_max: int | None = None,
+    auth_email_max: int | None = None,
+):
     monkeypatch.setenv("MESSENGER_INVITE_TOKEN", "server-secret")
     monkeypatch.setenv("MESSENGER_SESSION_SECRET", "unit-test-secret")
     monkeypatch.setenv("MESSENGER_DB_PATH", str(tmp_path / "messages.sqlite3"))
@@ -31,6 +38,9 @@ def _client(tmp_path: Path, monkeypatch, *, login_max: int | None = None):
     if login_max is not None:
         monkeypatch.setattr(app_module, "LOGIN_RATE_LIMIT_MAX", login_max)
         monkeypatch.setattr(app_module, "LOGIN_RATE_LIMIT_WINDOW", 900.0)
+    if auth_email_max is not None:
+        monkeypatch.setattr(app_module, "AUTH_EMAIL_RATE_LIMIT_MAX", auth_email_max)
+        monkeypatch.setattr(app_module, "AUTH_EMAIL_RATE_LIMIT_WINDOW", 900.0)
     app = app_module.create_app()
     return starlette_testclient.TestClient(app)
 
@@ -148,3 +158,109 @@ def test_login_rate_limited(tmp_path: Path, monkeypatch):
         "/api/auth/login",
         json={"email": email, "password": "wrong-password"},
     ).json()["error"] == "rate_limited"
+
+
+@pytest.mark.parametrize("endpoint", ["forgot-password", "resend-verification"])
+def test_auth_email_endpoints_are_rate_limited(
+    tmp_path: Path, monkeypatch, endpoint: str
+):
+    client = _client(tmp_path / endpoint, monkeypatch, auth_email_max=2)
+    codes = [
+        client.post(
+            f"/api/auth/{endpoint}",
+            json={"email": "unknown@example.com"},
+        ).status_code
+        for _ in range(3)
+    ]
+    assert codes == [200, 200, 429]
+
+
+def test_fly_signup_fails_closed_without_email_provider(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    client = _client(tmp_path / "fly", monkeypatch)
+    monkeypatch.setenv("FLY_APP_NAME", "levin")
+    monkeypatch.setenv("MESSENGER_AUTO_VERIFY", "0")
+    monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "0")
+
+    result = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "new@example.com",
+            "password": "password12",
+            "display_name": "New",
+        },
+    )
+
+    assert result.status_code == 503
+    assert result.json()["error"] == "email_delivery_unavailable"
+
+
+def test_account_settings_update_profile_and_password(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "account", monkeypatch)
+    created = _signup_and_login(
+        client, email="account@example.com", password="password12", name="Before"
+    )
+    store = MessageStore(db_path=tmp_path / "account" / "messages.sqlite3")
+    store.create_session(
+        sid="other-browser",
+        user_id=created["user_id"],
+        expires_at=utc_expiry_iso(hours=1),
+    )
+
+    bad_name = client.patch(
+        "/api/auth/profile", json={"display_name": "<script>bad</script>"}
+    )
+    assert bad_name.status_code == 400
+
+    profile = client.patch(
+        "/api/auth/profile", json={"display_name": "After"}
+    )
+    assert profile.status_code == 200, profile.text
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["display_name"] == "After"
+    assert me.json()["name"] == "After"
+    assert me.json()["session_count"] == 1
+    assert me.json()["created_at"]
+
+    wrong = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "wrong-password", "new_password": "newpassword99"},
+    )
+    assert wrong.status_code == 401
+    changed = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "password12", "new_password": "newpassword99"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert client.get("/api/auth/me").status_code == 200
+
+    assert client.post("/api/auth/logout").status_code == 200
+    old = client.post(
+        "/api/auth/login",
+        json={"email": "account@example.com", "password": "password12"},
+    )
+    assert old.status_code == 401
+    new = client.post(
+        "/api/auth/login",
+        json={"email": "account@example.com", "password": "newpassword99"},
+    )
+    assert new.status_code == 200
+
+
+def test_logout_other_sessions_keeps_current_session(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path / "sessions", monkeypatch)
+    created = _signup_and_login(client, email="sessions@example.com", name="Sessions")
+    store = MessageStore(db_path=tmp_path / "sessions" / "messages.sqlite3")
+    store.create_session(
+        sid="other-browser",
+        user_id=created["user_id"],
+        expires_at=utc_expiry_iso(hours=1),
+    )
+
+    result = client.post("/api/auth/logout-other-sessions")
+
+    assert result.status_code == 200
+    assert result.json()["revoked"] == 1
+    assert client.get("/api/auth/me").status_code == 200

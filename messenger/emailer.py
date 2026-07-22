@@ -67,18 +67,18 @@ def expose_dev_links() -> bool:
 
 
 def auto_verify_on_signup() -> bool:
-    """Skip inbox verification when mail cannot reach the user.
+    """Return the explicit break-glass verification bypass setting.
 
-    Local keeps the verify flow (dev links). On Fly with only the console
-    backend, verification emails never arrive — auto-verify so signup works.
-    Override with MESSENGER_AUTO_VERIFY=1/0.
+    Production must not silently turn verification off merely because outbound
+    mail is misconfigured. Local development uses exposed console links.
     """
     raw = (os.environ.get("MESSENGER_AUTO_VERIFY") or "").strip().lower()
-    if raw in {"1", "true", "yes"}:
-        return True
-    if raw in {"0", "false", "no"}:
-        return False
-    return bool((os.environ.get("FLY_APP_NAME") or "").strip()) and email_backend() == "console"
+    return raw in {"1", "true", "yes"}
+
+
+def email_delivery_available() -> bool:
+    """Whether email can leave this process and reach a user's inbox."""
+    return email_backend() in {"resend", "smtp"}
 
 
 def send_email(*, to: str, subject: str, text: str, html: Optional[str] = None) -> dict[str, Any]:

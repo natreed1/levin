@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, Union
 from urllib.parse import quote
 
@@ -23,6 +24,7 @@ from messenger.auth import (
 from messenger.db import MessageStore
 from messenger.deps import (
     clear_session_cookie,
+    current_user,
     current_user_optional,
     get_store,
     identity_optional,
@@ -31,6 +33,7 @@ from messenger.deps import (
 )
 from messenger.emailer import (
     auto_verify_on_signup,
+    email_delivery_available,
     email_backend,
     expose_dev_links,
     public_base_url,
@@ -44,6 +47,14 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 VERIFY_HOURS = 24.0
 RESET_HOURS = 1.0
+
+
+def _email_action_allowed(request: Request, action: str, email: str) -> bool:
+    limiter = getattr(request.app.state, "auth_email_limiter", None)
+    if limiter is None:
+        return True
+    client_ip = request.client.host if request.client else "unknown"
+    return bool(limiter.allow(f"{action}:{client_ip}:{email}"))
 
 
 def _base(request: Request) -> str:
@@ -93,10 +104,24 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
             {"ok": False, "error": "bad_password", "message": str(exc)},
             status_code=400,
         )
+    skip_verify = auto_verify_on_signup()
+    if (
+        (os.environ.get("FLY_APP_NAME") or "").strip()
+        and not email_delivery_available()
+        and not skip_verify
+    ):
+        logger.error("signup unavailable: outbound email is not configured")
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "email_delivery_unavailable",
+                "message": "Account creation is temporarily unavailable. Please try again later.",
+            },
+            status_code=503,
+        )
     if store.user_by_email(email):
         return JSONResponse({"ok": False, "error": "email_taken"}, status_code=409)
     user_id = new_user_id()
-    skip_verify = auto_verify_on_signup()
     try:
         from datetime import datetime, timezone
 
@@ -268,6 +293,8 @@ def me(
                 "room_id": room_id,
                 "room_title": (room or {}).get("title") or "Private room",
                 "email_verified": bool(full.get("email_verified")),
+                "created_at": full.get("created_at"),
+                "session_count": store.count_sessions_for_user(user["user_id"]),
             }
         )
     if identity:
@@ -286,6 +313,124 @@ def me(
     return JSONResponse({"ok": False, "authenticated": False}, status_code=401)
 
 
+@router.patch("/profile")
+async def update_profile(
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    display_name = normalize_name(str(body.get("display_name") or ""))
+    if not display_name:
+        return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
+
+    store.update_display_name(user["user_id"], display_name)
+    store.delete_sessions_for_user(user["user_id"])
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "display_name": display_name,
+            "message": "Profile updated. Other sessions were signed out.",
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=display_name,
+        room_id=user.get("room_id") or "legacy",
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+    )
+    return resp
+
+
+@router.post("/change-password")
+async def change_password(
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    current_password = str(body.get("current_password") or "")
+    new_password = str(body.get("new_password") or "")
+    password_limiter = getattr(request.app.state, "login_limiter", None)
+    if password_limiter is not None and not password_limiter.allow(
+        f"change-password:{user['user_id']}"
+    ):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited"},
+            status_code=429,
+        )
+    full = store.user_by_id(user["user_id"]) or {}
+    password_hash = str(full.get("password_hash") or "")
+    if not verify_password(current_password, password_hash):
+        return JSONResponse(
+            {"ok": False, "error": "bad_current_password"},
+            status_code=401,
+        )
+    if verify_password(new_password, password_hash):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "password_unchanged",
+                "message": "Choose a password you are not already using.",
+            },
+            status_code=400,
+        )
+    try:
+        new_hash = hash_password(new_password)
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "error": "bad_password", "message": str(exc)},
+            status_code=400,
+        )
+
+    store.update_password(user["user_id"], new_hash)
+    store.delete_sessions_for_user(user["user_id"])
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "message": "Password changed. Other sessions were signed out.",
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=user["display_name"],
+        room_id=user.get("room_id") or "legacy",
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+    )
+    return resp
+
+
+@router.post("/logout-other-sessions")
+def logout_other_sessions(
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    revoked = store.delete_other_sessions_for_user(
+        user["user_id"], str(user.get("sid") or "")
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "revoked": revoked,
+            "message": (
+                f"Signed out {revoked} other session{'s' if revoked != 1 else ''}."
+            ),
+        }
+    )
+
+
 @router.post("/resend-verification")
 async def resend_verification(
     request: Request, store: MessageStore = Depends(get_store)
@@ -297,6 +442,11 @@ async def resend_verification(
     email = normalize_email(str(body.get("email") or ""))
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
+    if not _email_action_allowed(request, "resend-verification", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
     user = store.user_by_email(email)
     # Always look successful to avoid email enumeration.
     payload: dict[str, Any] = {
@@ -331,7 +481,11 @@ def verify_email_get(
     ok, message = _verify_token(store, token)
     if ok:
         # Land on login with a success banner.
-        return RedirectResponse(url="/?verified=1", status_code=303)
+        return RedirectResponse(
+            url="/?verified=1",
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
     body = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Verify email</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -346,7 +500,11 @@ a{{color:#3d9cf0}}
 <p>{message}</p>
 <p><a href="/">Back to Workflow</a></p>
 </div></body></html>"""
-    return HTMLResponse(body, status_code=400)
+    return HTMLResponse(
+        body,
+        status_code=400,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 @router.post("/verify-email")
@@ -388,6 +546,11 @@ async def forgot_password(
     email = normalize_email(str(body.get("email") or ""))
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
+    if not _email_action_allowed(request, "forgot-password", email):
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited", "message": "Please try again later."},
+            status_code=429,
+        )
     payload: dict[str, Any] = {
         "ok": True,
         "message": "If an account exists for that email, a reset link is on the way.",

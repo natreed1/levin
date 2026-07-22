@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
-  <link rel="stylesheet" href="/static/style.css?v=30" />
+  <link rel="stylesheet" href="/static/style.css?v=31" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen hidden">
@@ -318,59 +319,187 @@
             <p class="eyebrow">Your account</p>
             <h1>Settings</h1>
           </div>
-          <div class="header-actions">
-            <button type="button" id="settings-refresh-btn" class="ghost">Refresh</button>
-          </div>
         </header>
-        <p class="muted" style="max-width:42rem;margin:0 1.25rem 1rem;">
-          Models are saved on <strong>this account</strong>. Specialists use your active model —
-          Claude, GPT, or a local open-source model found on your computer.
-        </p>
 
-        <div class="settings-block">
-          <div class="settings-block-head">
-            <h2 class="section-title" style="margin:0;">Active</h2>
-            <p id="settings-active-line" class="muted">None</p>
-          </div>
-        </div>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="Settings sections">
+            <button type="button" class="settings-nav-btn active" data-settings-panel="profile">Profile</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="security">Security</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="preferences">Preferences</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="models">Models &amp; integrations</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="privacy">Privacy &amp; data</button>
+            <button type="button" class="settings-nav-btn danger" data-settings-panel="danger">Danger zone</button>
+          </nav>
 
-        <div class="settings-block">
-          <div class="settings-block-head">
-            <h2 class="section-title" style="margin:0;">Frontier</h2>
-            <button type="button" id="frontier-add-btn" class="ghost tiny">Add</button>
-          </div>
-          <ul id="frontier-list" class="profile-list"></ul>
-          <div id="frontier-form" class="card settings-form hidden">
-            <h3>Add frontier model</h3>
-            <label>Provider
-              <select id="frontier-provider">
-                <option value="anthropic">Claude (Anthropic)</option>
-                <option value="openai">GPT (OpenAI)</option>
-              </select>
-            </label>
-            <p id="frontier-hint" class="muted tiny-hint"></p>
-            <label>API key
-              <input id="frontier-api-key" type="password" placeholder="sk-…" autocomplete="off" />
-            </label>
-            <label>Model
-              <input id="frontier-model" type="text" list="frontier-model-suggestions" value="claude-sonnet-4-20250514" />
-              <datalist id="frontier-model-suggestions"></datalist>
-            </label>
-            <div class="card-actions">
-              <button type="button" id="frontier-save-btn">Save &amp; test</button>
-              <button type="button" id="frontier-cancel-btn" class="ghost">Cancel</button>
-            </div>
-            <p id="frontier-error" class="error" hidden></p>
-          </div>
-        </div>
+          <div class="settings-content">
+            <section id="settings-panel-profile" class="settings-panel">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Profile</h2>
+                  <p>Manage how you appear across Flyleaf.</p>
+                </div>
+              </div>
+              <form id="profile-settings-form" class="settings-account-form">
+                <label>Display name
+                  <input id="settings-display-name" type="text" maxlength="40" autocomplete="nickname" required />
+                </label>
+                <label>Email
+                  <input id="settings-email" type="email" readonly />
+                </label>
+                <div class="settings-inline-meta">
+                  <span id="settings-email-status" class="status-pill">Verification unknown</span>
+                  <span id="settings-member-since" class="muted"></span>
+                </div>
+                <div class="card-actions">
+                  <button type="submit">Save profile</button>
+                </div>
+                <p id="profile-settings-message" class="auth-banner" hidden></p>
+                <p id="profile-settings-error" class="error" hidden></p>
+              </form>
+            </section>
 
-        <div class="settings-block">
-          <div class="settings-block-head">
-            <h2 class="section-title" style="margin:0;">Open source</h2>
-            <button type="button" id="os-add-btn" class="ghost tiny">Add your own</button>
+            <section id="settings-panel-security" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Security</h2>
+                  <p>Change your password and control signed-in browsers.</p>
+                </div>
+              </div>
+              <form id="change-password-form" class="settings-account-form">
+                <label>Current password
+                  <input id="settings-current-password" type="password" autocomplete="current-password" required />
+                </label>
+                <label>New password
+                  <input id="settings-new-password" type="password" autocomplete="new-password" minlength="8" required />
+                </label>
+                <label>Confirm new password
+                  <input id="settings-confirm-password" type="password" autocomplete="new-password" minlength="8" required />
+                </label>
+                <div class="card-actions">
+                  <button type="submit">Change password</button>
+                </div>
+                <p id="password-settings-message" class="auth-banner" hidden></p>
+                <p id="password-settings-error" class="error" hidden></p>
+              </form>
+              <div class="settings-subcard">
+                <div>
+                  <strong>Active sessions</strong>
+                  <p id="settings-session-count" class="muted tiny-hint">This browser is signed in.</p>
+                </div>
+                <button type="button" id="logout-other-sessions-btn" class="ghost">Log out other sessions</button>
+              </div>
+            </section>
+
+            <section id="settings-panel-preferences" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Preferences</h2>
+                  <p>Personalize this browser’s Flyleaf experience.</p>
+                </div>
+              </div>
+              <form id="preferences-form" class="settings-account-form">
+                <label>Appearance
+                  <select id="settings-theme">
+                    <option value="system">Use system setting</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                  </select>
+                </label>
+                <label>Time zone
+                  <input id="settings-timezone" type="text" readonly />
+                </label>
+                <p class="muted tiny-hint">Appearance is saved in this browser. Times use your browser’s time zone.</p>
+                <p id="preferences-message" class="auth-banner" hidden></p>
+              </form>
+            </section>
+
+            <section id="settings-panel-models" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Models &amp; integrations</h2>
+                  <p>Specialists use the active model saved to your account.</p>
+                </div>
+                <button type="button" id="settings-refresh-btn" class="ghost">Refresh</button>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Active model</h3>
+                  <p id="settings-active-line" class="muted">None</p>
+                </div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Frontier</h3>
+                  <button type="button" id="frontier-add-btn" class="ghost tiny">Add</button>
+                </div>
+                <ul id="frontier-list" class="profile-list"></ul>
+                <div id="frontier-form" class="card settings-form hidden">
+                  <h3>Add frontier model</h3>
+                  <label>Provider
+                    <select id="frontier-provider">
+                      <option value="anthropic">Claude (Anthropic)</option>
+                      <option value="openai">GPT (OpenAI)</option>
+                    </select>
+                  </label>
+                  <p id="frontier-hint" class="muted tiny-hint"></p>
+                  <label>API key
+                    <input id="frontier-api-key" type="password" placeholder="sk-…" autocomplete="off" />
+                  </label>
+                  <label>Model
+                    <input id="frontier-model" type="text" list="frontier-model-suggestions" value="claude-sonnet-4-20250514" />
+                    <datalist id="frontier-model-suggestions"></datalist>
+                  </label>
+                  <div class="card-actions">
+                    <button type="button" id="frontier-save-btn">Save &amp; test</button>
+                    <button type="button" id="frontier-cancel-btn" class="ghost">Cancel</button>
+                  </div>
+                  <p id="frontier-error" class="error" hidden></p>
+                </div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Open source</h3>
+                  <button type="button" id="os-add-btn" class="ghost tiny">Add your own</button>
+                </div>
+                <ul id="os-list" class="profile-list"></ul>
+                <p id="settings-error" class="error" hidden></p>
+              </div>
+            </section>
+
+            <section id="settings-panel-privacy" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Privacy &amp; data</h2>
+                  <p>Understand where your information lives.</p>
+                </div>
+              </div>
+              <div class="settings-subcard stacked">
+                <strong>Your Flyleaf data</strong>
+                <p class="muted">Account details, rooms, and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account.</p>
+                <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
+                <button type="button" id="privacy-tracking-btn" class="ghost">Review tracking data</button>
+              </div>
+            </section>
+
+            <section id="settings-panel-danger" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Danger zone</h2>
+                  <p>Irreversible account actions live here.</p>
+                </div>
+              </div>
+              <div class="settings-subcard danger-zone">
+                <div>
+                  <strong>Delete account</strong>
+                  <p class="muted tiny-hint">Account deletion is not available yet because shared-room messages do not currently retain reliable author ownership. This prevents incomplete deletion.</p>
+                </div>
+                <button type="button" class="ghost danger" disabled>Delete account</button>
+              </div>
+            </section>
           </div>
-          <ul id="os-list" class="profile-list"></ul>
-          <p id="settings-error" class="error" hidden></p>
         </div>
 
         <!-- Open-source wizard -->
@@ -448,6 +577,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=33"></script>
+  <script src="/static/app.js?v=35"></script>
 </body>
 </html>
