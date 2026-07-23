@@ -170,6 +170,245 @@ def test_gateway_health_requires_auth_and_adopts_shared_token(tmp_path: Path, mo
     assert resolved == working
 
 
+def test_is_local_route_failure_detects_stale_tunnel():
+    from messenger.settings_models import is_local_route_failure
+
+    local = {"is_local": "1", "base_url": "https://dead.trycloudflare.com/v1"}
+    frontier = {"is_local": "0", "base_url": "https://api.anthropic.com"}
+    assert is_local_route_failure(
+        local,
+        RuntimeError(
+            "Local model unreachable at https://dead.trycloudflare.com/v1. "
+            "Click Start local model…"
+        ),
+    )
+    assert is_local_route_failure(local, RuntimeError("HTTP 530: tunnel expired"))
+    assert not is_local_route_failure(frontier, RuntimeError("Local model unreachable"))
+    assert not is_local_route_failure(local, RuntimeError("rate limit exceeded"))
+
+
+def test_recover_local_route_reconnects_and_updates_profile(tmp_path: Path, monkeypatch):
+    """BUG-004: dead tunnel → companion reconnect → new base_url persisted."""
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "recover-secret")
+    import messenger.settings_models as sm
+
+    reg = ModelLinkRegistry(tmp_path / "links.json")
+    monkeypatch.setattr(sm, "model_registry", lambda: reg)
+
+    draft = reg.add_open_source_draft(
+        "u-rec",
+        candidate_id="ollama:qwen3:8b",
+        runtime="ollama",
+        model="qwen3:8b",
+        label="Qwen",
+    )
+    reg.set_pipeline_route(
+        "u-rec",
+        draft["id"],
+        base_url="https://stale-old.trycloudflare.com/v1",
+        api_key="gateway-token-long-enough",
+        gateway_mode="tunnel",
+    )
+    reg.enable_open_source("u-rec", draft["id"])
+
+    calls: list[str] = []
+
+    def fake_companion(user_id, path, **kwargs):
+        calls.append(path)
+        if path == "/local-model/pipeline/reconnect":
+            return {
+                "ok": True,
+                "base_url": "https://fresh-new.trycloudflare.com/v1",
+                "token": "gateway-token-long-enough",
+                "gateway_mode": "tunnel",
+            }
+        return {"ok": False, "error": "unexpected"}
+
+    monkeypatch.setattr(sm, "_companion_request", fake_companion)
+    monkeypatch.setattr(
+        ModelLinkRegistry,
+        "probe_profile",
+        lambda self, user_id, profile_id=None, timeout=12.0: {
+            "ok": True,
+            "linked": True,
+            "reachable": True,
+            "profile": reg.public_profile(reg.get_profile(user_id, profile_id or "") or {}),
+        },
+    )
+
+    result = sm.recover_local_route("u-rec", draft["id"])
+    assert result["ok"] is True
+    assert result["reachable"] is True
+    assert result["recovered"] is True
+    assert "/local-model/pipeline/reconnect" in calls
+    ep = reg.endpoint_for_call("u-rec")
+    assert ep is not None
+    assert "fresh-new.trycloudflare.com" in ep["base_url"]
+    assert "stale-old" not in ep["base_url"]
+
+
+def test_ensure_local_route_force_recover_skips_dead_probe(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "ensure-secret")
+    import messenger.settings_models as sm
+
+    reg = ModelLinkRegistry(tmp_path / "links.json")
+    monkeypatch.setattr(sm, "model_registry", lambda: reg)
+    draft = reg.add_open_source_draft(
+        "u-ens",
+        candidate_id="ollama:qwen3:8b",
+        runtime="ollama",
+        model="qwen3:8b",
+    )
+    reg.set_pipeline_route(
+        "u-ens",
+        draft["id"],
+        base_url="https://dead.trycloudflare.com/v1",
+        api_key="gateway-token-long-enough",
+        gateway_mode="tunnel",
+    )
+    reg.enable_open_source("u-ens", draft["id"])
+
+    recover_calls = {"n": 0}
+
+    def fake_recover(user_id, profile_id):
+        recover_calls["n"] += 1
+        return {
+            "ok": True,
+            "reachable": True,
+            "recovered": True,
+            "endpoint": reg.endpoint_for_call(user_id, profile_id=profile_id),
+        }
+
+    monkeypatch.setattr(sm, "recover_local_route", fake_recover)
+    out = sm.ensure_local_route("u-ens", draft["id"], force_recover=True)
+    assert recover_calls["n"] == 1
+    assert out["reachable"] is True
+
+
+def test_annotate_marks_enabled_local_unreachable(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "ann-secret")
+    import messenger.settings_models as sm
+
+    reg = ModelLinkRegistry(tmp_path / "links.json")
+    monkeypatch.setattr(sm, "model_registry", lambda: reg)
+    draft = reg.add_open_source_draft(
+        "u-ann",
+        candidate_id="ollama:qwen3:8b",
+        runtime="ollama",
+        model="qwen3:8b",
+    )
+    reg.set_pipeline_route(
+        "u-ann",
+        draft["id"],
+        base_url="https://dead.trycloudflare.com/v1",
+        api_key="gateway-token-long-enough",
+        gateway_mode="tunnel",
+    )
+    reg.enable_open_source("u-ann", draft["id"])
+    listed = reg.list_profiles("u-ann")["profiles"]
+
+    monkeypatch.setattr(
+        ModelLinkRegistry,
+        "probe_profile",
+        lambda self, user_id, profile_id=None, timeout=4.0: {
+            "ok": True,
+            "reachable": False,
+            "error": "Name or service not known",
+            "message": "Linked, but unreachable right now.",
+        },
+    )
+    annotated = sm.annotate_open_source_reachability("u-ann", listed, timeout=1.0)
+    row = next(p for p in annotated if p["id"] == draft["id"])
+    assert row["enabled"] is True
+    assert row["setup_complete"] is True
+    assert row["reachable"] is False
+
+
+def test_agent_mention_recovers_stale_local_once(tmp_path: Path, monkeypatch):
+    """Room @mention fails once on dead tunnel, then succeeds after ensure_local_route."""
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "hook-secret")
+    import messenger.agent_hooks as hooks
+    import messenger.settings_models as sm
+    from analyst_ledger import synthesize as syn
+
+    reg = ModelLinkRegistry(tmp_path / "links.json")
+    monkeypatch.setattr(
+        "messenger.model_link.registry", lambda: reg
+    )
+    monkeypatch.setattr(sm, "model_registry", lambda: reg)
+
+    draft = reg.add_open_source_draft(
+        "owner1",
+        candidate_id="ollama:qwen3:8b",
+        runtime="ollama",
+        model="qwen3:8b",
+    )
+    reg.set_pipeline_route(
+        "owner1",
+        draft["id"],
+        base_url="https://stale.trycloudflare.com/v1",
+        api_key="gateway-token-long-enough",
+        gateway_mode="tunnel",
+    )
+    reg.enable_open_source("owner1", draft["id"])
+
+    fresh_ep = {
+        "provider": "ollama",
+        "kind": "openai_compatible",
+        "base_url": "https://fresh.trycloudflare.com/v1",
+        "api_key": "gateway-token-long-enough",
+        "model": "qwen3:8b",
+        "is_local": "1",
+        "destination": "qwen",
+    }
+    calls = {"n": 0}
+
+    def fake_chat(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(
+                "Local model unreachable at https://stale.trycloudflare.com/v1. "
+                "Click Start local model…"
+            )
+        return "Recovered bullish take."
+
+    monkeypatch.setattr(syn, "call_chat_messages", fake_chat)
+    monkeypatch.setattr(
+        sm,
+        "ensure_local_route",
+        lambda *a, **k: {
+            "ok": True,
+            "reachable": True,
+            "recovered": True,
+            "endpoint": fresh_ep,
+        },
+    )
+
+    posted: list[dict] = []
+
+    class FakeStore:
+        def add_message(self, **kwargs):
+            posted.append(kwargs)
+            return {"id": "m1", **kwargs}
+
+        def room(self, _room_id):
+            return {"config": {"model_profile_id": draft["id"]}}
+
+    hooks._reply_qwen(
+        FakeStore(),
+        None,
+        "room1",
+        "Nat",
+        "@Bullish what do you think?",
+        owner_user_id="owner1",
+        loop=None,
+    )
+    assert calls["n"] == 2
+    assert posted
+    assert "Recovered bullish take" in posted[0]["body"]
+    assert "unavailable" not in posted[0]["body"].lower()
+
+
 def test_settings_api_auth_and_crud(tmp_path: Path, monkeypatch):
     from tests.test_unified_workflow import _client, _signup_and_login
 

@@ -32,7 +32,7 @@ def review_overview(user: dict[str, Any] = Depends(current_user)) -> JSONRespons
             if not isinstance(spec, dict):
                 continue
             proposed_by = spec.get("proposed_by")
-            if proposed_by not in {"claude_review", "chat_mining"}:
+            if proposed_by not in {"claude_review", "chat_mining", "room_automate"}:
                 continue
             if row.get("approved"):
                 continue
@@ -43,6 +43,7 @@ def review_overview(user: dict[str, Any] = Depends(current_user)) -> JSONRespons
                     "runner": row.get("runner") or spec.get("runner"),
                     "proposed_by": proposed_by,
                     "schedule": row.get("schedule") or spec.get("schedule"),
+                    "description": (spec.get("description") or "")[:200],
                     "source_candidate": spec.get("source_candidate"),
                 }
             )

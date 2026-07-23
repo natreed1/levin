@@ -36,6 +36,30 @@ def test_message_store_isolates_created_rooms(tmp_path: Path):
     assert [m["body"] for m in store.list_messages(room_id="legacy")] == ["legacy"]
 
 
+def test_message_store_delete_room(tmp_path: Path):
+    store = MessageStore(db_path=tmp_path / "messages.sqlite3")
+    token_hash = hashlib.sha256(b"room-secret").hexdigest()
+    store.create_room(
+        "room-a",
+        "Room A",
+        token_hash,
+        owner_user_id="user-1",
+    )
+    store.add_room_member("room-a", "user-2")
+    store.add_message("Nat", "private", room_id="room-a")
+    store.add_message("Nat", "legacy", room_id="legacy")
+
+    assert store.delete_room("legacy") is False
+    assert store.delete_room("missing") is False
+    assert store.delete_room("room-a") is True
+
+    assert store.room("room-a") is None
+    assert store.list_messages(room_id="room-a") == []
+    assert not store.user_in_room("room-a", "user-1")
+    assert not store.user_in_room("room-a", "user-2")
+    assert [m["body"] for m in store.list_messages(room_id="legacy")] == ["legacy"]
+
+
 def test_clear_friend_messages_calls_delete(monkeypatch):
     calls: list[tuple[str, str]] = []
 

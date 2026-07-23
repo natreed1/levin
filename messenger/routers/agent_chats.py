@@ -23,13 +23,26 @@ def _run_with_user_model(user_id: str, fn: Any) -> Any:
 
     Without this, WorkflowEngine/MasterCoordinator fall back to process env
     (ANTHROPIC_API_KEY / localhost Ollama) and ignore the account's linked model.
+    If a local tunnel is stale, recover via Companion once and retry.
     """
     from analyst_ledger.synthesize import use_llm_endpoint
+    from messenger import settings_models
     from messenger.model_link import registry as model_registry
 
     endpoint = model_registry().endpoint_for_call(user_id)
-    with use_llm_endpoint(endpoint):
-        return fn()
+    try:
+        with use_llm_endpoint(endpoint):
+            return fn()
+    except Exception as exc:
+        if not settings_models.is_local_route_failure(endpoint, exc):
+            raise
+        recovered = settings_models.ensure_local_route(
+            user_id, force_recover=True
+        )
+        if not recovered.get("reachable") or not recovered.get("endpoint"):
+            raise
+        with use_llm_endpoint(recovered["endpoint"]):
+            return fn()
 
 
 @router.get("")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import analyst_ledger.friend_qwen as fq
 import analyst_ledger.messenger_bridge as bridge
 from analyst_ledger.friend_personalities import (
+    PERSONALITIES_BY_ID,
     match_personality,
     mentioned_personalities,
 )
@@ -31,6 +32,8 @@ def test_qwen_mention_detection():
     assert fq.MENTION_RE.search("hey @Qwen what time is it?")
     assert fq.MENTION_RE.search("@qwen ping")
     assert fq.MENTION_RE.search("@Qwen-Contrarian challenge this")
+    assert fq.MENTION_RE.search("@Bullish take the upside")
+    assert fq.MENTION_RE.search("@Contrarian challenge this")
     assert not fq.MENTION_RE.search("@Qwen Contrarian challenge this")
     assert not fq.MENTION_RE.search("qwen without at")
     assert not fq.MENTION_RE.search("email@qwen.com")
@@ -38,6 +41,8 @@ def test_qwen_mention_detection():
 
 def test_personality_mentions_use_exact_longest_match():
     assert match_personality("@Qwen answer this").id == "qwen"
+    assert match_personality("@Analyst answer this").id == "qwen"
+    assert match_personality("@Bullish upside").id == "qwen-bull"
     assert (
         match_personality("@Qwen-Contrarian challenge this").id
         == "qwen-contrarian"
@@ -50,6 +55,7 @@ def test_personality_mentions_use_exact_longest_match():
         "qwen-contrarian",
         "qwen",
     ]
+    assert PERSONALITIES_BY_ID["qwen-bull"].name == "Bullish Agent"
 
 
 def test_find_pending_mention_skips_old_and_self():

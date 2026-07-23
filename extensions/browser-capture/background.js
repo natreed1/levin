@@ -1,9 +1,17 @@
 /**
  * Analyst Ledger browser capture
  * Modes: allowlist sites (toggleable) | deep research (any https) | denylist | excludes
+ * Default target is Flyleaf (levin.fly.dev); local messenger (:8790) syncs via page bridge.
  */
 
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8790/api/ingest-browser";
+const DEFAULT_ORIGIN = "https://levin.fly.dev";
+const DEFAULT_ENDPOINT = DEFAULT_ORIGIN + "/api/ingest-browser";
+const LEGACY_ENDPOINTS = new Set([
+  "http://127.0.0.1:8790/api/ingest-browser",
+  "http://localhost:8790/api/ingest-browser",
+  "http://127.0.0.1:8788/api/ingest-browser",
+  "http://localhost:8788/api/ingest-browser",
+]);
 
 /** Preset research sites — each can be toggled on/off in the popup */
 const SITE_PRESETS = [
@@ -69,11 +77,14 @@ function hostDenied(hostname) {
   return suffixMatch(hostname, DENY_SUFFIXES);
 }
 
-/** Local Workflow / Analyst Ledger UIs — never capture, never surface as errors. */
+/** Workflow / Flyleaf UIs — never capture, never surface as errors. */
 function isLedgerAppUrl(url, endpoint) {
   try {
     const u = new URL(url);
     const h = (u.hostname || "").toLowerCase();
+    if (h === "levin.fly.dev" || h.endsWith(".levin.fly.dev")) {
+      return true;
+    }
     if (h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
       return false;
     }
@@ -81,8 +92,10 @@ function isLedgerAppUrl(url, endpoint) {
     const ports = new Set([8788, 8790]);
     try {
       const ep = new URL(endpoint || DEFAULT_ENDPOINT);
-      const epPort = parseInt(ep.port, 10) || 80;
-      ports.add(epPort);
+      const epPort = parseInt(ep.port, 10) || (ep.protocol === "https:" ? 443 : 80);
+      if (ep.hostname === "127.0.0.1" || ep.hostname === "localhost") {
+        ports.add(epPort);
+      }
     } catch {
       /* ignore */
     }
@@ -90,6 +103,51 @@ function isLedgerAppUrl(url, endpoint) {
   } catch {
     return false;
   }
+}
+
+function endpointForOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    return `${u.origin}/api/ingest-browser`;
+  } catch {
+    return DEFAULT_ENDPOINT;
+  }
+}
+
+async function migrateEndpointIfNeeded() {
+  const stored = await chrome.storage.local.get(["endpoint", "endpointPinned"]);
+  if (stored.endpointPinned) return;
+  const current = (stored.endpoint || "").trim();
+  if (!current || LEGACY_ENDPOINTS.has(current)) {
+    await chrome.storage.local.set({ endpoint: DEFAULT_ENDPOINT });
+  }
+}
+
+async function openTabPicker(opts) {
+  const scope = (opts && opts.capture_scope) || "";
+  const sessionId = (opts && opts.session_id) || "";
+  const qs = new URLSearchParams();
+  if (scope) qs.set("scope", scope);
+  if (sessionId) qs.set("session", sessionId);
+  const target = chrome.runtime.getURL("picker.html") + (qs.toString() ? `?${qs}` : "");
+  const all = await chrome.tabs.query({});
+  const existing = all.find(
+    (t) => t.url && t.url.startsWith(chrome.runtime.getURL("picker.html"))
+  );
+  if (existing && existing.id != null) {
+    await chrome.tabs.update(existing.id, { active: true, url: target });
+  } else {
+    await chrome.tabs.create({ url: target });
+  }
+  // Popup open only works from a user gesture inside the extension; ignore failures.
+  try {
+    if (chrome.action && chrome.action.openPopup) {
+      await chrome.action.openPopup();
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ok: true };
 }
 
 function defaultSiteEnabled() {
@@ -183,7 +241,7 @@ function summaryUrl(endpoint) {
     const u = new URL(endpoint || DEFAULT_ENDPOINT);
     return `${u.origin}/api/tracking/summary`;
   } catch {
-    return "http://127.0.0.1:8790/api/tracking/summary";
+    return DEFAULT_ORIGIN + "/api/tracking/summary";
   }
 }
 
@@ -404,7 +462,7 @@ async function ingest(url, title, reason, scrape, tabMeta) {
   } catch (err) {
     await setStatus(
       false,
-      "Cannot reach Workflow — is it running on :8790 (or set Endpoint)?",
+      "Cannot reach Flyleaf — sign in at levin.fly.dev (or set Endpoint in the popup).",
       { url }
     );
     return { ok: false, error: String(err) };
@@ -508,6 +566,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
+  if (msg && msg.kind === "sync_workflow_origin") {
+    const next = endpointForOrigin(msg.origin || "");
+    chrome.storage.local.get(["endpointPinned"], (stored) => {
+      if (stored.endpointPinned) {
+        sendResponse({ ok: true, skipped: true, reason: "pinned" });
+        return;
+      }
+      chrome.storage.local.set({ endpoint: next }, () => {
+        cachedScope = { session_id: null, capture_scope: null, at: 0 };
+        sendResponse({ ok: true, endpoint: next });
+      });
+    });
+    return true;
+  }
+  if (msg && msg.kind === "open_tab_picker") {
+    openTabPicker({
+      capture_scope: msg.capture_scope,
+      session_id: msg.session_id,
+    })
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
   if (msg && msg.kind === "list_open_tabs") {
     chrome.tabs.query({}, async (tabs) => {
       const cfg = await settings();
@@ -575,16 +656,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.set({
-    endpoint: DEFAULT_ENDPOINT,
+chrome.runtime.onInstalled.addListener((details) => {
+  const base = {
     autoSession: true,
     enabled: true,
     deepResearch: false,
     siteEnabled: defaultSiteEnabled(),
     excludedHosts: [],
     selectedTabIds: [],
+  };
+  chrome.storage.local.get(["endpoint", "endpointPinned"], (stored) => {
+    const pinned = !!stored.endpointPinned;
+    const current = (stored.endpoint || "").trim();
+    const endpoint =
+      pinned && current
+        ? current
+        : !current || LEGACY_ENDPOINTS.has(current) || details.reason === "install"
+          ? DEFAULT_ENDPOINT
+          : current;
+    chrome.storage.local.set({ ...base, endpoint });
   });
+  migrateEndpointIfNeeded();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  migrateEndpointIfNeeded();
 });
 
 // Pick up a newly started all_tabs session even if the user stays on one page.

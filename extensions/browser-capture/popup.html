@@ -85,7 +85,7 @@
   </div>
 
   <h2>Selected tabs</h2>
-  <p class="hint">Used when Tracking scope is <strong>Selected tabs</strong>.</p>
+  <p class="hint">Used when Tracking scope is <strong>Selected tabs</strong>. Flyleaf can also open a full tab picker when you Start tracking.</p>
   <div class="panel" id="selectedTabList"><div class="hint">Loading…</div></div>
   <div class="row2">
     <button class="secondary" type="button" id="refreshTabs">Refresh tabs</button>
@@ -113,7 +113,8 @@
   </div>
 
   <label>Endpoint <input id="endpoint" type="text" /></label>
-  <button id="openDash" class="secondary" type="button">Open Timeline</button>
+  <p class="hint">Default is Flyleaf (<code>levin.fly.dev</code>). Change only for local testing — custom values stay pinned.</p>
+  <button id="openDash" class="secondary" type="button">Open Flyleaf</button>
   <div id="status"></div>
   <script src="popup.js"></script>
 </body>

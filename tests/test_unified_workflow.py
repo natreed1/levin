@@ -307,7 +307,7 @@ def test_specialist_workshop_create_and_debate(tmp_path: Path, monkeypatch):
     bodies = [m.get("body") or "" for m in msgs.json()["messages"]]
     authors = {m["author"] for m in msgs.json()["messages"]}
     assert "Moderator" in authors
-    assert "Qwen Bull" in authors or "Qwen Contrarian" in authors
+    assert "Bullish Agent" in authors or "Contrarian Agent" in authors
     assert any("Round 1/2" in b for b in bodies)
     assert any("Round 2/2" in b for b in bodies)
 

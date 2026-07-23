@@ -10,9 +10,38 @@ import urllib.request
 from typing import Any, Optional
 
 from messenger.companion import registry as companion_registry
-from messenger.model_link import DEFAULT_PULL_MODEL, registry as model_registry
+from messenger.model_link import (
+    DEFAULT_PULL_MODEL,
+    profile_is_local,
+    registry as model_registry,
+)
 
 logger = logging.getLogger("messenger.settings_models")
+
+
+def is_local_route_failure(
+    endpoint: Optional[dict[str, Any]], exc: BaseException
+) -> bool:
+    """True when a chat/completion failure looks like a dead local tunnel/route."""
+    if not endpoint or str(endpoint.get("is_local") or "") not in {"1", "true", "True"}:
+        return False
+    msg = str(exc).lower()
+    needles = (
+        "unreachable",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 530",
+    )
+    return any(n in msg for n in needles)
 
 
 def _companion_request(
@@ -115,6 +144,42 @@ def _prefer_tunnel() -> bool:
     return bool(fly)
 
 
+def _apply_pipeline_result(
+    user_id: str, profile_id: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist companion pipeline base_url/token onto the profile and probe."""
+    if not result.get("ok"):
+        return result
+    reg = model_registry()
+    base_url = str(result.get("base_url") or "")
+    token = str(result.get("token") or "")
+    try:
+        public = reg.set_pipeline_route(
+            user_id,
+            profile_id,
+            base_url=base_url,
+            api_key=token,
+            gateway_mode=str(result.get("gateway_mode") or "loopback"),
+            setup_complete=True,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    probe = reg.probe_profile(user_id, profile_id, timeout=12.0)
+    endpoint = reg.endpoint_for_call(user_id, profile_id=profile_id)
+    return {
+        "ok": True,
+        "profile": public,
+        "reachable": bool(probe.get("reachable")),
+        "endpoint": endpoint,
+        "probe": probe,
+        "message": (
+            "Connected and saved. You can turn it on with one click."
+            if probe.get("reachable")
+            else "Saved. Route not reachable from this server yet — turn On when Companion is running."
+        ),
+    }
+
+
 def establish_pipeline(user_id: str, profile_id: str) -> dict[str, Any]:
     reg = model_registry()
     profile = reg.get_profile(user_id, profile_id)
@@ -137,40 +202,159 @@ def establish_pipeline(user_id: str, profile_id: str) -> dict[str, Any]:
         },
         timeout=120.0,
     )
-    if not result.get("ok"):
-        return result
-
-    base_url = str(result.get("base_url") or "")
-    token = str(result.get("token") or "")
-    try:
-        public = reg.set_pipeline_route(
-            user_id,
-            profile_id,
-            base_url=base_url,
-            api_key=token,
-            gateway_mode=str(result.get("gateway_mode") or "loopback"),
-            setup_complete=True,
-        )
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
-
-    # Probe from cloud/server side
-    probe = reg.probe_profile(user_id, profile_id, timeout=12.0)
-    return {
-        "ok": True,
-        "profile": public,
-        "reachable": bool(probe.get("reachable")),
-        "message": (
-            "Connected and saved. You can turn it on with one click."
-            if probe.get("reachable")
-            else "Saved. Route not reachable from this server yet — turn On when Companion is running."
-        ),
-        "probe": probe,
-    }
+    return _apply_pipeline_result(user_id, profile_id, result)
 
 
 def rebuild_pipeline(user_id: str, profile_id: str) -> dict[str, Any]:
     return establish_pipeline(user_id, profile_id)
+
+
+def recover_local_route(user_id: str, profile_id: str) -> dict[str, Any]:
+    """Re-establish a dead open-source tunnel via Companion, then probe.
+
+    Prefers ``pipeline/reconnect`` (saved companion state); falls back to the
+    full Start-local-model ``pipeline/start`` path when reconnect is missing
+    or still unreachable from this server.
+    """
+    reg = model_registry()
+    profile = reg.get_profile(user_id, profile_id)
+    if not profile:
+        return {"ok": False, "error": "profile_not_found"}
+    if profile.get("category") != "open_source":
+        return {"ok": False, "error": "not_open_source"}
+
+    prefer_tunnel = _prefer_tunnel()
+    recon = _companion_request(
+        user_id,
+        "/local-model/pipeline/reconnect",
+        method="POST",
+        body={"prefer_tunnel": prefer_tunnel},
+        timeout=90.0,
+    )
+    if recon.get("error") in {"needs_companion", "companion_unreachable"}:
+        return {
+            "ok": False,
+            "error": recon.get("error"),
+            "message": recon.get("message")
+            or "Open Local Companion, then click Start local model.",
+            "recovered": False,
+            "reachable": False,
+        }
+
+    applied: dict[str, Any]
+    if recon.get("ok"):
+        applied = _apply_pipeline_result(user_id, profile_id, recon)
+        applied["recovered"] = True
+        if applied.get("reachable"):
+            applied["message"] = "Local model route recovered."
+            return applied
+        logger.info(
+            "reconnect still unreachable for %s/%s; falling back to establish",
+            user_id,
+            profile_id,
+        )
+    else:
+        logger.info(
+            "reconnect failed for %s/%s (%s); falling back to establish",
+            user_id,
+            profile_id,
+            recon.get("error") or recon.get("message"),
+        )
+
+    established = establish_pipeline(user_id, profile_id)
+    established["recovered"] = bool(established.get("ok"))
+    if established.get("ok") and established.get("reachable"):
+        established["message"] = "Local model route re-established."
+    return established
+
+
+def ensure_local_route(
+    user_id: str,
+    profile_id: Optional[str] = None,
+    *,
+    force_recover: bool = False,
+    probe_timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Probe the active/local open-source route; recover once if dead.
+
+    Used by agent chat after a failed local call and by enable/On.
+    """
+    reg = model_registry()
+    profile = (
+        reg.get_profile(user_id, profile_id)
+        if profile_id
+        else reg.active_profile(user_id)
+    )
+    if not profile:
+        return {
+            "ok": False,
+            "error": "profile_not_found",
+            "reachable": False,
+            "recovered": False,
+        }
+    pid = str(profile.get("id") or "")
+    if not profile_is_local(profile):
+        endpoint = reg.endpoint_for_call(user_id, profile_id=pid or None)
+        return {
+            "ok": True,
+            "reachable": True,
+            "recovered": False,
+            "skipped": True,
+            "endpoint": endpoint,
+            "profile": reg.public_profile(profile),
+        }
+
+    if not force_recover:
+        probe = reg.probe_profile(user_id, pid, timeout=probe_timeout)
+        if probe.get("reachable"):
+            return {
+                "ok": True,
+                "reachable": True,
+                "recovered": False,
+                "endpoint": reg.endpoint_for_call(user_id, profile_id=pid),
+                "profile": probe.get("profile") or reg.public_profile(profile),
+                "probe": probe,
+            }
+
+    recovered = recover_local_route(user_id, pid)
+    return recovered
+
+
+def annotate_open_source_reachability(
+    user_id: str,
+    profiles: list[dict[str, Any]],
+    *,
+    timeout: float = 4.0,
+) -> list[dict[str, Any]]:
+    """Attach ``reachable`` for setup-complete open-source rows (Settings UI).
+
+    Only probes enabled local profiles so list stays snappy; disabled/incomplete
+    rows get ``reachable: null``.
+    """
+    reg = model_registry()
+    out: list[dict[str, Any]] = []
+    for public in profiles:
+        row = dict(public)
+        if row.get("category") != "open_source" or not row.get("setup_complete"):
+            row.setdefault("reachable", None)
+            out.append(row)
+            continue
+        if not row.get("enabled"):
+            row["reachable"] = None
+            out.append(row)
+            continue
+        pid = str(row.get("id") or "")
+        try:
+            probe = reg.probe_profile(user_id, pid, timeout=timeout)
+            row["reachable"] = bool(probe.get("reachable"))
+            if not row["reachable"]:
+                row["route_error"] = probe.get("error") or probe.get("message")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("reachability annotate failed for %s: %s", pid, exc)
+            row["reachable"] = False
+            row["route_error"] = str(exc)
+        out.append(row)
+    return out
 
 
 def enable_profile(user_id: str, profile_id: str) -> dict[str, Any]:
@@ -196,44 +380,21 @@ def enable_profile(user_id: str, profile_id: str) -> dict[str, Any]:
             "message": "Finish Connect & save before turning this on.",
         }
 
-    # Probe saved route first
-    probe = reg.probe_profile(user_id, profile_id, timeout=8.0)
-    if not probe.get("reachable"):
-        recon = _companion_request(
-            user_id,
-            "/local-model/pipeline/reconnect",
-            method="POST",
-            body={"prefer_tunnel": _prefer_tunnel()},
-            timeout=90.0,
-        )
-        if recon.get("ok"):
-            try:
-                reg.set_pipeline_route(
-                    user_id,
-                    profile_id,
-                    base_url=str(recon.get("base_url") or ""),
-                    api_key=str(recon.get("token") or ""),
-                    gateway_mode=str(recon.get("gateway_mode") or "loopback"),
-                    setup_complete=True,
-                )
-            except ValueError as exc:
-                return {"ok": False, "error": str(exc)}
-            probe = reg.probe_profile(user_id, profile_id, timeout=8.0)
-        elif recon.get("error") in {"needs_companion", "companion_unreachable"}:
-            return {
-                "ok": False,
-                "error": recon.get("error"),
-                "message": recon.get("message")
-                or "Open Local Companion, then turn On again.",
-            }
-
-    if not probe.get("reachable"):
+    ensured = ensure_local_route(user_id, profile_id, force_recover=False)
+    if ensured.get("error") in {"needs_companion", "companion_unreachable"}:
         return {
             "ok": False,
-            "error": "unreachable",
-            "message": probe.get("message")
+            "error": ensured.get("error"),
+            "message": ensured.get("message")
+            or "Open Local Companion, then turn On again.",
+        }
+    if not ensured.get("reachable"):
+        return {
+            "ok": False,
+            "error": ensured.get("error") or "unreachable",
+            "message": ensured.get("message")
             or "Model route unreachable. Open Local Companion and retry.",
-            "probe": probe,
+            "probe": ensured.get("probe"),
         }
 
     try:
@@ -244,6 +405,7 @@ def enable_profile(user_id: str, profile_id: str) -> dict[str, Any]:
         "ok": True,
         "profile": public,
         "reachable": True,
+        "recovered": bool(ensured.get("recovered")),
         "message": "On — specialists will use this local model.",
     }
 

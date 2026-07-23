@@ -27,6 +27,8 @@ from .friend_personalities import (
     PERSONALITIES,
     PERSONALITIES_BY_ID,
     FriendPersonality,
+    all_agent_author_names,
+    author_names_for,
     match_personality,
     strip_personality_mentions,
 )
@@ -49,7 +51,7 @@ from .messenger_bridge import (
     messenger_configured,
 )
 from .paths import data_dir
-from .synthesize import _call_openai_compatible_messages
+from .synthesize import call_chat_messages
 from .web_search import (
     bing_search,
     build_financial_brief,
@@ -121,6 +123,9 @@ def _clean_model_reply(
         personality.mention,
         personality.name + ":",
         personality.mention + ":",
+        *[alias for alias in personality.aliases],
+        *[alias + ":" for alias in personality.aliases],
+        *[name + ":" for name in personality.legacy_names],
     ]
     changed = True
     while changed and value:
@@ -629,7 +634,7 @@ def _build_chat_messages(
         body = str(msg.get("body") or "").strip()
         if not body:
             continue
-        if author == personality.name:
+        if author in author_names_for(personality):
             out.append({"role": "assistant", "content": body})
         else:
             out.append({"role": "user", "content": f"{author}: {body}"})
@@ -644,7 +649,7 @@ def _find_pending_mention(
     raw: List[Dict[str, Any]], last_replied_id: int
 ) -> Optional[Dict[str, Any]]:
     pending = None
-    personality_names = {personality.name for personality in PERSONALITIES}
+    personality_names = all_agent_author_names()
     for msg in raw:
         mid = int(msg.get("id") or 0)
         if mid <= last_replied_id:
@@ -672,7 +677,7 @@ def _draft_search_queries(context_text: str, trigger_body: str) -> List[str]:
         "Search queries:"
     )
     try:
-        raw = _call_openai_compatible_messages(
+        raw = call_chat_messages(
             [{"role": "user", "content": prompt}],
             max_tokens=80,
             system=system,
@@ -735,7 +740,7 @@ def _synthesize_research(
         f"Search results:\n{hits_text}\n\n"
         "Write your reply to the room:"
     )
-    reply = _call_openai_compatible_messages(
+    reply = call_chat_messages(
         [{"role": "user", "content": prompt}],
         max_tokens=900,
         system=system,
@@ -768,7 +773,7 @@ def _synthesize_outlook(
         f"Ranked trusted web evidence:\n{hits_text}\n\n"
         "Write the outlook:"
     )
-    reply = _call_openai_compatible_messages(
+    reply = call_chat_messages(
         [{"role": "user", "content": prompt}],
         max_tokens=1200,
         system=system,
@@ -815,6 +820,147 @@ def _outlook_reply_valid(reply: str, evidence: Dict[str, Any]) -> bool:
     return cited.issubset(allowed_urls)
 
 
+def compose_research_reply(
+    trigger_body: str,
+    *,
+    context_text: str = "",
+    personality: FriendPersonality = DEFAULT_PERSONALITY,
+    progress: Optional[Any] = None,
+) -> str:
+    """Run public Bing search + synthesize a grounded reply (no room posting).
+
+    Uses the active LLM endpoint from ``synthesize.use_llm_endpoint`` when set
+    (Flyleaf room model); otherwise the process Qwen/env defaults.
+    ``progress`` is an optional callable ``(message: str) -> None``.
+    """
+    def _prog(msg: str) -> None:
+        if callable(progress):
+            try:
+                progress(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+    body = (trigger_body or "").strip()
+    ctx = context_text or ""
+    _prog("Drafting search queries…")
+    prior_state = load_state()
+    # Prefer a company named in *this* request (tickers + aliases), then the
+    # surrounding chat, then remembered state, and only as a last resort a
+    # network SEC name lookup (which can false-match ordinary words).
+    symbol = (
+        resolve_symbol(body, allow_network=False)
+        or resolve_symbol("", ctx, allow_network=False)
+        or prior_state.get("last_finance_symbol")
+        or resolve_symbol(body, ctx, allow_network=True)
+    )
+    direct_intent = classify_finance_intent(body)
+    intent = (
+        direct_intent
+        if direct_intent != "general"
+        else (
+            prior_state.get("last_finance_intent")
+            or classify_finance_intent(ctx)
+        )
+    )
+    model_queries = _draft_search_queries(ctx, body)
+    queries: List[str] = []
+    if symbol and intent in {"outlook", "news", "filings", "snapshot"}:
+        queries.extend(finance_search_queries(symbol, intent=intent))
+    queries.extend(model_queries)
+    queries = list(dict.fromkeys(q for q in queries if q))[:4]
+
+    all_hits: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for q in queries:
+        _prog(f"Searching: {q[:80]}")
+        for hit in bing_search(q, limit=5):
+            url = str(hit.get("url") or "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_hits.append(hit)
+
+    _prog("Reading results…")
+    ranked_hits = rank_search_hits(all_hits, intent=intent)
+    trusted_hits = enrich_trusted_hits(ranked_hits[:8], max_pages=2)
+    hits_text = format_hits_for_prompt(trusted_hits)
+    _prog("Writing reply…")
+    if intent == "outlook" and symbol:
+        evidence = build_outlook_evidence(symbol)
+        evidence["trusted_sources"] = [
+            {
+                "title": hit.get("title"),
+                "url": hit.get("url"),
+                "published_at": hit.get("published_at"),
+                "snippet": hit.get("snippet"),
+                "excerpt": hit.get("excerpt"),
+            }
+            for hit in trusted_hits[:6]
+        ]
+        trends = evidence.get("sec_trends") or {}
+        has_comparable_facts = bool(
+            ((trends.get("revenue") or {}).get("latest"))
+            or ((trends.get("eps") or {}).get("latest"))
+        )
+        evidence["ready"] = bool(
+            evidence.get("market")
+            and has_comparable_facts
+            and (evidence.get("filings") or evidence.get("trusted_sources"))
+            and evidence.get("relative_return_pct") is not None
+        )
+        reply = _synthesize_outlook(body, evidence, hits_text, personality)
+        if not _outlook_reply_valid(reply, evidence):
+            reply = render_outlook_brief(
+                evidence, contrarian=personality.id == "qwen-contrarian"
+            )
+    elif symbol and (
+        intent == "snapshot" or STRUCTURED_FINANCE_RE.search(body)
+    ):
+        reply = build_financial_brief(symbol)
+    elif symbol and intent == "filings":
+        evidence = build_outlook_evidence(symbol, include_provider=False)
+        reply = _synthesize_research(
+            ctx,
+            body,
+            (
+                f"Recent SEC filings and structured evidence:\n"
+                f"{format_outlook_evidence(evidence)}\n\n"
+                f"Ranked web sources:\n{hits_text}"
+            ),
+            personality,
+        )
+    else:
+        structured_text = format_financial_context(symbol or body)
+        source_text = (
+            f"Web search results:\n{hits_text}\n\n"
+            f"Deterministic structured sources:\n{structured_text}"
+        )
+        synthesis_context = (
+            ctx if CONTEXT_REFERENCE_RE.search(body) else ""
+        )
+        reply = _synthesize_research(
+            synthesis_context, body, source_text, personality
+        )
+    reply = _clean_model_reply(reply, personality)
+    if symbol and _looks_like_nonanswer(reply, symbol):
+        fallback = _deterministic_research_brief(symbol, trusted_hits)
+        if fallback:
+            reply = fallback
+    if not reply:
+        if trusted_hits:
+            lines = ["I searched the public web but couldn't synthesize a full reply. Top sources:"]
+            for hit in trusted_hits[:5]:
+                title = str(hit.get("title") or "").strip()
+                url = str(hit.get("url") or "").strip()
+                if url:
+                    lines.append(f"- {title}: {url}" if title else f"- {url}")
+            reply = "\n".join(lines)
+        else:
+            raise RuntimeError(
+                "Web search returned no results (Bing RSS empty or unreachable)."
+            )
+    return reply
+
+
 def _run_research_job(
     trigger: Dict[str, Any],
     context: List[Dict[str, Any]],
@@ -828,116 +974,17 @@ def _run_research_job(
     trigger_body = str(trigger.get("body") or "").strip()
     context_text = _format_context_lines(context)
     try:
-        _upd(research_progress="Drafting search queries…")
-        prior_state = load_state()
-        # Prefer a company named in *this* request (tickers + aliases), then the
-        # surrounding chat, then remembered state, and only as a last resort a
-        # network SEC name lookup (which can false-match ordinary words).
-        # Never let a stale symbol override a company the user explicitly named.
-        symbol = (
-            resolve_symbol(trigger_body, allow_network=False)
-            or resolve_symbol("", context_text, allow_network=False)
-            or prior_state.get("last_finance_symbol")
-            or resolve_symbol(trigger_body, context_text, allow_network=True)
-        )
-        direct_intent = classify_finance_intent(trigger_body)
-        intent = (
-            direct_intent
-            if direct_intent != "general"
-            else (
-                prior_state.get("last_finance_intent")
-                or classify_finance_intent(context_text)
-            )
-        )
-        model_queries = _draft_search_queries(context_text, trigger_body)
-        queries: List[str] = []
-        if symbol and intent in {"outlook", "news", "filings", "snapshot"}:
-            queries.extend(finance_search_queries(symbol, intent=intent))
-        queries.extend(model_queries)
-        queries = list(dict.fromkeys(q for q in queries if q))[:4]
-        topic = queries[0] if queries else trigger_body
-        _upd(research_query=topic, research_progress="Searching…")
+        def _prog(msg: str) -> None:
+            _upd(research_progress=msg)
+            if msg.startswith("Searching:") and len(msg) > 12:
+                _upd(research_query=msg[len("Searching:") :].strip()[:160])
 
-        all_hits: List[Dict[str, Any]] = []
-        seen_urls: set[str] = set()
-        for q in queries:
-            _upd(research_progress=f"Searching: {q[:80]}")
-            for hit in bing_search(q, limit=5):
-                url = str(hit.get("url") or "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_hits.append(hit)
-
-        _upd(research_progress="Reading results…")
-        ranked_hits = rank_search_hits(all_hits, intent=intent)
-        trusted_hits = enrich_trusted_hits(ranked_hits[:8], max_pages=2)
-        hits_text = format_hits_for_prompt(trusted_hits)
-        _upd(research_progress="Writing reply…")
-        if intent == "outlook" and symbol:
-            evidence = build_outlook_evidence(symbol)
-            evidence["trusted_sources"] = [
-                {
-                    "title": hit.get("title"),
-                    "url": hit.get("url"),
-                    "published_at": hit.get("published_at"),
-                    "snippet": hit.get("snippet"),
-                    "excerpt": hit.get("excerpt"),
-                }
-                for hit in trusted_hits[:6]
-            ]
-            trends = evidence.get("sec_trends") or {}
-            has_comparable_facts = bool(
-                ((trends.get("revenue") or {}).get("latest"))
-                or ((trends.get("eps") or {}).get("latest"))
-            )
-            evidence["ready"] = bool(
-                evidence.get("market")
-                and has_comparable_facts
-                and (evidence.get("filings") or evidence.get("trusted_sources"))
-                and evidence.get("relative_return_pct") is not None
-            )
-            reply = _synthesize_outlook(
-                trigger_body, evidence, hits_text, personality
-            )
-            if not _outlook_reply_valid(reply, evidence):
-                reply = render_outlook_brief(
-                    evidence, contrarian=personality.id == "qwen-contrarian"
-                )
-        elif symbol and (
-            intent == "snapshot" or STRUCTURED_FINANCE_RE.search(trigger_body)
-        ):
-            reply = build_financial_brief(symbol)
-        elif symbol and intent == "filings":
-            evidence = build_outlook_evidence(symbol, include_provider=False)
-            reply = _synthesize_research(
-                context_text,
-                trigger_body,
-                (
-                    f"Recent SEC filings and structured evidence:\n"
-                    f"{format_outlook_evidence(evidence)}\n\n"
-                    f"Ranked web sources:\n{hits_text}"
-                ),
-                personality,
-            )
-        else:
-            structured_text = format_financial_context(symbol or trigger_body)
-            source_text = (
-                f"Web search results:\n{hits_text}\n\n"
-                f"Deterministic structured sources:\n{structured_text}"
-            )
-            synthesis_context = (
-                context_text if CONTEXT_REFERENCE_RE.search(trigger_body) else ""
-            )
-            reply = _synthesize_research(
-                synthesis_context, trigger_body, source_text, personality
-            )
-        reply = _clean_model_reply(reply, personality)
-        if symbol and _looks_like_nonanswer(reply, symbol):
-            fallback = _deterministic_research_brief(symbol, trusted_hits)
-            if fallback:
-                reply = fallback
-        if not reply:
-            raise RuntimeError("empty research reply")
+        reply = compose_research_reply(
+            trigger_body,
+            context_text=context_text,
+            personality=personality,
+            progress=_prog,
+        )
 
         posted = _post_as_personality(personality, reply, room_id)
         posted_id = int(posted.get("id") or 0)
@@ -1109,7 +1156,7 @@ def _tick_room(room_id: str) -> Dict[str, Any]:
     personality = match_personality(body)
     if personality is None:
         return {"ok": True, "room_id": room_id, "replied": False}
-    personality_names = {item.name for item in PERSONALITIES}
+    personality_names = all_agent_author_names()
     human_context = [
         message
         for message in _context_snippet(raw, trigger, n=12)
@@ -1183,7 +1230,7 @@ def _tick_room(room_id: str) -> Dict[str, Any]:
     )
     messages = _build_chat_messages(raw, trigger, personality)
     try:
-        reply = _call_openai_compatible_messages(
+        reply = call_chat_messages(
             messages, max_tokens=512, system=system, temperature=0.2
         )
     except RuntimeError as exc:

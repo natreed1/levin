@@ -183,7 +183,7 @@ def test_quick_reply_still_sync(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         fq,
-        "_call_openai_compatible_messages",
+        "call_chat_messages",
         lambda *a, **k: "pong",
     )
     monkeypatch.setattr(
@@ -225,12 +225,12 @@ def test_contrarian_mention_routes_prompt_and_author(tmp_path, monkeypatch):
         captured["body"] = body
         return {"id": 4, "body": body}
 
-    monkeypatch.setattr(fq, "_call_openai_compatible_messages", complete)
+    monkeypatch.setattr(fq, "call_chat_messages", complete)
     monkeypatch.setattr(fq, "_post_as_personality", post)
 
     result = fq.tick_qwen()
     assert result["personality"] == "qwen-contrarian"
-    assert captured["personality"].name == "Qwen Contrarian"
+    assert captured["personality"].name == "Contrarian Agent"
     assert "evidence-led contrarian" in captured["system"]
     assert captured["body"] == "Here is the counterargument."
 
@@ -255,7 +255,7 @@ def test_tick_replies_in_created_room_with_per_room_state(tmp_path, monkeypatch)
         fq, "_load_room_messages", lambda room_id="legacy": room_messages[room_id]
     )
     monkeypatch.setattr(
-        fq, "_call_openai_compatible_messages", lambda *a, **k: "pong"
+        fq, "call_chat_messages", lambda *a, **k: "pong"
     )
 
     posted: list[tuple] = []
@@ -295,7 +295,7 @@ def test_model_reply_removes_personality_label_and_mention():
     )
     assert (
         fq._clean_model_reply(
-            "Qwen Contrarian: The downside is concentration.", personality
+            "Contrarian Agent: The downside is concentration.", personality
         )
         == "The downside is concentration."
     )
@@ -487,3 +487,157 @@ More comparable periods.
         evidence,
     )
     assert not fq._outlook_reply_valid("Verified facts only", evidence)
+
+
+def test_compose_research_reply_uses_bing_hits(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANALYST_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fq, "data_dir", lambda: tmp_path)
+    fq.save_state(fq._default_state())
+    monkeypatch.setattr(fq, "_draft_search_queries", lambda *a, **k: ["NVDA news"])
+    monkeypatch.setattr(
+        fq,
+        "bing_search",
+        lambda q, limit=5: [
+            {
+                "title": "NVIDIA Newsroom",
+                "url": "https://nvidianews.nvidia.com/",
+                "snippet": "Latest company news",
+                "published_at": "2026-07-01T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(fq, "rank_search_hits", lambda hits, **k: hits)
+    monkeypatch.setattr(fq, "enrich_trusted_hits", lambda hits, **k: hits)
+    monkeypatch.setattr(fq, "resolve_symbol", lambda *a, **k: None)
+    monkeypatch.setattr(fq, "classify_finance_intent", lambda *_a, **_k: "general")
+    monkeypatch.setattr(fq, "format_financial_context", lambda *_a, **_k: "(none)")
+    monkeypatch.setattr(
+        fq,
+        "_synthesize_research",
+        lambda context, trigger, hits_text, personality: (
+            "Verified evidence\n- NVIDIA Newsroom: https://nvidianews.nvidia.com/\n"
+            "Analysis\n- Public sources found.\n"
+            "Unavailable / next checks\n- None."
+        ),
+    )
+    reply = fq.compose_research_reply("@Bullish look up NVDA latest news")
+    assert "nvidianews.nvidia.com" in reply
+
+
+def test_agent_hooks_research_path_posts_ack_and_reply(monkeypatch):
+    import messenger.agent_hooks as hooks
+    from analyst_ledger.friend_personalities import PERSONALITIES_BY_ID
+
+    posted: list[dict] = []
+    claude_ep = {
+        "provider": "anthropic",
+        "kind": "anthropic",
+        "base_url": "",
+        "api_key": "sk-ant-test",
+        "model": "claude-sonnet-4",
+        "is_local": "0",
+        "destination": "anthropic",
+    }
+
+    class FakeStore:
+        def add_message(self, **kwargs):
+            posted.append(kwargs)
+            return {"id": len(posted), **kwargs}
+
+        def room(self, _room_id):
+            return {"config": {"model_profile_id": "claude-1"}}
+
+        def list_messages(self, limit=200, room_id="legacy"):
+            return [{"author": "Nat", "body": "@Bullish look up NVDA news"}]
+
+    monkeypatch.setattr(
+        hooks,
+        "_room_model_profile_id",
+        lambda *_a, **_k: "claude-1",
+    )
+    monkeypatch.setattr(
+        "messenger.model_link.registry",
+        lambda: type(
+            "R",
+            (),
+            {
+                "endpoint_for_call": staticmethod(
+                    lambda *a, **k: claude_ep
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "analyst_ledger.friend_qwen.compose_research_reply",
+        lambda *a, **k: "Verified evidence\n- https://example.com/nvda\nAnalysis\nok\nUnavailable / next checks\nnone",
+    )
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize.call_chat_messages",
+        lambda *a, **k: "should not be used for research",
+    )
+
+    hooks._reply_qwen(
+        FakeStore(),
+        None,
+        "room1",
+        "Nat",
+        "@Bullish look up NVDA news",
+        owner_user_id="owner1",
+        loop=None,
+    )
+    bodies = [p["body"] for p in posted]
+    assert any("researching" in b.lower() for b in bodies)
+    assert any("example.com/nvda" in b for b in bodies)
+    assert PERSONALITIES_BY_ID["qwen-bull"].name in {p["author"] for p in posted}
+
+
+def test_compose_research_routes_to_anthropic_not_local(monkeypatch, tmp_path):
+    """Regression: Claude room selection must not fall through to Ollama."""
+    monkeypatch.setenv("ANALYST_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fq, "data_dir", lambda: tmp_path)
+    fq.save_state(fq._default_state())
+    monkeypatch.setattr(fq, "_draft_search_queries", lambda *a, **k: ["NVDA news"])
+    monkeypatch.setattr(
+        fq,
+        "bing_search",
+        lambda *a, **k: [
+            {
+                "title": "NVDA",
+                "url": "https://example.com/nvda",
+                "snippet": "news",
+                "published_at": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(fq, "rank_search_hits", lambda hits, **k: hits)
+    monkeypatch.setattr(fq, "enrich_trusted_hits", lambda hits, **k: hits)
+    monkeypatch.setattr(fq, "resolve_symbol", lambda *a, **k: None)
+    monkeypatch.setattr(fq, "classify_finance_intent", lambda *_a, **_k: "general")
+    monkeypatch.setattr(fq, "format_financial_context", lambda *_a, **_k: "(none)")
+
+    from analyst_ledger import synthesize as syn
+    from analyst_ledger.synthesize import use_llm_endpoint
+
+    routed = []
+
+    def fake_chat(*a, **k):
+        ep = syn._QWEN_ENDPOINT.get() or {}
+        routed.append(ep.get("kind") or ep.get("provider"))
+        return (
+            "Verified evidence\n- https://example.com/nvda\n"
+            "Analysis\n- ok\nUnavailable / next checks\n- none"
+        )
+
+    monkeypatch.setattr(fq, "call_chat_messages", fake_chat)
+    ep = {
+        "provider": "anthropic",
+        "kind": "anthropic",
+        "base_url": "",
+        "api_key": "sk-ant-test",
+        "model": "claude-sonnet-4",
+        "is_local": "0",
+    }
+    with use_llm_endpoint(ep):
+        reply = fq.compose_research_reply("@Bullish look up NVDA news")
+    assert "example.com/nvda" in reply
+    assert routed and routed[0] == "anthropic"

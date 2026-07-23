@@ -34,6 +34,112 @@ LMSTUDIO_URL = (os.environ.get("LMSTUDIO_URL") or "http://127.0.0.1:1234").rstri
 GATEWAY_PORT = int(os.environ.get("QWEN_GATEWAY_PORT", "11435"))
 DEFAULT_PULL = os.environ.get("ANALYST_QWEN_MODEL") or "qwen3:8b"
 
+# LaunchAgents often get a stripped PATH (/usr/bin:/bin) that omits Homebrew.
+_CLOUDFLARED_CANDIDATES = (
+    "/opt/homebrew/bin/cloudflared",
+    "/usr/local/bin/cloudflared",
+)
+
+
+def _cloudflared_bin() -> Optional[str]:
+    found = shutil.which("cloudflared")
+    if found:
+        return found
+    for path in _CLOUDFLARED_CANDIDATES:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _durable_tunnel_path() -> Path:
+    return _data_dir() / "durable_tunnel.json"
+
+
+def load_durable_tunnel() -> dict[str, Any]:
+    path = _durable_tunnel_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_durable_tunnel(
+    *,
+    token: str,
+    public_base_url: str,
+) -> dict[str, Any]:
+    """Persist a named Cloudflare tunnel (stable hostname across reboots)."""
+    tok = (token or "").strip()
+    url = (public_base_url or "").strip().rstrip("/")
+    if not tok:
+        raise ValueError("Cloudflare tunnel token is required")
+    if not url.startswith("https://"):
+        raise ValueError("public_base_url must be https://… (your stable hostname)")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    payload = {
+        "token": tok,
+        "public_base_url": url,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    path = _durable_tunnel_path()
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return durable_tunnel_public()
+
+
+def clear_durable_tunnel() -> dict[str, Any]:
+    path = _durable_tunnel_path()
+    try:
+        path.unlink(missing_ok=True)
+    except TypeError:
+        # py3.7 compat — not needed on 3.12, but keep safe
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+    return durable_tunnel_public()
+
+
+def durable_tunnel_public() -> dict[str, Any]:
+    cfg = load_durable_tunnel()
+    url = str(cfg.get("public_base_url") or "").strip().rstrip("/")
+    has_token = bool(str(cfg.get("token") or "").strip())
+    running = False
+    try:
+        with _proc_lock:
+            if (
+                _companion_tunnel_proc is not None
+                and _companion_tunnel_proc.poll() is None
+            ):
+                running = True
+    except NameError:
+        running = False
+    live = False
+    if url:
+        try:
+            live = _tunnel_still_live(url, is_companion=True)
+        except NameError:
+            live = False
+    return {
+        "configured": bool(has_token and url),
+        "mode": "named" if (has_token and url) else "quick",
+        "public_base_url": url or None,
+        "running": running,
+        "reachable": live,
+        "message": (
+            f"Durable tunnel ready at {url}"
+            if has_token and url
+            else "No durable tunnel yet — quick tunnels get a new random name each time."
+        ),
+    }
+
 
 def _data_dir() -> Path:
     raw = os.environ.get("MESSENGER_DATA_DIR", "").strip()
@@ -121,7 +227,102 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(data: dict[str, Any]) -> None:
-    _state_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Merge so tunnel bookkeeping (tunnel_base / companion_tunnel_base) survives
+    # pipeline_start overwrites that only set runtime/model/base_url.
+    existing = _load_state()
+    merged = dict(existing)
+    merged.update(data)
+    _state_path().write_text(json.dumps(merged, indent=2), encoding="utf-8")
+
+
+def _terminate_proc(proc: Optional[subprocess.Popen]) -> None:
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _https_probe(url: str, *, headers: Optional[dict[str, str]] = None, timeout: float = 4.0) -> bool:
+    try:
+        req = urllib.request.Request(
+            url,
+            headers=headers or {"Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(64)
+        return True
+    except Exception:
+        return False
+
+
+# Cloudflare anycast IPv4s observed for trycloudflare.com — used when this Mac's
+# resolver only returns AAAA (no route) so local probes still work.
+_CF_ANYCAST_V4 = ("104.16.230.132", "104.16.231.132", "104.19.140.88")
+
+
+def _https_probe_trycloudflare(
+    url: str, *, headers: Optional[dict[str, str]] = None, timeout: float = 4.0
+) -> bool:
+    if _https_probe(url, headers=headers, timeout=timeout):
+        return True
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "trycloudflare.com" not in host:
+        return False
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    hdrs = dict(headers or {"Accept": "application/json"})
+    hdrs["Host"] = host
+    import http.client
+    import socket
+    import ssl
+
+    ctx = ssl.create_default_context()
+    for ip in _CF_ANYCAST_V4:
+        try:
+            sock = socket.create_connection((ip, 443), timeout=timeout)
+            ssock = ctx.wrap_socket(sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(ip, 443, timeout=timeout)
+            conn.sock = ssock
+            conn.request("GET", path, headers=hdrs)
+            resp = conn.getresponse()
+            resp.read(64)
+            ok = 200 <= resp.status < 500 and resp.status != 404
+            conn.close()
+            if ok:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _tunnel_probe_url(base: str, *, is_companion: bool) -> str:
+    root = base.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    if is_companion:
+        return f"{root}/healthz"
+    return f"{root}/v1/models"
+
+
+def _tunnel_still_live(base: str, *, is_companion: bool) -> bool:
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if not is_companion:
+        tok = (_load_state().get("token") or "") or ensure_gateway_token()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+    probe = _tunnel_probe_url(base, is_companion=is_companion)
+    if "trycloudflare.com" in probe:
+        return _https_probe_trycloudflare(probe, headers=headers)
+    return _https_probe(probe, headers=headers)
 
 
 def _http_json(url: str, *, method: str = "GET", body: Any = None, timeout: float = 8.0) -> Any:
@@ -373,58 +574,308 @@ def _ensure_gateway(upstream: str, token: str) -> str:
     raise RuntimeError("gateway failed to start")
 
 
+def _candidate_tunnel_bases(*, is_companion: bool, state_key: str) -> list[str]:
+    """URLs we might already have live (without /v1)."""
+    state = _load_state()
+    out: list[str] = []
+    for key in (state_key, "companion_tunnel_base" if is_companion else "tunnel_base"):
+        raw = str(state.get(key) or "").strip().rstrip("/")
+        if raw.startswith("https://"):
+            if raw.endswith("/v1"):
+                raw = raw[:-3]
+            if raw not in out:
+                out.append(raw)
+    if not is_companion:
+        bu = str(state.get("base_url") or "").strip().rstrip("/")
+        if bu.startswith("https://"):
+            if bu.endswith("/v1"):
+                bu = bu[:-3]
+            if bu not in out:
+                out.append(bu)
+    return out
+
+
+def _try_named_cloudflared_tunnel(local_port: int) -> Optional[str]:
+    """Start or reuse a *named* Cloudflare tunnel (stable hostname).
+
+    Requires one-time durable_tunnel.json with Cloudflare tunnel token + public URL.
+    Ingress in the Cloudflare dashboard must point at
+    ``http://127.0.0.1:{local_port}`` (Companion).
+    """
+    global _companion_tunnel_proc
+    cfg = load_durable_tunnel()
+    token = str(cfg.get("token") or "").strip()
+    url = str(cfg.get("public_base_url") or "").strip().rstrip("/")
+    if not token or not url.startswith("https://"):
+        return None
+    if url.endswith("/v1"):
+        url = url[:-3]
+
+    if local_port != LISTEN_PORT:
+        # Named tunnel ingress is configured for Companion only.
+        return None
+
+    if _tunnel_still_live(url, is_companion=True):
+        st = _load_state()
+        st["companion_tunnel_base"] = url
+        _save_state(st)
+        logger.info("reusing live named tunnel %s", url)
+        return url
+
+    with _proc_lock:
+        tracked = _companion_tunnel_proc
+        if tracked is not None and tracked.poll() is None:
+            st = _load_state()
+            st["companion_tunnel_base"] = url
+            _save_state(st)
+            logger.info("reusing tracked named tunnel process for %s", url)
+            return url
+
+    cf = _cloudflared_bin()
+    if not cf:
+        logger.warning("cloudflared not found; cannot start named tunnel")
+        return None
+
+    log_path = _data_dir() / "run" / "companion_named_tunnel.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    with _proc_lock:
+        _terminate_proc(_companion_tunnel_proc)
+        try:
+            log_f = open(log_path, "w", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("cannot write named tunnel log %s: %s", log_path, exc)
+            return None
+        # Token mode uses remote ingress from the Cloudflare dashboard.
+        new_proc = subprocess.Popen(
+            [cf, "tunnel", "--no-autoupdate", "run", "--token", token],
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            log_f.close()
+        except OSError:
+            pass
+        _companion_tunnel_proc = new_proc
+        proc = new_proc
+
+    registered = False
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            logger.warning(
+                "named cloudflared exited early (log=%s)", log_path
+            )
+            break
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if "Registered tunnel connection" in text:
+            registered = True
+            break
+        if _tunnel_still_live(url, is_companion=True):
+            registered = True
+            break
+        time.sleep(0.25)
+
+    if not registered and proc.poll() is not None:
+        with _proc_lock:
+            if _companion_tunnel_proc is proc:
+                _companion_tunnel_proc = None
+        return None
+
+    # Grace for edge/DNS; accept registered even if local probe fails (IPv6 quirks).
+    ready_deadline = time.time() + 20
+    while time.time() < ready_deadline:
+        if _tunnel_still_live(url, is_companion=True):
+            st = _load_state()
+            st["companion_tunnel_base"] = url
+            _save_state(st)
+            logger.info("named tunnel ready %s", url)
+            return url
+        if proc.poll() is not None:
+            break
+        time.sleep(0.5)
+
+    if registered and proc.poll() is None:
+        st = _load_state()
+        st["companion_tunnel_base"] = url
+        _save_state(st)
+        logger.warning(
+            "named tunnel %s registered; local probe inconclusive — returning for cloud probe",
+            url,
+        )
+        return url
+
+    logger.warning("named tunnel %s failed to come up", url)
+    _terminate_proc(proc)
+    with _proc_lock:
+        if _companion_tunnel_proc is proc:
+            _companion_tunnel_proc = None
+    return None
+
+
 def _try_cloudflared_tunnel(
     local_port: int, *, state_key: str = "tunnel_base"
 ) -> Optional[str]:
-    """Start a quick tunnel; return https base without /v1, or None.
+    """Start or reuse a quick tunnel; return https base without /v1, or None.
 
     ``state_key`` lets companion (8791) and gateway (11435) keep separate tunnels.
+    Reuses a still-reachable URL instead of spawning a new cloudflared each time
+    (establish/reconnect used to leak orphans and race DNS).
+
+    Readiness: prefer a successful local HTTPS probe, but if this machine cannot
+    resolve the trycloudflare hostname (common when the edge publishes AAAA-only
+    and local IPv6/DNS is broken), accept the tunnel once cloudflared logs
+    ``Registered tunnel connection``. Flyleaf's cloud probe is the real check.
     """
     global _tunnel_proc, _companion_tunnel_proc
-    if not shutil.which("cloudflared"):
+    cf = _cloudflared_bin()
+    if not cf:
+        logger.warning("cloudflared not found on PATH or common Homebrew locations")
         return None
     is_companion = local_port == LISTEN_PORT
+
+    for cand in _candidate_tunnel_bases(is_companion=is_companion, state_key=state_key):
+        if _tunnel_still_live(cand, is_companion=is_companion):
+            st = _load_state()
+            st[state_key] = cand
+            _save_state(st)
+            logger.info("reusing live tunnel %s", cand)
+            return cand
+
+    # If our tracked cloudflared is still running, reuse its saved URL even when
+    # this Mac cannot locally resolve trycloudflare DNS (AAAA-only / IPv6 quirks).
     with _proc_lock:
-        proc = _companion_tunnel_proc if is_companion else _tunnel_proc
-        if proc and proc.poll() is None:
-            state = _load_state()
-            url = state.get(state_key)
-            if url:
-                return str(url)
+        tracked = _companion_tunnel_proc if is_companion else _tunnel_proc
+        if tracked is not None and tracked.poll() is None:
+            cands = _candidate_tunnel_bases(is_companion=is_companion, state_key=state_key)
+            if cands:
+                logger.info("reusing tracked cloudflared tunnel %s", cands[0])
+                return cands[0]
+
+    log_path = _data_dir() / "run" / (
+        "companion_tunnel.log" if is_companion else "gateway_tunnel.log"
+    )
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    with _proc_lock:
+        old = _companion_tunnel_proc if is_companion else _tunnel_proc
+        _terminate_proc(old)
+        try:
+            log_f = open(log_path, "w", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("cannot write tunnel log %s: %s", log_path, exc)
+            return None
         new_proc = subprocess.Popen(
             [
-                "cloudflared",
+                cf,
                 "tunnel",
                 "--url",
                 f"http://127.0.0.1:{local_port}",
                 "--no-autoupdate",
             ],
-            stdout=subprocess.PIPE,
+            stdout=log_f,
             stderr=subprocess.STDOUT,
             text=True,
         )
+        try:
+            log_f.close()
+        except OSError:
+            pass
         if is_companion:
             _companion_tunnel_proc = new_proc
         else:
             _tunnel_proc = new_proc
         proc = new_proc
-    assert proc.stdout is not None
-    deadline = time.time() + 25
+
+    url: Optional[str] = None
+    registered = False
+    deadline = time.time() + 45
     while time.time() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-            continue
-        if "trycloudflare.com" in line or "https://" in line:
-            for part in line.split():
-                if part.startswith("https://") and "trycloudflare.com" in part:
-                    url = part.rstrip("/")
-                    st = _load_state()
-                    st[state_key] = url
-                    _save_state(st)
-                    return url
+        if proc.poll() is not None:
+            break
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if url is None:
+            for line in text.splitlines():
+                if "trycloudflare.com" not in line:
+                    continue
+                for part in line.split():
+                    cleaned = part.strip("|$ \t\r\n")
+                    if cleaned.startswith("https://") and "trycloudflare.com" in cleaned:
+                        url = cleaned.rstrip("/")
+                        break
+                if url:
+                    break
+        if "Registered tunnel connection" in text:
+            registered = True
+        if url and registered:
+            break
+        if url and _tunnel_still_live(url, is_companion=is_companion):
+            break
+        time.sleep(0.25)
+
+    if not url:
+        logger.warning("cloudflared did not print a trycloudflare URL (log=%s)", log_path)
+        _terminate_proc(proc)
+        with _proc_lock:
+            if is_companion and _companion_tunnel_proc is proc:
+                _companion_tunnel_proc = None
+            elif (not is_companion) and _tunnel_proc is proc:
+                _tunnel_proc = None
+        return None
+
+    # Extra grace for DNS/edge after registration (or after URL print).
+    ready_deadline = time.time() + (15 if registered else 45)
+    while time.time() < ready_deadline:
+        if _tunnel_still_live(url, is_companion=is_companion):
+            st = _load_state()
+            st[state_key] = url
+            _save_state(st)
+            logger.info("tunnel ready (local probe ok) %s", url)
+            return url
+        if proc.poll() is not None:
+            logger.warning("cloudflared exited before tunnel became reachable")
+            break
+        # Re-check registration in case it landed after URL print.
+        try:
+            if "Registered tunnel connection" in log_path.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                registered = True
+        except OSError:
+            pass
+        time.sleep(0.5)
+
+    if registered and proc.poll() is None:
+        st = _load_state()
+        st[state_key] = url
+        _save_state(st)
+        logger.warning(
+            "tunnel %s registered but not locally reachable "
+            "(often IPv6-only DNS on this Mac); returning URL for cloud probe",
+            url,
+        )
+        return url
+
+    logger.warning("tunnel URL %s never became reachable", url)
+    _terminate_proc(proc)
+    with _proc_lock:
+        if is_companion and _companion_tunnel_proc is proc:
+            _companion_tunnel_proc = None
+        elif (not is_companion) and _tunnel_proc is proc:
+            _tunnel_proc = None
     return None
 
 
@@ -433,8 +884,11 @@ def prepare_cloud_link() -> dict[str, Any]:
 
     Called from the *browser* (which can hit 127.0.0.1) when the user is on
     levin.fly.dev — the cloud server cannot dial localhost itself.
+
+    Prefers a configured *named* Cloudflare tunnel (stable hostname). Falls
+    back to ephemeral quick tunnels only when none is configured.
     """
-    if not shutil.which("cloudflared"):
+    if not _cloudflared_bin():
         return {
             "ok": False,
             "error": "cloudflared_missing",
@@ -444,6 +898,35 @@ def prepare_cloud_link() -> dict[str, Any]:
             ),
             "install_hint": "brew install cloudflared",
         }
+
+    named = _try_named_cloudflared_tunnel(LISTEN_PORT)
+    if named:
+        return {
+            "ok": True,
+            "public_base_url": named,
+            "local_base_url": f"http://{LISTEN_HOST}:{LISTEN_PORT}",
+            "tunnel_mode": "named",
+            "stable": True,
+            "message": (
+                f"Durable tunnel online at {named} — same hostname after reboot."
+            ),
+        }
+
+    cfg = load_durable_tunnel()
+    if str(cfg.get("token") or "").strip():
+        return {
+            "ok": False,
+            "error": "named_tunnel_failed",
+            "tunnel_mode": "named",
+            "stable": True,
+            "public_base_url": str(cfg.get("public_base_url") or "") or None,
+            "message": (
+                "Durable tunnel is configured but failed to start. "
+                "Check that the Cloudflare hostname points at "
+                f"http://127.0.0.1:{LISTEN_PORT} and the token is valid."
+            ),
+        }
+
     url = _try_cloudflared_tunnel(
         LISTEN_PORT, state_key="companion_tunnel_base"
     )
@@ -451,16 +934,23 @@ def prepare_cloud_link() -> dict[str, Any]:
         return {
             "ok": False,
             "error": "tunnel_failed",
+            "tunnel_mode": "quick",
+            "stable": False,
             "message": (
-                "Could not open a public tunnel. Check that cloudflared is installed "
-                "and try again."
+                "Could not open a public tunnel. Install cloudflared, or set up a "
+                "durable named tunnel under Settings → Open source (recommended)."
             ),
         }
     return {
         "ok": True,
         "public_base_url": url,
         "local_base_url": f"http://{LISTEN_HOST}:{LISTEN_PORT}",
-        "message": "Public tunnel ready — Flyleaf can use your local models.",
+        "tunnel_mode": "quick",
+        "stable": False,
+        "message": (
+            "Temporary tunnel ready. For a hostname that survives reboot, "
+            "configure a durable Cloudflare tunnel once under Settings → Open source."
+        ),
     }
 
 
@@ -530,16 +1020,18 @@ def pipeline_start(
         mode = "tunnel" if prefer_tunnel else "loopback"
 
     base_url = f"http://127.0.0.1:{GATEWAY_PORT}/v1"
+    tunnel_base = ""
     if mode == "tunnel":
         tun = _try_cloudflared_tunnel(GATEWAY_PORT)
         if tun:
-            base_url = tun.rstrip("/") + "/v1"
+            tunnel_base = tun.rstrip("/")
+            base_url = tunnel_base + "/v1"
             mode = "tunnel"
         else:
             # Fall back to loopback; cloud messenger will report needs if unreachable
             mode = "loopback"
 
-    state = {
+    state: dict[str, Any] = {
         "runtime": runtime_id,
         "model": model_id,
         "base_url": base_url,
@@ -549,6 +1041,8 @@ def pipeline_start(
         "gateway_port": GATEWAY_PORT,
         "updated_at": time.time(),
     }
+    if tunnel_base:
+        state["tunnel_base"] = tunnel_base
     _save_state(state)
     return {
         "ok": True,
@@ -642,7 +1136,7 @@ class CompanionHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         else:
             self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
             "Authorization, Content-Type",
@@ -694,12 +1188,11 @@ class CompanionHandler(BaseHTTPRequestHandler):
   <p class="ok">Companion is running</p>
   <h1>Local Companion</h1>
   <p>URL for Settings: <code>{base}</code></p>
-  <p>On <strong>levin.fly.dev</strong>, keep this localhost URL — the site will open a secure tunnel for you when you click Link companion.</p>
-  <p>The link token is <strong>not</strong> shown in the browser (so it stays off screenshots and public tunnels).</p>
+  <p>On <strong>levin.fly.dev</strong>, click <strong>Start local model</strong> — this computer opens the tunnel (durable hostname if configured).</p>
   <ol>
-    <li>In the terminal where Companion started, copy the line <code>Token: …</code></li>
-    <li>Or run: <code>cat {token_path}</code></li>
-    <li>Paste URL + token under <strong>Settings → Open source → Add your own</strong></li>
+    <li>One-time: Settings → Open source → Durable tunnel (Cloudflare token + hostname)</li>
+    <li>Then one click: <strong>Start local model</strong> on Flyleaf</li>
+    <li>Optional: <code>cat {token_path}</code> for manual companion link</li>
   </ol>
   <p style="margin-top:1.25rem;font-size:0.85rem;">API health: <a href="/healthz" style="color:#3d9cf0">/healthz</a></p>
 </body></html>
@@ -716,6 +1209,12 @@ class CompanionHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _is_loopback_client(self) -> bool:
+        host = str(self.client_address[0] if self.client_address else "")
+        return host in {"127.0.0.1", "::1", "localhost"} or host.startswith(
+            "::ffff:127."
+        )
 
     def _check_auth(self) -> bool:
         expected = ensure_companion_token()
@@ -739,6 +1238,31 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        # Loopback-only: website can one-click link without pasting the token.
+        # Token never leaves this machine except via the user's own browser to Flyleaf.
+        if path == "/browser-link-info":
+            if not self._is_loopback_client():
+                self._send(403, {"ok": False, "error": "loopback_only"})
+                return
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "base_url": f"http://{LISTEN_HOST}:{LISTEN_PORT}",
+                    "token": ensure_companion_token(),
+                    "ollama": ollama_available(),
+                    "ollama_installed": ollama_installed(),
+                    "tunnel": durable_tunnel_public(),
+                },
+            )
+            return
+        # Loopback: read durable tunnel status without pasting the companion token.
+        if path == "/tunnel/config":
+            if not self._is_loopback_client():
+                self._send(403, {"ok": False, "error": "loopback_only"})
+                return
+            self._send(200, {"ok": True, **durable_tunnel_public()})
+            return
         if not self._check_auth():
             return
         if path == "/local-model/pipeline/status":
@@ -752,12 +1276,49 @@ class CompanionHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
+        # Loopback durable-tunnel setup from the Flyleaf page (one-time).
+        if path == "/tunnel/config" and self._is_loopback_client():
+            body = self._read_json()
+            try:
+                public = save_durable_tunnel(
+                    token=str(body.get("token") or ""),
+                    public_base_url=str(body.get("public_base_url") or ""),
+                )
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            # Boot it immediately so one-click Start can reuse the same name.
+            started = _try_named_cloudflared_tunnel(LISTEN_PORT)
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    **public,
+                    "booted": bool(started),
+                    "message": (
+                        f"Durable tunnel saved"
+                        + (f" and online at {started}" if started else ". Click Start local model to bring it online.")
+                    ),
+                },
+            )
+            return
         if not self._check_auth():
             return
         body = self._read_json()
         if path == "/prepare-cloud-link":
             result = prepare_cloud_link()
             self._send(200 if result.get("ok") else 400, result)
+            return
+        if path == "/tunnel/config":
+            try:
+                public = save_durable_tunnel(
+                    token=str(body.get("token") or ""),
+                    public_base_url=str(body.get("public_base_url") or ""),
+                )
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            self._send(200, {"ok": True, **public})
             return
         if path == "/local-model/discover":
             self._send(200, discover_candidates())
@@ -785,8 +1346,28 @@ class CompanionHandler(BaseHTTPRequestHandler):
             return
         self._send(404, {"ok": False, "error": "not_found"})
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/tunnel/config" and self._is_loopback_client():
+            self._send(200, {"ok": True, **clear_durable_tunnel()})
+            return
+        if not self._check_auth():
+            return
+        if path == "/tunnel/config":
+            self._send(200, {"ok": True, **clear_durable_tunnel()})
+            return
+        self._send(404, {"ok": False, "error": "not_found"})
+
 
 def main() -> None:
+    import signal
+
+    # Survive parent-shell exit when started from agent/QA wrappers (`python … &`).
+    if hasattr(signal, "SIGHUP"):
+        try:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        except (ValueError, OSError):
+            pass
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
@@ -803,10 +1384,21 @@ def main() -> None:
     print(f"Companion ready: http://{LISTEN_HOST}:{LISTEN_PORT}")
     print(f"Token: {token}")
     print("Link this URL + token under Settings → Models (Local Companion).")
+    # Bring durable tunnel up on boot so the hostname is ready before the first click.
+    if load_durable_tunnel().get("token"):
+        threading.Thread(
+            target=lambda: _try_named_cloudflared_tunnel(LISTEN_PORT),
+            name="durable-tunnel-boot",
+            daemon=True,
+        ).start()
+        print("Durable tunnel: starting in background (stable hostname).")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("shutting down")
+    except Exception:
+        logger.exception("companion crashed")
+        raise
     finally:
         pipeline_stop()
         server.server_close()

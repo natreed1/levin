@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
-  <link rel="stylesheet" href="/static/style.css?v=33" />
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css?v=35" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -44,7 +45,7 @@
         <label>Display name <input id="signup-name" type="text" maxlength="40" autocomplete="nickname" required /></label>
         <label>Email <input id="signup-email" type="email" autocomplete="username" required /></label>
         <label>Password <input id="signup-password" type="password" autocomplete="new-password" minlength="8" required /></label>
-        <p class="sub">At least 8 characters. We’ll email a verification link before you can log in.</p>
+        <p class="sub">At least 8 characters. We’ll email a verification link when mail is configured (otherwise you’ll see an error if signup can’t complete).</p>
         <p id="signup-error" class="error" hidden></p>
         <button type="submit">Create account</button>
       </form>
@@ -72,6 +73,8 @@
       </div>
       <nav class="rail-nav" aria-label="Primary">
         <button type="button" class="nav-btn active" data-tab="chats">Rooms</button>
+        <button type="button" class="nav-btn" data-tab="capabilities">Capabilities</button>
+        <button type="button" class="nav-btn" data-tab="agents">Agents</button>
         <button type="button" class="nav-btn" data-tab="automations">Automations</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
@@ -100,8 +103,8 @@
             <div class="rail-section agent-dock">
               <header class="section-head">
                 <div>
-                  <h2>Agents</h2>
-                  <p>Drag one into a room</p>
+                  <h2>Specialists</h2>
+                  <p>Lenses for this room — not automations</p>
                 </div>
               </header>
               <ul id="agent-palette" class="agent-palette"></ul>
@@ -113,48 +116,60 @@
                 <p class="eyebrow" id="stage-kind">Room</p>
                 <h1 id="stage-title">Select a room</h1>
                 <div class="room-context">
-                  <span id="compute-badge" class="compute-badge hidden"></span>
+                  <label class="room-model-wrap hidden" id="room-model-wrap">
+                    <span class="sr-only">Model for this room</span>
+                    <select id="room-model-select" class="room-model-select" title="Agents in this room use the model you pick here"></select>
+                  </label>
+                  <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this room"></span>
+                  <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
+                    Start local model
+                  </button>
                   <div id="room-members" class="room-members"></div>
                 </div>
               </div>
               <div class="header-actions">
+                <button type="button" id="automate-room-btn" class="ghost hidden" title="Turn this chat into an automation">Automate</button>
                 <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
                 <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
                 <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
                 <button type="button" id="specialist-idea-btn" class="ghost hidden">Ideas</button>
                 <button type="button" id="specialist-stop-btn" class="ghost danger hidden">Stop</button>
                 <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
+                <button type="button" id="delete-room" class="ghost danger hidden">Delete</button>
               </div>
             </header>
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
               <span id="specialist-run-text">Specialists running — safe to leave this room.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
             </div>
-            <div id="model-status" class="model-status hidden" role="status" aria-live="polite">
-              <h4>Available Models</h4>
-              <div id="model-status-list"></div>
-            </div>
-            <div id="share-box" class="share-box hidden">
-              <label for="share-url">Invite link</label>
-              <div class="share-row">
-                <input id="share-url" type="text" readonly />
-                <button type="button" id="copy-share">Copy</button>
-              </div>
-            </div>
             <div id="messages" class="messages" aria-live="polite"></div>
             <form id="send-form" class="composer">
-              <input id="body" type="text" maxlength="2000" placeholder="Message… @Qwen or @workflow ritual_id" autocomplete="off" disabled />
+              <input id="body" type="text" maxlength="2000" placeholder="Message… @Bullish uses the model in the menu above" autocomplete="off" disabled />
               <button type="submit" disabled>Send</button>
             </form>
             <p id="chat-error" class="error" hidden></p>
           </div>
         </div>
 
+        <dialog id="share-dialog">
+          <form method="dialog" class="share-dialog-form">
+            <h3>Invite friend</h3>
+            <p class="muted tiny-hint">Anyone with this link can join the room.</p>
+            <label for="share-url">Invite link</label>
+            <div class="share-row">
+              <input id="share-url" type="text" readonly />
+              <button type="button" id="copy-share">Copy</button>
+            </div>
+            <div class="dialog-actions">
+              <button type="submit" value="close">Done</button>
+            </div>
+          </form>
+        </dialog>
         <dialog id="new-room-dialog">
           <form id="new-room-form" method="dialog">
             <h3>New room</h3>
             <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <p class="muted tiny-hint">Invite friends after creating it, or drag agents into it from the room rail.</p>
+            <p class="muted tiny-hint">Invite friends after creating it, or drag specialists into it from the room rail.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -190,35 +205,176 @@
             <p id="debate-error" class="error" hidden></p>
           </form>
         </dialog>
+        <dialog id="automate-dialog">
+          <form id="automate-form" method="dialog" class="automate-dialog-form">
+            <h3>Automate this conversation</h3>
+            <p class="muted tiny-hint">Pick capabilities to loop. Saves as a draft — nothing runs until you approve.</p>
+            <div class="automate-dual">
+              <div class="automate-pane">
+                <h4>From this chat</h4>
+                <textarea id="automate-transcript" rows="12" readonly></textarea>
+              </div>
+              <div class="automate-pane">
+                <h4>Build the loop</h4>
+                <label>Name <input id="automate-name" type="text" maxlength="80" placeholder="e.g. morning_nvda_brief" required /></label>
+                <fieldset class="cap-picker">
+                  <legend>Capabilities to run (in order)</legend>
+                  <div id="automate-cap-list" class="cap-picker-list"></div>
+                </fieldset>
+                <label>When
+                  <select id="automate-schedule-preset">
+                    <option value="">Only when I run it</option>
+                    <option value="0 7 * * 1-5">Weekday mornings (7:00)</option>
+                    <option value="0 12 * * 1-5">Weekday noon</option>
+                    <option value="0 18 * * 1-5">Weekday evenings (18:00)</option>
+                    <option value="custom">Custom cron…</option>
+                  </select>
+                </label>
+                <label id="automate-schedule-custom-wrap" class="hidden">Custom schedule
+                  <input id="automate-schedule" type="text" maxlength="64" placeholder="0 7 * * 1-5" />
+                </label>
+              </div>
+            </div>
+            <ol class="flow-steps tiny-hint muted">
+              <li>Save draft</li>
+              <li>Approve in Capabilities</li>
+              <li>It appears under Automations and can run on a schedule</li>
+            </ol>
+            <div class="dialog-actions">
+              <button type="button" id="automate-cancel" class="ghost">Cancel</button>
+              <button type="submit" id="automate-save">Save draft</button>
+            </div>
+            <p id="automate-error" class="error" hidden></p>
+          </form>
+        </dialog>
       </section>
 
-      <!-- AUTOMATIONS -->
-      <section id="tab-automations" class="tab-panel hidden">
+      <div id="flow-toast" class="flow-toast hidden" role="status"></div>
+
+      <!-- CAPABILITIES (layer 1) -->
+      <section id="tab-capabilities" class="tab-panel hidden">
         <header class="page-header">
           <div>
-            <p class="eyebrow">Control</p>
-            <h1>Automations</h1>
+            <p class="eyebrow">Building blocks</p>
+            <h1>Capabilities</h1>
           </div>
           <div class="header-actions">
-            <button type="button" id="mine-btn" class="ghost">Mine</button>
-            <button type="button" id="refresh-autos-btn" class="ghost">Refresh</button>
+            <button type="button" id="mine-btn" class="ghost">Find from my work</button>
+            <button type="button" id="refresh-caps-btn" class="ghost">Refresh</button>
           </div>
         </header>
+        <p class="sub muted">Things the system can do. Drafts need your approval. Agents and automations call these — they are not agents themselves.</p>
+        <nav class="flow-rail" aria-label="How this fits together">
+          <span class="flow-rail-step done">1. Capability</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step">2. Agent uses it</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step">3. Automation loops it</span>
+        </nav>
+        <div id="caps-next" class="flow-callout hidden"></div>
+        <h2 class="section-title">Needs your approval</h2>
         <div class="table-wrap">
-          <table class="data-table" id="autos-table">
+          <table class="data-table" id="caps-drafts-table">
             <thead>
               <tr>
-                <th>Ritual</th>
-                <th>Status</th>
-                <th>Runner</th>
-                <th>Schedule</th>
+                <th>Draft</th>
+                <th>Source</th>
+                <th>Steps</th>
                 <th></th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
-        <p id="autos-empty" class="empty muted">No automations yet. Mine from tracked sessions or create drafts from the local ledger tools.</p>
+        <p id="caps-drafts-empty" class="empty muted">No drafts. In a room, click <strong>Automate</strong> or type <code>/automate</code>.</p>
+        <h2 class="section-title">Ready to use</h2>
+        <div class="table-wrap">
+          <table class="data-table" id="caps-ready-table">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>Type</th>
+                <th>How to use</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="caps-empty" class="empty muted hidden">No capabilities yet.</p>
+        <p id="caps-error" class="error" hidden></p>
+      </section>
+
+      <!-- AGENTS (layer 2) -->
+      <section id="tab-agents" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Who uses the verbs</p>
+            <h1>Agents</h1>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <p class="sub muted">Agents are not capabilities. <strong>Lenses</strong> only change the prompt (Bullish, Contrarian). <strong>Operators</strong> can call capabilities (Analyst research, Master router).</p>
+        <nav class="flow-rail" aria-label="How this fits together">
+          <span class="flow-rail-step">1. Capability</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step done">2. Agent uses it</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step">3. Automation loops it</span>
+        </nav>
+        <h2 class="section-title">Operators</h2>
+        <div id="agents-operators" class="agent-card-grid"></div>
+        <h2 class="section-title">Lenses (prompt only)</h2>
+        <div id="agents-lenses" class="agent-card-grid"></div>
+        <p id="agents-tab-empty" class="empty muted hidden">No agents defined.</p>
+        <p id="agents-tab-error" class="error" hidden></p>
+      </section>
+
+      <!-- AUTOMATIONS (layer 3) -->
+      <section id="tab-automations" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Running loops</p>
+            <h1>Automations</h1>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="goto-automate-btn" class="ghost">Create from a room</button>
+            <button type="button" id="refresh-autos-btn" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <p class="sub muted">Approved capability loops that can run on a schedule or on demand. Create them from a chat — not from this list.</p>
+        <nav class="flow-rail" aria-label="How this fits together">
+          <span class="flow-rail-step">1. Capability</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step">2. Agent uses it</span>
+          <span class="flow-rail-sep">→</span>
+          <span class="flow-rail-step done">3. Automation loops it</span>
+        </nav>
+        <div class="table-wrap">
+          <table class="data-table" id="autos-table">
+            <thead>
+              <tr>
+                <th>Automation</th>
+                <th>Capability loop</th>
+                <th>When</th>
+                <th>Last run</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="autos-empty" class="empty-card">
+          <p class="empty muted">No running automations yet.</p>
+          <ol class="flow-steps">
+            <li>Open a room and talk through the workflow</li>
+            <li>Click <strong>Automate</strong> (or type <code>/automate</code>)</li>
+            <li>Approve the draft under Capabilities</li>
+          </ol>
+          <button type="button" id="autos-empty-rooms-btn" class="tiny">Go to Rooms</button>
+        </div>
         <p id="autos-error" class="error" hidden></p>
       </section>
 
@@ -241,13 +397,13 @@
             <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Claude (or a local stub) mines sessions and chat gaps into draft automations. Approve here — nothing runs until you do.</p>
+        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (also listed under Capabilities). Approve &amp; enable — then they show up as Automations. Room <code>/automate</code> is the fastest path from a chat.</p>
         <h2 class="section-title">Open proposals</h2>
         <div class="table-wrap">
           <table class="data-table" id="review-proposals-table">
             <thead>
               <tr>
-                <th>Ritual</th>
+                <th>Capability</th>
                 <th>Source</th>
                 <th>Runner</th>
                 <th></th>
@@ -279,11 +435,14 @@
             <h3>Active session</h3>
             <p id="active-session" class="muted">None</p>
             <p id="active-scope" class="muted tiny-hint" hidden></p>
+            <p id="capture-status" class="capture-status muted tiny-hint" data-state="unknown">
+              Checking Capture extension…
+            </p>
             <fieldset id="capture-scope-fieldset" class="scope-fieldset">
               <legend>Capture scope</legend>
               <label class="scope-option"><input type="radio" name="capture-scope" value="active_tab" checked /> Active tab</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="all_tabs" /> All open tabs</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs <span class="muted">(pick in extension)</span></label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="research_sites" /> Research sites only</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="notes_only" /> Notes only</label>
             </fieldset>
@@ -291,14 +450,15 @@
               <input id="session-title" type="text" placeholder="Research session" value="Research session" />
             </label>
             <div class="card-actions">
-              <button type="button" id="start-session-btn">Start</button>
+              <button type="button" id="start-session-btn">Start tracking</button>
+              <button type="button" id="open-capture-btn" class="ghost">Select tabs</button>
               <button type="button" id="end-session-btn" class="ghost">End</button>
             </div>
             <label class="inline-note">Note
               <input id="session-note" type="text" placeholder="Optional note…" />
             </label>
             <button type="button" id="add-note-btn" class="ghost tiny">Add note</button>
-            <p class="muted tiny-hint">Browser scopes need the Capture extension pointed at this app (:8790) while you stay signed in.</p>
+            <p id="capture-hint" class="muted tiny-hint">Browser tab capture needs the Capture extension. Notes and chat still work without it.</p>
           </div>
           <div class="card">
             <h3>Summary</h3>
@@ -440,7 +600,7 @@
               <div class="settings-panel-head">
                 <div>
                   <h2>Models &amp; integrations</h2>
-                  <p>Specialists use the active model saved to your account.</p>
+                  <p>Agents (@Bullish, @Contrarian, …) are prompt roles on top of whichever model is active — Claude, GPT, or local.</p>
                 </div>
                 <button type="button" id="settings-refresh-btn" class="ghost">Refresh</button>
               </div>
@@ -486,6 +646,31 @@
                 <div class="settings-block-head">
                   <h3>Open source</h3>
                   <button type="button" id="os-add-btn" class="ghost tiny">Add your own</button>
+                </div>
+                <div id="durable-tunnel-card" class="settings-subcard stacked">
+                  <strong>Durable tunnel</strong>
+                  <p id="durable-tunnel-status" class="muted tiny-hint">Checking Local Companion…</p>
+                  <p class="muted tiny-hint">One-time Cloudflare named tunnel → same hostname after reboot. Then <strong>Start local model</strong> is one click.</p>
+                  <details id="durable-tunnel-setup">
+                    <summary class="muted tiny-hint">Set up durable hostname</summary>
+                    <ol class="muted tiny-hint" style="padding-left:1.2rem;line-height:1.55;margin:0.5rem 0;">
+                      <li>Install: <code>brew install cloudflared</code></li>
+                      <li>Cloudflare Zero Trust → Networks → Tunnels → Create → copy <strong>token</strong></li>
+                      <li>Public hostname → service <code>http://127.0.0.1:8791</code></li>
+                      <li>Paste token + <code>https://…</code> hostname below</li>
+                    </ol>
+                    <label>Tunnel token
+                      <input id="durable-tunnel-token" type="password" autocomplete="off" placeholder="eyJ…" />
+                    </label>
+                    <label>Public URL
+                      <input id="durable-tunnel-url" type="url" placeholder="https://flyleaf-mac.example.com" />
+                    </label>
+                    <div class="card-actions">
+                      <button type="button" id="durable-tunnel-save-btn">Save &amp; boot</button>
+                      <button type="button" id="durable-tunnel-clear-btn" class="ghost">Clear</button>
+                    </div>
+                    <p id="durable-tunnel-error" class="error" hidden></p>
+                  </details>
                 </div>
                 <ul id="os-list" class="profile-list"></ul>
                 <p id="settings-error" class="error" hidden></p>
@@ -600,6 +785,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=36"></script>
+  <script src="/static/app.js?v=40"></script>
 </body>
 </html>

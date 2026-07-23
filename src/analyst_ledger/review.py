@@ -339,6 +339,7 @@ def run_review(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     ledger = ledger or Ledger()
+    auto_destination = destination is None
     if destination is None:
         destination = (
             "anthropic" if os.environ.get("ANTHROPIC_API_KEY", "").strip() else "local_stub"
@@ -357,15 +358,25 @@ def run_review(
         )
         return {"status": "dry_run", "prompt_preview": prompt[:1500], "destination": destination}
 
+    fallback_from: Optional[str] = None
     if destination == "local_stub":
         review = _stub_review(context)
     else:
         from .synthesize import _call_anthropic, _call_bedrock
 
-        raw = _call_bedrock(prompt) if destination == "bedrock" else _call_anthropic(
-            prompt, max_tokens=4096
-        )
-        review = _parse_model_json(raw)
+        try:
+            raw = _call_bedrock(prompt) if destination == "bedrock" else _call_anthropic(
+                prompt, max_tokens=4096
+            )
+            review = _parse_model_json(raw)
+        except Exception:
+            # Auto-picked Anthropic/Bedrock with a missing/invalid key should not
+            # hard-fail the Flyleaf Review button — fall back to the offline stub.
+            if not auto_destination:
+                raise
+            fallback_from = destination
+            destination = "local_stub"
+            review = _stub_review(context)
 
     ledger.record_egress(
         destination=destination,
@@ -420,7 +431,7 @@ def run_review(
         )
     )
     chat_block = context.get("chat") or {}
-    return {
+    out: Dict[str, Any] = {
         "status": "ok",
         "destination": destination,
         "memo_path": str(memo_path),
@@ -436,6 +447,12 @@ def run_review(
             ],
         },
     }
+    if fallback_from:
+        out["fallback_from"] = fallback_from
+        out["fallback_reason"] = (
+            f"{fallback_from} unavailable; used local_stub instead"
+        )
+    return out
 
 
 def list_reviews() -> List[Dict[str, str]]:

@@ -306,7 +306,12 @@ class SpecialistJobRegistry:
             if job and job.status == "running":
                 job.stop_event.set()
                 return job
-            return job
+            return None
+
+    def latest_for_room(self, room_id: str) -> Optional[SpecialistJob]:
+        with self._lock:
+            jid = self._by_room.get(room_id)
+            return self._jobs.get(jid) if jid else None
 
 
 _REGISTRY = SpecialistJobRegistry()
@@ -332,8 +337,11 @@ def run_specialist_action(
     loop: Any = None,
 ) -> dict[str, Any]:
     action = str(action or "").strip().lower()
-    if action not in VALID_ACTIONS:
-        raise ValueError(f"Unknown action '{action}'. Expected: present, debate, idea")
+    if not action or action not in VALID_ACTIONS:
+        raise ValueError(
+            "Empty or unknown action "
+            f"{action!r}. Expected: present, debate, or idea"
+        )
 
     stop = stop_event or threading.Event()
     continuous = bool(continuous) and action == "debate"
@@ -362,7 +370,11 @@ def run_specialist_action(
         try:
             from messenger.model_link import registry as model_registry
 
-            endpoint = model_registry().endpoint_for_call(owner_user_id)
+            room_profile = (room.get("config") or {}).get("model_profile_id")
+            endpoint = model_registry().endpoint_for_call(
+                owner_user_id,
+                profile_id=str(room_profile).strip() or None if room_profile else None,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("model link lookup failed: %s", exc)
 
@@ -613,7 +625,13 @@ def start_specialist_job(
     loop: Any = None,
 ) -> SpecialistJob:
     """Register + spawn a background thread; returns immediately."""
-    continuous = bool(continuous) and str(action or "").strip().lower() == "debate"
+    action = str(action or "").strip().lower()
+    if not action or action not in VALID_ACTIONS:
+        raise ValueError(
+            "Empty or unknown action "
+            f"{action!r}. Expected: present, debate, or idea"
+        )
+    continuous = bool(continuous) and action == "debate"
     job = SpecialistJob(
         job_id="job_" + uuid.uuid4().hex[:12],
         room_id=room["room_id"],

@@ -346,18 +346,18 @@ def _call_openai_compatible_messages(
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         err = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"Qwen endpoint HTTP {exc.code}: {err}") from exc
+        raise RuntimeError(f"Local model HTTP {exc.code}: {err}") from exc
     except urllib.error.URLError as exc:
         hint = (
-            "Link your local model under the Model tab (run the tunnel on your computer), "
-            "or set ANALYST_QWEN_BASE_URL for a self-hosted server."
+            "Click Start local model (or Settings → Open source) so Companion "
+            "can open a tunnel, then try again."
         )
         raise RuntimeError(
-            f"Qwen endpoint unreachable at {base_url}. {hint}"
+            f"Local model unreachable at {base_url}. {hint}"
         ) from exc
     choices = body.get("choices") or []
     if not choices:
-        raise RuntimeError("Qwen endpoint returned no choices.")
+        raise RuntimeError("Local model returned no choices.")
     message = choices[0].get("message") or {}
     return str(message.get("content") or "").strip()
 

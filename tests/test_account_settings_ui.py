@@ -37,3 +37,9 @@ def test_account_settings_actions_and_layout_are_wired():
     assert "flyleaf-theme" in js
     assert ".settings-layout" in css
     assert 'html[data-theme="light"]' in css
+
+
+def test_signup_auto_verified_enters_app():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "data?.auto_verified" in js
+    assert "await bootstrap()" in js

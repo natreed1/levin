@@ -1,10 +1,15 @@
-"""Named Qwen personalities available in Friend / specialist rooms."""
+"""Named specialist personalities for People / specialist rooms.
+
+Display names and @mentions are role/prompt identities — not model brands.
+Which model runs (Claude, GPT, local open-source) is chosen in Settings or
+per-room via the model toggle.
+"""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -15,13 +20,18 @@ class FriendPersonality:
     cookie_key: str
     prompt: str
     role: str = "analyst"  # analyst | bull | bear | synthesizer
+    aliases: Tuple[str, ...] = field(default_factory=tuple)
+    # Historical message authors still treated as this agent.
+    legacy_names: Tuple[str, ...] = field(default_factory=tuple)
 
 
 _PERSONALITY_DEFS = (
     FriendPersonality(
         id="qwen",
-        name="Qwen",
-        mention="@Qwen",
+        name="Analyst",
+        mention="@Analyst",
+        aliases=("@Qwen",),
+        legacy_names=("Qwen",),
         cookie_key="qwen",
         role="analyst",
         prompt=(
@@ -34,8 +44,10 @@ _PERSONALITY_DEFS = (
     ),
     FriendPersonality(
         id="qwen-bull",
-        name="Qwen Bull",
-        mention="@Qwen-Bull",
+        name="Bullish Agent",
+        mention="@Bullish",
+        aliases=("@Qwen-Bull", "@Bull"),
+        legacy_names=("Qwen Bull",),
         cookie_key="qwen-bull",
         role="bull",
         prompt=(
@@ -48,8 +60,10 @@ _PERSONALITY_DEFS = (
     ),
     FriendPersonality(
         id="qwen-contrarian",
-        name="Qwen Contrarian",
-        mention="@Qwen-Contrarian",
+        name="Contrarian Agent",
+        mention="@Contrarian",
+        aliases=("@Qwen-Contrarian",),
+        legacy_names=("Qwen Contrarian",),
         cookie_key="qwen-contrarian",
         role="bear",
         prompt=(
@@ -68,8 +82,10 @@ _PERSONALITY_DEFS = (
     ),
     FriendPersonality(
         id="qwen-synthesizer",
-        name="Qwen Synthesizer",
-        mention="@Qwen-Synthesizer",
+        name="Synthesizer Agent",
+        mention="@Synthesizer",
+        aliases=("@Qwen-Synthesizer",),
+        legacy_names=("Qwen Synthesizer",),
         cookie_key="qwen-synthesizer",
         role="synthesizer",
         prompt=(
@@ -84,34 +100,54 @@ _PERSONALITY_DEFS = (
 
 # Stable public order (tests / UI). Mention matching uses longest-first separately.
 PERSONALITIES = _PERSONALITY_DEFS
-_MENTION_ORDER = tuple(
-    sorted(_PERSONALITY_DEFS, key=lambda p: len(p.mention), reverse=True)
-)
-
 PERSONALITIES_BY_ID = {personality.id: personality for personality in PERSONALITIES}
 DEFAULT_PERSONALITY = PERSONALITIES_BY_ID["qwen"]
 
 
-def _mention_pattern(personality: FriendPersonality) -> str:
-    """Build a mention pattern, rejecting spaced forms of dashed child names."""
+def _all_mention_tokens(personality: FriendPersonality) -> Tuple[str, ...]:
+    return (personality.mention,) + tuple(personality.aliases)
+
+
+def _mention_lookup() -> dict:
+    """Map casefolded mention/alias → personality (longest keys win in matching)."""
+    out = {}
+    for personality in PERSONALITIES:
+        for token in _all_mention_tokens(personality):
+            out[token.casefold()] = personality
+    return out
+
+
+_MENTION_LOOKUP = _mention_lookup()
+_MENTION_TOKENS = tuple(
+    sorted(_MENTION_LOOKUP.keys(), key=len, reverse=True)
+)
+
+
+def _mention_pattern(token: str) -> str:
+    """Escape a mention token; guard spaced child forms for dashed prefixes."""
     child_suffixes = [
-        other.mention[len(personality.mention) + 1 :]
-        for other in PERSONALITIES
-        if other.mention.casefold().startswith(
-            (personality.mention + "-").casefold()
-        )
+        other[len(token) + 1 :]
+        for other in _MENTION_TOKENS
+        if other.casefold().startswith((token + "-").casefold())
+        and other.casefold() != token.casefold()
     ]
+    canonical = next(t for t in _MENTION_TOKENS if t.casefold() == token.casefold())
+    for p in PERSONALITIES:
+        for t in _all_mention_tokens(p):
+            if t.casefold() == token.casefold():
+                canonical = t
+                break
     spaced_child_guard = (
         r"(?!\s+(?:" + "|".join(re.escape(s) for s in child_suffixes) + r")\b)"
         if child_suffixes
         else ""
     )
-    return re.escape(personality.mention) + spaced_child_guard
+    return re.escape(canonical) + spaced_child_guard
 
 
 MENTION_RE = re.compile(
     r"(?<!\w)(?:"
-    + "|".join(_mention_pattern(p) for p in _MENTION_ORDER)
+    + "|".join(_mention_pattern(t) for t in _MENTION_TOKENS)
     + r")(?![\w-])",
     re.IGNORECASE,
 )
@@ -122,11 +158,7 @@ def match_personality(text: str) -> Optional[FriendPersonality]:
     match = MENTION_RE.search(text or "")
     if not match:
         return None
-    value = match.group(0).casefold()
-    for personality in PERSONALITIES:
-        if value == personality.mention.casefold():
-            return personality
-    return None
+    return _MENTION_LOOKUP.get(match.group(0).casefold())
 
 
 def mentioned_personalities(text: str) -> List[FriendPersonality]:
@@ -134,33 +166,39 @@ def mentioned_personalities(text: str) -> List[FriendPersonality]:
     found: List[FriendPersonality] = []
     seen = set()
     for match in MENTION_RE.finditer(text or ""):
-        value = match.group(0).casefold()
-        personality = next(
-            (p for p in PERSONALITIES if p.mention.casefold() == value), None
-        )
+        personality = _MENTION_LOOKUP.get(match.group(0).casefold())
         if personality and personality.id not in seen:
-            seen.add(personality.id)
             found.append(personality)
+            seen.add(personality.id)
     return found
 
 
 def strip_personality_mentions(text: str) -> str:
-    return MENTION_RE.sub(" ", text or "")
+    return MENTION_RE.sub("", text or "").strip()
 
 
 def resolve_specialists(ids: Optional[Sequence[str]] = None) -> List[FriendPersonality]:
     """Resolve specialist ids; default to bull + contrarian + synthesizer."""
     if not ids:
-        ids = ("qwen-bull", "qwen-contrarian", "qwen-synthesizer")
+        ids = ["qwen-bull", "qwen-contrarian", "qwen-synthesizer"]
     out: List[FriendPersonality] = []
-    seen = set()
     for raw in ids:
-        key = str(raw or "").strip().lower()
+        key = str(raw or "").strip()
         personality = PERSONALITIES_BY_ID.get(key)
-        if personality and personality.id not in seen:
-            seen.add(personality.id)
+        if personality and personality not in out:
             out.append(personality)
     return out
+
+
+def author_names_for(personality: FriendPersonality) -> set:
+    return {personality.name, *personality.legacy_names}
+
+
+def all_agent_author_names() -> set:
+    names: set = set()
+    for personality in PERSONALITIES:
+        names |= author_names_for(personality)
+    return names
 
 
 def specialists_public() -> List[dict]:
@@ -169,7 +207,9 @@ def specialists_public() -> List[dict]:
             "id": p.id,
             "name": p.name,
             "mention": p.mention,
+            "aliases": list(p.aliases),
+            "legacy_names": list(p.legacy_names),
             "role": p.role,
         }
-        for p in sorted(PERSONALITIES, key=lambda x: x.name)
+        for p in PERSONALITIES
     ]

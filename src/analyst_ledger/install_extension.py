@@ -16,8 +16,11 @@ EXTENSION_FILES = (
     "manifest.json",
     "background.js",
     "content.js",
+    "bridge.js",
     "popup.html",
     "popup.js",
+    "picker.html",
+    "picker.js",
 )
 
 
@@ -47,15 +50,17 @@ def stage_yahoo_extension(*, dest: Optional[Path] = None) -> Path:
     readme.write_text(
         "\n".join(
             [
-                "Analyst Ledger — Yahoo Finance Chrome extension",
+                "Analyst Ledger / Flyleaf — Capture Chrome extension",
                 "",
                 "1. Open Chrome → chrome://extensions",
                 "2. Turn on Developer mode (top right)",
                 "3. Click Load unpacked",
                 f"4. Choose this folder: {out}",
-                "5. Keep the Analyst Ledger dashboard running (http://127.0.0.1:8788/)",
-                "6. Open https://finance.yahoo.com/quote/TSM and click the extension → Capture",
+                "5. Sign in at https://levin.fly.dev (Capture posts there by default)",
+                "6. On Tracking, click Start tracking — a tab picker opens to select tabs",
+                "7. Browse research sites; visits show up under Tracking → Recent events",
                 "",
+                "If Capture shows as not connected: reload the extension, refresh Flyleaf.",
                 "Chrome does not allow one-click install for private local extensions.",
                 "Load unpacked once; after that it stays installed.",
                 "",

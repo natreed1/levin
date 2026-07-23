@@ -799,3 +799,31 @@ class MessageStore:
             finally:
                 conn.close()
         return count
+
+    def delete_room(self, room_id: str) -> bool:
+        """Permanently remove a room, its members, and messages.
+
+        Refuses the built-in ``legacy`` room. Returns False if the room
+        does not exist (or is legacy).
+        """
+        if room_id == "legacy":
+            return False
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM rooms WHERE room_id = ?",
+                    (room_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+                conn.execute(
+                    "DELETE FROM room_members WHERE room_id = ?",
+                    (room_id,),
+                )
+                conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        return True

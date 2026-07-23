@@ -1,13 +1,15 @@
 """Per-user model profiles (frontier + open-source) with durable pipeline routes.
 
 Each Workflow account stores their own credentials. Specialists / @mentions
-use the room owner's *active* profile — never a shared operator machine.
+use the room owner's active profile (or a per-room ``model_profile_id``
+override) — never a shared operator machine.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -732,9 +734,19 @@ class ModelLinkRegistry:
             "is_local": bool(entry.get("is_local")),
         }
 
-    def endpoint_for_call(self, user_id: str) -> Optional[dict[str, str]]:
-        """Shape expected by analyst_ledger.synthesize.use_llm_endpoint."""
-        profile = self.active_profile(user_id)
+    def endpoint_for_call(
+        self, user_id: str, profile_id: Optional[str] = None
+    ) -> Optional[dict[str, str]]:
+        """Shape expected by analyst_ledger.synthesize.use_llm_endpoint.
+
+        When ``profile_id`` is set (e.g. per-room model toggle), use that profile
+        instead of the account active model.
+        """
+        profile = (
+            self.get_profile(user_id, profile_id)
+            if profile_id
+            else self.active_profile(user_id)
+        )
         if not profile:
             return None
         provider = str(profile.get("provider") or "ollama")
@@ -848,17 +860,57 @@ class ModelLinkRegistry:
         url = str(base_url or "").rstrip("/")
         if not url:
             raise RuntimeError("missing base_url")
-        req = urllib.request.Request(
-            f"{url}/models",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "ngrok-skip-browser-warning": "1",
-            },
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8") or "{}")
-        return [m.get("id") for m in (body.get("data") or []) if isinstance(m, dict)]
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "ngrok-skip-browser-warning": "1",
+            "Accept": "application/json",
+        }
+        models_url = f"{url}/models"
+        try:
+            req = urllib.request.Request(models_url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+            return [m.get("id") for m in (body.get("data") or []) if isinstance(m, dict)]
+        except Exception as primary:
+            # Some trycloudflare quick tunnels publish AAAA-only; macOS often has
+            # no IPv6 route. Probe via Cloudflare anycast IPv4 + SNI/Host.
+            from urllib.parse import urlparse
+            import http.client
+            import ssl
+
+            parsed = urlparse(models_url)
+            host = parsed.hostname or ""
+            if "trycloudflare.com" not in host:
+                raise primary
+            path = parsed.path or "/models"
+            hdrs = dict(headers)
+            hdrs["Host"] = host
+            ctx = ssl.create_default_context()
+            last_exc: Exception = primary
+            for ip in ("104.16.230.132", "104.16.231.132", "104.19.140.88"):
+                try:
+                    sock = socket.create_connection((ip, 443), timeout=timeout)
+                    ssock = ctx.wrap_socket(sock, server_hostname=host)
+                    conn = http.client.HTTPSConnection(ip, 443, timeout=timeout)
+                    conn.sock = ssock
+                    conn.request("GET", path, headers=hdrs)
+                    resp = conn.getresponse()
+                    raw = resp.read().decode("utf-8") or "{}"
+                    status = resp.status
+                    conn.close()
+                    if status >= 400:
+                        last_exc = RuntimeError(f"HTTP {status}")
+                        continue
+                    body = json.loads(raw)
+                    return [
+                        m.get("id")
+                        for m in (body.get("data") or [])
+                        if isinstance(m, dict)
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    continue
+            raise last_exc
 
     @staticmethod
     def _probe_anthropic(api_key: str, *, timeout: float) -> list[str]:

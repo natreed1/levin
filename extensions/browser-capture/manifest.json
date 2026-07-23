@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Analyst Ledger Capture",
-  "version": "0.5.0",
-  "description": "Capture research browsing to Workflow/Analyst Ledger. Honors Tracking capture scope (active/all/selected tabs).",
+  "version": "0.6.0",
+  "description": "Capture research browsing into Flyleaf Tracking. Honors Active / All / Selected tab scopes.",
   "permissions": ["storage", "tabs", "webNavigation"],
   "host_permissions": [
-    "http://127.0.0.1:8788/*",
-    "http://localhost:8788/*",
+    "https://levin.fly.dev/*",
     "http://127.0.0.1:8790/*",
     "http://localhost:8790/*",
+    "http://127.0.0.1:8788/*",
+    "http://localhost:8788/*",
     "https://finance.yahoo.com/*",
     "https://*.finance.yahoo.com/*",
     "https://*/*",
@@ -19,6 +20,15 @@
   },
   "content_scripts": [
     {
+      "matches": [
+        "https://levin.fly.dev/*",
+        "http://127.0.0.1:8790/*",
+        "http://localhost:8790/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    },
+    {
       "matches": ["https://finance.yahoo.com/*", "https://*.finance.yahoo.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
@@ -27,5 +37,11 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "Analyst Ledger Capture"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["picker.html", "picker.js"],
+      "matches": ["https://levin.fly.dev/*", "http://127.0.0.1:8790/*", "http://localhost:8790/*"]
+    }
+  ]
 }

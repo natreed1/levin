@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Select tabs · Flyleaf Capture</title>
+  <style>
+    body {
+      font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #0e1116;
+      color: #e8eef7;
+      max-width: 640px;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 0.35rem; }
+    p { color: #8b9bb4; font-size: 0.9rem; margin: 0 0 1rem; line-height: 1.4; }
+    .meta {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      margin-bottom: 1rem; font-size: 0.85rem; color: #8b9bb4;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7a8a; }
+    .dot.on { background: #34d399; }
+    .panel {
+      background: #161b22; border: 1px solid #2a3344; border-radius: 12px;
+      padding: 8px 12px; max-height: 60vh; overflow: auto;
+    }
+    .row {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 10px 4px; border-bottom: 1px solid #2a3344; font-size: 0.92rem;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row label { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; width: 100%; }
+    .row input { margin-top: 3px; }
+    .host { font-weight: 600; }
+    .title { color: #8b9bb4; font-size: 0.85rem; word-break: break-word; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 1rem; }
+    button {
+      font: inherit; border: 0; border-radius: 8px; padding: 10px 14px;
+      background: #3d9cf0; color: #0e1116; font-weight: 600; cursor: pointer;
+    }
+    button.secondary { background: #1c2330; color: #e8eef7; border: 1px solid #2a3344; }
+    #status { margin-top: 12px; font-size: 0.9rem; min-height: 1.3em; }
+    .ok { color: #34d399; }
+    .err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>Select tabs to track</h1>
+  <p>Checked tabs are included when Tracking scope is <strong>Selected tabs</strong>. Other scopes still capture according to the session you started on Flyleaf.</p>
+  <div class="meta">
+    <span class="dot" id="scopeDot"></span>
+    <span id="scopeState">Checking session…</span>
+  </div>
+  <div class="panel" id="tabList"><div class="title">Loading tabs…</div></div>
+  <div class="actions">
+    <button type="button" id="refresh">Refresh</button>
+    <button type="button" class="secondary" id="selectAll">Select all</button>
+    <button type="button" class="secondary" id="clear">Clear</button>
+    <button type="button" class="secondary" id="done">Done</button>
+  </div>
+  <div id="status"></div>
+  <script src="picker.js"></script>
+</body>
+</html>

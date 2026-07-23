@@ -780,6 +780,9 @@ def approve_spec(ritual_id: str) -> Dict[str, Any]:
     spec = load_spec(ritual_id)
     spec["approved"] = True
     spec["approved_at"] = utc_now_iso()
+    # Approve means "ready to run" — drafts (esp. /automate) start disabled so
+    # approving is the gate that turns the loop on. User can disable later.
+    spec["enabled"] = True
     path = ritual_specs_dir() / f"{ritual_id}.json"
     path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
     return spec
