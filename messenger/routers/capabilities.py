@@ -1,4 +1,4 @@
-"""Capabilities catalog API (layer 1)."""
+"""Capabilities catalog API (layer 1) — registry SoR."""
 
 from __future__ import annotations
 
@@ -19,10 +19,16 @@ def _jobs(request: Request) -> Any:
 
 @router.get("")
 def list_capabilities(user: dict[str, Any] = Depends(current_user)) -> JSONResponse:
-    from messenger.layer_catalog import list_capabilities as catalog
+    from analyst_ledger.registry import list_capabilities_public
 
     with user_context(user["user_id"]) as ledger:
-        return JSONResponse({"ok": True, "capabilities": catalog(ledger)})
+        return JSONResponse(
+            {
+                "ok": True,
+                "capabilities": list_capabilities_public(ledger=ledger),
+                "source": "registry",
+            }
+        )
 
 
 @router.post("/{action}")
@@ -40,7 +46,6 @@ async def capability_action(
         body = {}
     if not isinstance(body, dict):
         body = {}
-    # Accept capability id aliases from the new UI.
     if "ritual_id" not in body and body.get("capability_id"):
         body = {**body, "ritual_id": body["capability_id"]}
     try:

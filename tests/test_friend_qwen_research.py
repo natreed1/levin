@@ -548,7 +548,7 @@ def test_agent_hooks_research_path_posts_ack_and_reply(monkeypatch):
             return {"config": {"model_profile_id": "claude-1"}}
 
         def list_messages(self, limit=200, room_id="legacy"):
-            return [{"author": "Nat", "body": "@Bullish look up NVDA news"}]
+            return [{"author": "Nat", "body": "@Analyst look up NVDA news"}]
 
     monkeypatch.setattr(
         hooks,
@@ -581,14 +581,14 @@ def test_agent_hooks_research_path_posts_ack_and_reply(monkeypatch):
         None,
         "room1",
         "Nat",
-        "@Bullish look up NVDA news",
+        "@Analyst look up NVDA news",
         owner_user_id="owner1",
         loop=None,
     )
     bodies = [p["body"] for p in posted]
     assert any("researching" in b.lower() for b in bodies)
     assert any("example.com/nvda" in b for b in bodies)
-    assert PERSONALITIES_BY_ID["qwen-bull"].name in {p["author"] for p in posted}
+    assert PERSONALITIES_BY_ID["qwen"].name in {p["author"] for p in posted}
 
 
 def test_compose_research_routes_to_anthropic_not_local(monkeypatch, tmp_path):

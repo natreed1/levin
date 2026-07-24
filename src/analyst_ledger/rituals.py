@@ -785,6 +785,37 @@ def approve_spec(ritual_id: str) -> Dict[str, Any]:
     spec["enabled"] = True
     path = ritual_specs_dir() / f"{ritual_id}.json"
     path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    try:
+        from .registry import Capability, save_user_capability
+
+        steps = []
+        for step in spec.get("steps") or []:
+            if isinstance(step, dict) and step:
+                steps.append(str(next(iter(step))))
+        save_user_capability(
+            Capability(
+                id=ritual_id,
+                name=ritual_id.replace("_", " "),
+                kind="user",
+                summary=str(spec.get("description") or "")[:240]
+                or f"Approved automation {ritual_id}",
+                invoke=f"@workflow {ritual_id}",
+                schedulable=bool(spec.get("schedule") or spec.get("runner")),
+                needs_model=bool(spec.get("model")),
+                runner=spec.get("runner"),
+                approved=True,
+                enabled=True,
+                status="approved",
+                ritual_id=ritual_id,
+                proposed_by=spec.get("proposed_by"),
+                schedule=spec.get("schedule"),
+                steps=tuple(spec.get("capability_ids") or steps),
+                watchlist=tuple(spec.get("watchlist") or []),
+                model=spec.get("model"),
+            )
+        )
+    except Exception:
+        pass
     return spec
 
 

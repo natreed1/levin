@@ -773,9 +773,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/specialists")
     def specialists_list() -> JSONResponse:
-        from messenger.specialist_room import list_specialists
+        """Room palette — same Agent registry as the Agents tab."""
+        from analyst_ledger.registry import list_room_palette_public
 
-        return JSONResponse({"ok": True, "specialists": list_specialists()})
+        return JSONResponse(
+            {"ok": True, "specialists": list_room_palette_public(), "source": "registry"}
+        )
 
     def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
         room = store.room(room_id)

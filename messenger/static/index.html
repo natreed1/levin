@@ -6,7 +6,10 @@
   <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/style.css?v=35" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=36" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -263,7 +266,7 @@
             <button type="button" id="refresh-caps-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Things the system can do. Drafts need your approval. Agents and automations call these — they are not agents themselves.</p>
+        <p class="sub muted">Registry verbs — built-ins (including Web research) plus drafts you approve. Agents and automations call these by id.</p>
         <nav class="flow-rail" aria-label="How this fits together">
           <span class="flow-rail-step done">1. Capability</span>
           <span class="flow-rail-sep">→</span>
@@ -316,7 +319,7 @@
             <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Agents are not capabilities. <strong>Lenses</strong> only change the prompt (Bullish, Contrarian). <strong>Operators</strong> can call capabilities (Analyst research, Master router).</p>
+        <p class="sub muted">Same registry as the room Specialists rail. <strong>Lenses</strong> only change the prompt (Bullish, Contrarian). <strong>Operators</strong> own capabilities (Analyst → Web research).</p>
         <nav class="flow-rail" aria-label="How this fits together">
           <span class="flow-rail-step">1. Capability</span>
           <span class="flow-rail-sep">→</span>
@@ -785,6 +788,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=40"></script>
+  <script src="/static/app.js?v=41"></script>
 </body>
 </html>

@@ -156,8 +156,13 @@ def _reply_qwen(
     wants_research = False
     try:
         from analyst_ledger.friend_qwen import _is_research_request
+        from analyst_ledger.registry import agent_has_capability, get_capability
 
         wants_research = bool(_is_research_request(text))
+        # Research is the web_research capability — only agents that own it
+        # (e.g. Analyst) may run it. Lenses like Bullish stay prompt-only.
+        if wants_research and get_capability("web_research") is None:
+            wants_research = False
     except Exception:
         wants_research = False
 
@@ -259,7 +264,15 @@ def _reply_qwen(
             return _unavailable(exc)
 
     for personality in personalities:
-        if wants_research:
+        do_research = wants_research
+        if do_research:
+            try:
+                from analyst_ledger.registry import agent_has_capability
+
+                do_research = agent_has_capability(personality.id, "web_research")
+            except Exception:
+                do_research = personality.id == "qwen"
+        if do_research:
             ack = store.add_message(
                 author=personality.name,
                 body="On it — researching…",
@@ -268,8 +281,8 @@ def _reply_qwen(
             _broadcast(hub, loop, room_id, {"type": "message", "message": ack})
 
         reply = (
-            _one(personality, ep=endpoint, research=wants_research)
-            if (call_chat_messages is not None or wants_research)
+            _one(personality, ep=endpoint, research=do_research)
+            if (call_chat_messages is not None or do_research)
             else ""
         )
         if not reply:

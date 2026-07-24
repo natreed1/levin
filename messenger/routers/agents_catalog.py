@@ -1,4 +1,4 @@
-"""Agents catalog API (layer 2) — lenses vs operators."""
+"""Agents catalog API (layer 2) — registry SoR."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 @router.get("")
 def list_agents_catalog() -> JSONResponse:
-    from messenger.layer_catalog import list_agents_catalog as catalog
+    from analyst_ledger.registry import list_agents_public
 
     return JSONResponse(
         {
             "ok": True,
-            "agents": catalog(),
+            "agents": list_agents_public(),
+            "source": "registry",
             "layers": {
                 "capabilities": "Reusable verbs (built-in or mined).",
                 "agents": "How rooms use capabilities — lenses are prompts; operators call verbs.",

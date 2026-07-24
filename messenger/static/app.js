@@ -487,7 +487,7 @@
         ? `${compute.local ? "Local" : "API"} · ${compute.label || compute.model}`
         : (entry.thread?.master ? "Private room" : "Ongoing room");
       btn.innerHTML = `
-        <span class="room-name"><span class="room-icon">#</span>${escapeHtml(entry.title || entry.id)}</span>
+        <span class="room-name"><span class="room-icon">#</span><span class="room-title">${escapeHtml(entry.title || entry.id)}</span></span>
         <span class="meta">${escapeHtml(meta)}</span>
         ${agents.length ? `<span class="room-agents" aria-label="${agents.length} agents">${agents.map(() => '<i class="room-agent-dot"></i>').join("")}</span>` : ""}
       `;
@@ -520,8 +520,12 @@
       li.className = "agent-card";
       li.draggable = true;
       li.dataset.agentId = agent.id;
-      li.title = `${agent.name} — click to add to the open room, or drag onto a room`;
-      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}</span>`;
+      const kind = agent.kind === "operator" ? "operator" : "lens";
+      li.title = `${agent.name} (${kind}) — click to add to the open room, or drag onto a room`;
+      const caps = (agent.capabilities || []).length
+        ? ` · ${(agent.capabilities || []).slice(0, 2).join(", ")}`
+        : " · prompt only";
+      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}${escapeHtml(caps)}</span>`;
       li.addEventListener("dragstart", (event) => {
         event.dataTransfer.effectAllowed = "copy";
         event.dataTransfer.setData("application/x-workflow-agent", agent.id);

@@ -1,8 +1,8 @@
 """Named specialist personalities for People / specialist rooms.
 
-Display names and @mentions are role/prompt identities — not model brands.
-Which model runs (Claude, GPT, local open-source) is chosen in Settings or
-per-room via the model toggle.
+SoR is ``analyst_ledger.registry.Agent``. This module adapts registry agents
+into ``FriendPersonality`` for mention matching and room orchestration.
+Which model runs is chosen in Settings or per-room via the model toggle.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
+
+from .registry import get_agent, list_agents, list_room_palette_public
 
 
 @dataclass(frozen=True)
@@ -21,85 +23,38 @@ class FriendPersonality:
     prompt: str
     role: str = "analyst"  # analyst | bull | bear | synthesizer
     aliases: Tuple[str, ...] = field(default_factory=tuple)
-    # Historical message authors still treated as this agent.
     legacy_names: Tuple[str, ...] = field(default_factory=tuple)
 
 
-_PERSONALITY_DEFS = (
-    FriendPersonality(
-        id="qwen",
-        name="Analyst",
-        mention="@Analyst",
-        aliases=("@Qwen",),
-        legacy_names=("Qwen",),
-        cookie_key="qwen",
-        role="analyst",
-        prompt=(
-            "Your role is an evidence-led balanced analyst. Answer directly, separate "
-            "verified facts from inference, present the strongest credible bull and "
-            "bear considerations, and name the evidence needed to resolve uncertainty. "
-            "Correct stale premises explicitly. Never invent a fact, date, number, "
-            "source, product, or company initiative."
-        ),
-    ),
-    FriendPersonality(
-        id="qwen-bull",
-        name="Bullish Agent",
-        mention="@Bullish",
-        aliases=("@Qwen-Bull", "@Bull"),
-        legacy_names=("Qwen Bull",),
-        cookie_key="qwen-bull",
-        role="bull",
-        prompt=(
-            "Your role is the constructive bull case specialist. Steelman the upside: "
-            "name the specific thesis, the mechanism that creates value, and the "
-            "evidence that would confirm it. Acknowledge the strongest bear risk in "
-            "one sentence, then return to what would make the bull case right. Never "
-            "invent a fact, date, number, source, product, or company initiative."
-        ),
-    ),
-    FriendPersonality(
-        id="qwen-contrarian",
-        name="Contrarian Agent",
-        mention="@Contrarian",
-        aliases=("@Qwen-Contrarian",),
-        legacy_names=("Qwen Contrarian",),
-        cookie_key="qwen-contrarian",
-        role="bear",
-        prompt=(
-            "Your role is the evidence-led contrarian. Identify the specific claim "
-            "you are challenging, distinguish verified facts from inference, expose "
-            "the strongest overlooked downside or incentive, and give a concrete "
-            "falsification test that names evidence capable of disproving your caution. "
-            "If the caution is a logical limit of the available evidence rather than "
-            "an empirical claim, say it cannot be falsified from that same evidence "
-            "and name the additional evidence that would resolve the uncertainty. "
-            "Never compare quantities with different units or unrelated periods. Do "
-            "not disagree merely for style. Concede claims that survive scrutiny, "
-            "state uncertainty, and never invent a fact, date, number, source, "
-            "product, or company initiative."
-        ),
-    ),
-    FriendPersonality(
-        id="qwen-synthesizer",
-        name="Synthesizer Agent",
-        mention="@Synthesizer",
-        aliases=("@Qwen-Synthesizer",),
-        legacy_names=("Qwen Synthesizer",),
-        cookie_key="qwen-synthesizer",
-        role="synthesizer",
-        prompt=(
-            "Your role is the synthesizer. After hearing multiple specialist views, "
-            "extract shared facts, name the real disagreement, and propose 2–4 "
-            "concrete research ideas or next checks that would move the debate. "
-            "Prefer falsifiable questions over opinions. Never invent a fact, date, "
-            "number, source, product, or company initiative."
-        ),
-    ),
-)
+def _personality_from_agent(agent_id: str) -> Optional[FriendPersonality]:
+    agent = get_agent(agent_id)
+    if agent is None or not agent.prompt:
+        return None
+    return FriendPersonality(
+        id=agent.id,
+        name=agent.name,
+        mention=agent.mention,
+        cookie_key=agent.cookie_key or agent.id,
+        prompt=agent.prompt,
+        role=agent.role,
+        aliases=tuple(agent.aliases),
+        legacy_names=tuple(agent.legacy_names),
+    )
+
+
+def _build_personalities() -> Tuple[FriendPersonality, ...]:
+    out: List[FriendPersonality] = []
+    for agent in list_agents():
+        if not agent.room_palette or not agent.prompt:
+            continue
+        p = _personality_from_agent(agent.id)
+        if p is not None:
+            out.append(p)
+    return tuple(out)
+
 
 # Stable public order (tests / UI). Mention matching uses longest-first separately.
-PERSONALITIES = _PERSONALITY_DEFS
+PERSONALITIES = _build_personalities()
 PERSONALITIES_BY_ID = {personality.id: personality for personality in PERSONALITIES}
 DEFAULT_PERSONALITY = PERSONALITIES_BY_ID["qwen"]
 
@@ -202,14 +157,5 @@ def all_agent_author_names() -> set:
 
 
 def specialists_public() -> List[dict]:
-    return [
-        {
-            "id": p.id,
-            "name": p.name,
-            "mention": p.mention,
-            "aliases": list(p.aliases),
-            "legacy_names": list(p.legacy_names),
-            "role": p.role,
-        }
-        for p in PERSONALITIES
-    ]
+    """Room palette — same registry SoR as the Agents tab."""
+    return list_room_palette_public()
