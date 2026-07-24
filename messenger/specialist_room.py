@@ -385,11 +385,23 @@ def run_specialist_action(
         rounds_n = max(1, min(rounds_n, MAX_FIXED_ROUNDS))
 
     room_id = room["room_id"]
-    specialists = _room_specialists(room)
+    if owner_user_id:
+        from messenger.tenancy import user_context
+
+        with user_context(owner_user_id):
+            specialists = _room_specialists(room)
+    else:
+        specialists = _room_specialists(room)
     if len(specialists) < 2 and action != "present":
         raise ValueError("Specialist rooms need at least two specialists for debate/idea")
     if not specialists:
-        specialists = resolve_specialists(None)
+        if owner_user_id:
+            from messenger.tenancy import user_context
+
+            with user_context(owner_user_id):
+                specialists = resolve_specialists(None)
+        else:
+            specialists = resolve_specialists(None)
 
     topic = " ".join(str(topic or "").split())[:400]
     brief = _recent_work_brief(owner_user_id)

@@ -2,15 +2,41 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from messenger.deps import current_user
+from messenger.deps import current_user, get_store
+from messenger.db import MessageStore
 from messenger.tenancy import user_context
 
 router = APIRouter(prefix="/api/registry", tags=["registry"])
+
+
+def _scrub_agents_from_rooms(
+    store: MessageStore, user_id: str, agent_ids: Sequence[str]
+) -> int:
+    """Remove deleted agent ids from rooms this user owns or belongs to."""
+    wanted = {str(a).strip() for a in agent_ids if str(a).strip()}
+    if not wanted:
+        return 0
+    touched = 0
+    for room in store.list_rooms_for_user(user_id):
+        config = dict(room.get("config") or {})
+        agents = [
+            str(a)
+            for a in (config.get("agents") or config.get("specialists") or [])
+            if str(a).strip()
+        ]
+        kept = [a for a in agents if a not in wanted]
+        if kept == agents:
+            continue
+        config["agents"] = kept
+        config["specialists"] = kept
+        store.update_room_config(room["room_id"], config)
+        touched += 1
+    return touched
 
 
 @router.get("/lenses")
@@ -89,6 +115,7 @@ def get_agents(user: dict[str, Any] = Depends(current_user)) -> JSONResponse:
 async def delete_many_agents(
     request: Request,
     user: dict[str, Any] = Depends(current_user),
+    store: MessageStore = Depends(get_store),
 ) -> JSONResponse:
     from analyst_ledger.registry import delete_user_agents
 
@@ -101,7 +128,10 @@ async def delete_many_agents(
         return JSONResponse({"ok": False, "error": "ids_required"}, status_code=400)
     with user_context(user["user_id"]):
         deleted = delete_user_agents(ids)
-    return JSONResponse({"ok": True, "deleted": deleted})
+    rooms_touched = _scrub_agents_from_rooms(store, user["user_id"], deleted)
+    return JSONResponse(
+        {"ok": True, "deleted": deleted, "rooms_updated": rooms_touched}
+    )
 
 
 @router.get("/agents/{agent_id}")
@@ -188,6 +218,7 @@ async def patch_agent(
 def delete_one_agent(
     agent_id: str,
     user: dict[str, Any] = Depends(current_user),
+    store: MessageStore = Depends(get_store),
 ) -> JSONResponse:
     from analyst_ledger.registry import delete_user_agents
 
@@ -197,4 +228,7 @@ def delete_one_agent(
         return JSONResponse(
             {"ok": False, "error": "not_found_or_builtin"}, status_code=404
         )
-    return JSONResponse({"ok": True, "deleted": deleted})
+    rooms_touched = _scrub_agents_from_rooms(store, user["user_id"], deleted)
+    return JSONResponse(
+        {"ok": True, "deleted": deleted, "rooms_updated": rooms_touched}
+    )

@@ -230,3 +230,45 @@ def test_registry_agent_update_and_bulk_delete(
     ids = {a["id"] for a in listing.json()["agents"]}
     assert id1 not in ids and id2 not in ids
     assert "qwen-bull" in ids
+
+
+def test_autonomy_resolves_custom_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="loop@example.com")
+
+    a1 = client.post(
+        "/api/registry/agents",
+        json={"name": "Loop Alpha", "prompt": "Argue up.", "capability_ids": []},
+    )
+    a2 = client.post(
+        "/api/registry/agents",
+        json={"name": "Loop Beta", "prompt": "Argue down.", "capability_ids": []},
+    )
+    assert a1.status_code == 200 and a2.status_code == 200
+    id1, id2 = a1.json()["agent"]["id"], a2.json()["agent"]["id"]
+
+    room = client.post("/api/rooms", json={"title": "Loop room", "name": "Layers"})
+    room_id = room.json()["room_id"]
+    assert client.post(f"/api/rooms/{room_id}/agents", json={"agent_id": id1}).status_code == 200
+    assert client.post(f"/api/rooms/{room_id}/agents", json={"agent_id": id2}).status_code == 200
+    client.patch(
+        f"/api/rooms/{room_id}/config",
+        json={"objective": "Debate ticker risk"},
+    )
+    auto = client.post(
+        f"/api/rooms/{room_id}/autonomy",
+        json={"enabled": True, "stub": True},
+    )
+    assert auto.status_code == 200, auto.text
+    assert auto.json()["autonomy"]["enabled"] is True
+    import time
+
+    time.sleep(1.2)
+    client.post(f"/api/rooms/{room_id}/autonomy", json={"enabled": False})
+    msgs = client.get(f"/api/messages?room_id={room_id}&limit=40")
+    authors = {m["author"] for m in msgs.json().get("messages") or []}
+    assert "Loop Alpha" in authors or "Loop Beta" in authors
+    bodies = "\n".join(m.get("body") or "" for m in msgs.json().get("messages") or [])
+    assert "failed" not in bodies.lower()
