@@ -190,3 +190,43 @@ def test_registry_studio_compose_and_room_objective(
     )
     assert stop.status_code == 200, stop.text
     assert stop.json()["autonomy"]["enabled"] is False
+
+
+def test_registry_agent_update_and_bulk_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="bulk@example.com")
+
+    a1 = client.post(
+        "/api/registry/agents",
+        json={"name": "Alpha scout", "prompt": "Be brief.", "lens_ids": [], "capability_ids": []},
+    )
+    assert a1.status_code == 200, a1.text
+    id1 = a1.json()["agent"]["id"]
+    a2 = client.post(
+        "/api/registry/agents",
+        json={"name": "Beta scout", "prompt": "Be skeptical.", "capability_ids": ["web_research"]},
+    )
+    assert a2.status_code == 200, a2.text
+    id2 = a2.json()["agent"]["id"]
+
+    patched = client.patch(
+        f"/api/registry/agents/{id1}",
+        json={"name": "Alpha revised", "capability_ids": ["note_digest"], "prompt": "Revised."},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["agent"]["name"] == "Alpha revised"
+    assert "note_digest" in patched.json()["agent"]["capabilities"]
+
+    builtin = client.delete("/api/registry/agents/qwen-bull")
+    assert builtin.status_code == 404
+
+    deleted = client.post("/api/registry/agents/delete", json={"ids": [id1, id2, "qwen-bull"]})
+    assert deleted.status_code == 200, deleted.text
+    assert set(deleted.json()["deleted"]) == {id1, id2}
+
+    listing = client.get("/api/registry/agents")
+    ids = {a["id"] for a in listing.json()["agents"]}
+    assert id1 not in ids and id2 not in ids
+    assert "qwen-bull" in ids

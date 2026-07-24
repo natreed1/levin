@@ -170,6 +170,26 @@
   margin: 0.5rem var(--page-pad) 0.35rem;
 }
 .studio-section-head .section-title { margin: 0; }
+.studio-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.studio-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-right: 0.25rem;
+}
+.studio-card-check {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
 .autonomy-toggle {
   display: inline-flex;
   align-items: center;

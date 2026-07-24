@@ -76,6 +76,8 @@ class Agent:
     model: str = "room or Settings active profile"
     # Show in room Specialists palette / drag-drop.
     room_palette: bool = True
+    # Lenses used when composing (custom agents only).
+    lens_ids: Tuple[str, ...] = ()
 
     def to_public(self) -> Dict[str, Any]:
         return {
@@ -90,6 +92,7 @@ class Agent:
             "summary": self.summary,
             "how": self.how,
             "capabilities": list(self.capabilities),
+            "lens_ids": list(self.lens_ids),
             "model": self.model,
             "room_palette": self.room_palette,
             "uses_capabilities": bool(self.capabilities),
@@ -704,9 +707,40 @@ def _load_user_agents() -> List[Agent]:
                 summary=str(row.get("summary") or "Custom agent composed in the Agents studio."),
                 how="Composed from lenses + capabilities in the studio.",
                 room_palette=bool(row.get("room_palette", True)),
+                lens_ids=lens_ids,
             )
         )
     return out
+
+
+def _builtin_agent_ids() -> set:
+    return {a.id for a in _BUILTIN_AGENTS}
+
+
+def _read_user_agent_rows() -> Dict[str, Dict[str, Any]]:
+    path = _user_agents_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    rows = raw if isinstance(raw, list) else raw.get("agents") or []
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("id"):
+            out[str(row["id"])] = row
+    return out
+
+
+def _write_user_agent_rows(rows: Dict[str, Dict[str, Any]]) -> None:
+    path = _user_agents_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"agents": list(rows.values())}, indent=2), encoding="utf-8")
+
+
+def is_user_composed_agent(agent_id: str) -> bool:
+    return str(agent_id or "") in _read_user_agent_rows()
 
 
 def list_agents() -> List[Agent]:
@@ -747,6 +781,8 @@ def known_agent_ids() -> set:
 
 def list_agents_public() -> List[Dict[str, Any]]:
     by_cap = {c.id: c for c in list_capabilities()}
+    builtin = _builtin_agent_ids()
+    user_ids = set(_read_user_agent_rows())
     rows: List[Dict[str, Any]] = []
     for agent in list_agents():
         pub = agent.to_public()
@@ -754,11 +790,29 @@ def list_agents_public() -> List[Dict[str, Any]]:
             {"id": cid, "name": (by_cap[cid].name if cid in by_cap else cid)}
             for cid in agent.capabilities
         ]
-        pub["composed"] = agent.id not in {a.id for a in _BUILTIN_AGENTS}
+        pub["composed"] = agent.id not in builtin
+        pub["editable"] = agent.id in user_ids
         # Keep prompt off the catalog list (builder fetches detail if needed).
         pub.pop("prompt", None)
         rows.append(pub)
     return rows
+
+
+def get_agent_public(agent_id: str, *, include_prompt: bool = False) -> Optional[Dict[str, Any]]:
+    agent = get_agent(agent_id)
+    if agent is None:
+        return None
+    by_cap = {c.id: c for c in list_capabilities()}
+    pub = agent.to_public()
+    pub["capability_details"] = [
+        {"id": cid, "name": (by_cap[cid].name if cid in by_cap else cid)}
+        for cid in agent.capabilities
+    ]
+    pub["composed"] = agent.id not in _builtin_agent_ids()
+    pub["editable"] = is_user_composed_agent(agent.id)
+    if not include_prompt:
+        pub.pop("prompt", None)
+    return pub
 
 
 def list_room_palette_public() -> List[Dict[str, Any]]:
@@ -835,18 +889,9 @@ def create_composed_agent(
         or f"Composed agent ({len(lenses)} lenses, {len(caps)} capabilities).",
         how="Composed in Agents studio from lenses + capabilities.",
         room_palette=True,
+        lens_ids=tuple(lenses),
     )
-    existing = {}
-    path = _user_agents_path()
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            rows = raw if isinstance(raw, list) else raw.get("agents") or []
-            for row in rows:
-                if isinstance(row, dict) and row.get("id"):
-                    existing[str(row["id"])] = row
-        except (OSError, json.JSONDecodeError):
-            existing = {}
+    existing = _read_user_agent_rows()
     existing[agent.id] = {
         "id": agent.id,
         "name": agent.name,
@@ -859,8 +904,91 @@ def create_composed_agent(
         "room_palette": True,
         "kind": agent.kind,
     }
-    path.write_text(json.dumps({"agents": list(existing.values())}, indent=2), encoding="utf-8")
+    _write_user_agent_rows(existing)
     return agent
+
+
+def update_composed_agent(
+    agent_id: str,
+    *,
+    name: Optional[str] = None,
+    lens_ids: Optional[Sequence[str]] = None,
+    capability_ids: Optional[Sequence[str]] = None,
+    prompt: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> Agent:
+    """Update a user-composed agent (builtins are immutable)."""
+    aid = (agent_id or "").strip()
+    rows = _read_user_agent_rows()
+    if aid not in rows:
+        raise ValueError("agent_not_editable")
+    row = dict(rows[aid])
+    if name is not None:
+        nm = str(name).strip()
+        if not nm:
+            raise ValueError("name required")
+        row["name"] = nm
+        row["mention"] = f"@{nm.replace(' ', '')}"
+    if lens_ids is not None:
+        lenses = [str(x).strip() for x in lens_ids if str(x).strip()]
+        for lid in lenses:
+            if get_lens(lid) is None and get_agent(lid) is None:
+                raise ValueError(f"unknown lens {lid!r}")
+        row["lens_ids"] = lenses
+    else:
+        lenses = [str(x) for x in (row.get("lens_ids") or [])]
+    if capability_ids is not None:
+        caps = [str(x).strip() for x in capability_ids if str(x).strip()]
+        for cid in caps:
+            if get_capability(cid) is None:
+                raise ValueError(f"unknown capability {cid!r}")
+        row["capability_ids"] = caps
+    else:
+        caps = [str(x) for x in (row.get("capability_ids") or row.get("capabilities") or [])]
+    if prompt is not None:
+        composed_prompt = str(prompt).strip()
+    else:
+        composed_prompt = str(row.get("prompt") or "").strip()
+    if not composed_prompt and lenses:
+        parts = []
+        for lid in lenses:
+            ln = get_lens(lid)
+            if ln and ln.prompt:
+                parts.append(f"[{ln.name}] {ln.prompt}")
+        composed_prompt = "\n\n".join(parts)
+    if not composed_prompt:
+        composed_prompt = (
+            f"You are {row.get('name') or aid}. Follow the room objective and use "
+            "your assigned capabilities when relevant. Never invent facts."
+        )
+    if not lenses and not caps and not composed_prompt:
+        raise ValueError("add at least one lens, capability, or prompt")
+    row["prompt"] = composed_prompt
+    row["kind"] = "operator" if caps else "composed"
+    if summary is not None:
+        row["summary"] = str(summary).strip()[:240]
+    rows[aid] = row
+    _write_user_agent_rows(rows)
+    loaded = get_agent(aid)
+    if loaded is None:
+        raise ValueError("agent_missing_after_update")
+    return loaded
+
+
+def delete_user_agents(agent_ids: Sequence[str]) -> List[str]:
+    """Delete user-composed agents. Returns deleted ids. Builtins are skipped."""
+    wanted = {str(x).strip() for x in agent_ids if str(x).strip()}
+    if not wanted:
+        return []
+    rows = _read_user_agent_rows()
+    deleted: List[str] = []
+    for aid in list(wanted):
+        if aid in rows:
+            del rows[aid]
+            deleted.append(aid)
+    if deleted:
+        _write_user_agent_rows(rows)
+    return deleted
 
 
 def agent_has_capability(agent_id: str, capability_id: str) -> bool:

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=40" />
+  <link rel="stylesheet" href="/static/style.css?v=41" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -235,60 +235,65 @@
             <p id="room-design-error" class="error" hidden></p>
           </form>
         </dialog>
-
-        <dialog id="agent-builder-dialog">
-          <form id="agent-builder-form" method="dialog" class="automate-dialog-form">
-            <h3>New agent</h3>
-            <p class="muted tiny-hint">Drag lenses and capabilities onto the canvas, then save. Assign the agent to rooms from the rail.</p>
-            <label>Name <input id="agent-builder-name" type="text" maxlength="80" required placeholder="e.g. Filings scout" /></label>
-            <div class="builder-layout">
-              <div class="builder-palette">
-                <h4>Lenses</h4>
-                <ul id="builder-lenses" class="builder-chips"></ul>
-                <h4>Capabilities</h4>
-                <ul id="builder-caps" class="builder-chips"></ul>
-              </div>
-              <div class="builder-canvas" id="builder-canvas" data-drop="agent">
-                <p class="muted tiny-hint">Drop here</p>
-                <ul id="builder-dropped" class="builder-dropped"></ul>
-              </div>
-            </div>
-            <div class="dialog-actions">
-              <button type="button" id="agent-builder-cancel" class="ghost">Cancel</button>
-              <button type="submit">Create agent</button>
-            </div>
-            <p id="agent-builder-error" class="error" hidden></p>
-          </form>
-        </dialog>
-
-        <dialog id="lens-new-dialog">
-          <form id="lens-new-form" method="dialog">
-            <h3>New lens</h3>
-            <label>Name <input id="lens-name" type="text" maxlength="80" required /></label>
-            <label>Prompt <textarea id="lens-prompt" rows="5" required placeholder="System prompt / stance…"></textarea></label>
-            <div class="dialog-actions">
-              <button type="button" id="lens-new-cancel" class="ghost">Cancel</button>
-              <button type="submit">Create</button>
-            </div>
-            <p id="lens-new-error" class="error" hidden></p>
-          </form>
-        </dialog>
-
-        <dialog id="cap-new-dialog">
-          <form id="cap-new-form" method="dialog">
-            <h3>New capability</h3>
-            <label>Name <input id="cap-name" type="text" maxlength="80" required /></label>
-            <label>Summary <textarea id="cap-summary" rows="3" required placeholder="What this verb does…"></textarea></label>
-            <div class="dialog-actions">
-              <button type="button" id="cap-new-cancel" class="ghost">Cancel</button>
-              <button type="submit">Create</button>
-            </div>
-            <p id="cap-new-error" class="error" hidden></p>
-          </form>
-        </dialog>
       </section>
 
       <div id="flow-toast" class="flow-toast hidden" role="status"></div>
+
+      <!-- Studio dialogs live outside tab panels so showModal works when Rooms is hidden -->
+      <dialog id="agent-builder-dialog">
+        <form id="agent-builder-form" class="automate-dialog-form">
+          <h3 id="agent-builder-title">New agent</h3>
+          <p class="muted tiny-hint">Click lenses and capabilities to add them (or drag onto the canvas). Assign the agent to rooms from the studio or rail.</p>
+          <label>Name <input id="agent-builder-name" type="text" maxlength="80" required placeholder="e.g. Filings scout" /></label>
+          <label>Extra prompt (optional)
+            <textarea id="agent-builder-prompt" rows="3" maxlength="2000" placeholder="Standing instructions beyond the lenses…"></textarea>
+          </label>
+          <input type="hidden" id="agent-builder-id" value="" />
+          <div class="builder-layout">
+            <div class="builder-palette">
+              <h4>Lenses</h4>
+              <ul id="builder-lenses" class="builder-chips"></ul>
+              <h4>Capabilities</h4>
+              <ul id="builder-caps" class="builder-chips"></ul>
+            </div>
+            <div class="builder-canvas" id="builder-canvas" data-drop="agent">
+              <p class="muted tiny-hint">Canvas — click chips to add, or drop here</p>
+              <ul id="builder-dropped" class="builder-dropped"></ul>
+            </div>
+          </div>
+          <div class="dialog-actions">
+            <button type="button" id="agent-builder-cancel" class="ghost">Cancel</button>
+            <button type="submit" id="agent-builder-save">Create agent</button>
+          </div>
+          <p id="agent-builder-error" class="error" hidden></p>
+        </form>
+      </dialog>
+
+      <dialog id="lens-new-dialog">
+        <form id="lens-new-form">
+          <h3>New lens</h3>
+          <label>Name <input id="lens-name" type="text" maxlength="80" required /></label>
+          <label>Prompt <textarea id="lens-prompt" rows="5" required placeholder="System prompt / stance…"></textarea></label>
+          <div class="dialog-actions">
+            <button type="button" id="lens-new-cancel" class="ghost">Cancel</button>
+            <button type="submit">Create</button>
+          </div>
+          <p id="lens-new-error" class="error" hidden></p>
+        </form>
+      </dialog>
+
+      <dialog id="cap-new-dialog">
+        <form id="cap-new-form">
+          <h3>New capability</h3>
+          <label>Name <input id="cap-name" type="text" maxlength="80" required /></label>
+          <label>Summary <textarea id="cap-summary" rows="3" required placeholder="What this verb does…"></textarea></label>
+          <div class="dialog-actions">
+            <button type="button" id="cap-new-cancel" class="ghost">Cancel</button>
+            <button type="submit">Create</button>
+          </div>
+          <p id="cap-new-error" class="error" hidden></p>
+        </form>
+      </dialog>
 
       <!-- AGENTS STUDIO -->
       <section id="tab-agents" class="tab-panel hidden">
@@ -305,7 +310,14 @@
 
         <div class="studio-section-head">
           <h2 class="section-title">Agents</h2>
-          <button type="button" id="new-agent-btn" class="tiny">New</button>
+          <div class="studio-agent-actions">
+            <label class="studio-select-all muted tiny-hint">
+              <input type="checkbox" id="studio-select-all" /> Select custom
+            </label>
+            <button type="button" id="edit-selected-agent-btn" class="ghost tiny" disabled>Edit</button>
+            <button type="button" id="delete-selected-agents-btn" class="ghost danger tiny" disabled>Delete</button>
+            <button type="button" id="new-agent-btn" class="tiny">New</button>
+          </div>
         </div>
         <div id="studio-agents" class="agent-card-grid"></div>
 
@@ -731,6 +743,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=43"></script>
+  <script src="/static/app.js?v=44"></script>
 </body>
 </html>

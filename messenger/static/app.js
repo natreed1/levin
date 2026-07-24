@@ -1276,6 +1276,7 @@
   // --- Agents studio ---------------------------------------------------------
 
   state.builderDropped = [];
+  state.editingAgentId = null;
 
   function showFlowToast(message, { tab } = {}) {
     const el = $("#flow-toast");
@@ -1285,6 +1286,19 @@
     clearTimeout(showFlowToast._t);
     showFlowToast._t = setTimeout(() => hide(el), 5200);
     if (tab) switchTab(tab);
+  }
+
+  function openStudioDialog(sel) {
+    const dlg = $(sel);
+    if (!dlg?.showModal) {
+      setError("#agents-tab-error", "Dialog unavailable in this browser");
+      return;
+    }
+    try {
+      dlg.showModal();
+    } catch (err) {
+      setError("#agents-tab-error", String(err.message || err));
+    }
   }
 
   async function approveCapability(ritualId) {
@@ -1315,6 +1329,18 @@
     return card;
   }
 
+  function selectedStudioAgentIds() {
+    return $$('#studio-agents input.studio-agent-check:checked').map((el) => el.value);
+  }
+
+  function syncStudioBulkButtons() {
+    const ids = selectedStudioAgentIds();
+    const editBtn = $("#edit-selected-agent-btn");
+    const delBtn = $("#delete-selected-agents-btn");
+    if (editBtn) editBtn.disabled = ids.length !== 1;
+    if (delBtn) delBtn.disabled = ids.length < 1;
+  }
+
   async function loadAgentsStudio() {
     setError("#agents-tab-error", "");
     const [agents, lenses, caps] = await Promise.all([
@@ -1328,11 +1354,10 @@
     if (agentsEl) agentsEl.innerHTML = "";
     if (lensesEl) lensesEl.innerHTML = "";
     if (capsEl) capsEl.innerHTML = "";
+    const selectAll = $("#studio-select-all");
+    if (selectAll) selectAll.checked = false;
 
     (agents.data?.agents || []).forEach((a) => {
-      if (!a.room_palette && a.id === "master") {
-        // still show master as operator
-      }
       const addBtn = document.createElement("button");
       addBtn.type = "button";
       addBtn.className = "tiny";
@@ -1347,16 +1372,40 @@
           switchTab("chats");
         }
       });
-      const caps = (a.capability_details || []).map((c) => c.name || c.id).join(", ") || "prompt only";
+      const actions = [addBtn];
+      if (a.editable) {
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "ghost tiny";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", () => openAgentBuilder(a.id));
+        actions.push(editBtn);
+      }
+      const capsLabel =
+        (a.capability_details || []).map((c) => c.name || c.id).join(", ") || "prompt only";
       const card = studioCard(
         a.name,
         a.kind || "agent",
-        `${a.mention || ""} · ${caps}`,
-        [addBtn]
+        `${a.mention || ""} · ${capsLabel}`,
+        actions
       );
       if (a.kind) card.classList.add(a.kind);
+      card.dataset.agentId = a.id;
+      if (a.editable) {
+        const label = document.createElement("label");
+        label.className = "studio-card-check";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "studio-agent-check";
+        box.value = a.id;
+        box.addEventListener("change", syncStudioBulkButtons);
+        label.appendChild(box);
+        label.appendChild(document.createTextNode(" Select"));
+        card.insertBefore(label, card.firstChild);
+      }
       agentsEl?.appendChild(card);
     });
+    syncStudioBulkButtons();
 
     (lenses.data?.lenses || []).forEach((ln) => {
       lensesEl?.appendChild(
@@ -1380,40 +1429,16 @@
     });
   }
 
-  async function openAgentBuilder() {
-    setError("#agent-builder-error", "");
-    state.builderDropped = [];
-    $("#agent-builder-name").value = "";
-    $("#builder-dropped").innerHTML = "";
-    const [lenses, caps] = await Promise.all([
-      api("/api/registry/lenses"),
-      api("/api/registry/capabilities"),
-    ]);
-    const lensList = $("#builder-lenses");
-    const capList = $("#builder-caps");
-    lensList.innerHTML = "";
-    capList.innerHTML = "";
-    function chip(item, kind) {
-      const li = document.createElement("li");
-      li.className = "builder-chip";
-      li.draggable = true;
-      li.dataset.kind = kind;
-      li.dataset.id = item.id;
-      li.textContent = item.name || item.id;
-      li.addEventListener("dragstart", (ev) => {
-        ev.dataTransfer.setData("application/x-builder", JSON.stringify({ kind, id: item.id, name: item.name }));
-      });
-      return li;
-    }
-    (lenses.data?.lenses || []).forEach((ln) => lensList.appendChild(chip(ln, "lens")));
-    (caps.data?.capabilities || [])
-      .filter((c) => c.kind === "builtin" || c.approved)
-      .forEach((c) => capList.appendChild(chip(c, "capability")));
-    $("#agent-builder-dialog")?.showModal?.();
+  function addBuilderItem(item) {
+    if (!item?.id) return;
+    if (state.builderDropped.some((x) => x.id === item.id && x.kind === item.kind)) return;
+    state.builderDropped.push(item);
+    renderBuilderDropped();
   }
 
   function renderBuilderDropped() {
     const ul = $("#builder-dropped");
+    if (!ul) return;
     ul.innerHTML = "";
     state.builderDropped.forEach((item, idx) => {
       const li = document.createElement("li");
@@ -1431,6 +1456,85 @@
     });
   }
 
+  async function openAgentBuilder(editId) {
+    setError("#agent-builder-error", "");
+    setError("#agents-tab-error", "");
+    state.builderDropped = [];
+    state.editingAgentId = editId || null;
+    const nameEl = $("#agent-builder-name");
+    const promptEl = $("#agent-builder-prompt");
+    const idEl = $("#agent-builder-id");
+    const titleEl = $("#agent-builder-title");
+    const saveEl = $("#agent-builder-save");
+    const droppedEl = $("#builder-dropped");
+    if (!nameEl || !droppedEl) {
+      setError("#agents-tab-error", "Agent builder markup missing — refresh the page.");
+      return;
+    }
+    nameEl.value = "";
+    if (promptEl) promptEl.value = "";
+    if (idEl) idEl.value = editId || "";
+    if (titleEl) titleEl.textContent = editId ? "Edit agent" : "New agent";
+    if (saveEl) saveEl.textContent = editId ? "Save changes" : "Create agent";
+    droppedEl.innerHTML = "";
+
+    const [lenses, caps] = await Promise.all([
+      api("/api/registry/lenses"),
+      api("/api/registry/capabilities"),
+    ]);
+    if (editId) {
+      const detail = await api(`/api/registry/agents/${encodeURIComponent(editId)}`);
+      if (!detail.res.ok || !detail.data?.agent) {
+        setError("#agents-tab-error", detail.data?.error || "Could not load agent");
+        return;
+      }
+      const a = detail.data.agent;
+      nameEl.value = a.name || "";
+      if (promptEl) promptEl.value = a.prompt || "";
+      (a.lens_ids || []).forEach((id) => {
+        const ln = (lenses.data?.lenses || []).find((x) => x.id === id);
+        addBuilderItem({ kind: "lens", id, name: ln?.name || id });
+      });
+      (a.capabilities || []).forEach((id) => {
+        const c = (caps.data?.capabilities || []).find((x) => x.id === id);
+        addBuilderItem({ kind: "capability", id, name: c?.name || id });
+      });
+    }
+
+    const lensList = $("#builder-lenses");
+    const capList = $("#builder-caps");
+    if (!lensList || !capList) {
+      setError("#agents-tab-error", "Builder palette missing — refresh the page.");
+      return;
+    }
+    lensList.innerHTML = "";
+    capList.innerHTML = "";
+    function chip(item, kind) {
+      const li = document.createElement("li");
+      li.className = "builder-chip";
+      li.draggable = true;
+      li.dataset.kind = kind;
+      li.dataset.id = item.id;
+      li.textContent = item.name || item.id;
+      li.title = "Click to add";
+      li.addEventListener("click", () =>
+        addBuilderItem({ kind, id: item.id, name: item.name || item.id })
+      );
+      li.addEventListener("dragstart", (ev) => {
+        ev.dataTransfer.setData(
+          "application/x-builder",
+          JSON.stringify({ kind, id: item.id, name: item.name })
+        );
+      });
+      return li;
+    }
+    (lenses.data?.lenses || []).forEach((ln) => lensList.appendChild(chip(ln, "lens")));
+    (caps.data?.capabilities || [])
+      .filter((c) => c.kind === "builtin" || c.approved)
+      .forEach((c) => capList.appendChild(chip(c, "capability")));
+    openStudioDialog("#agent-builder-dialog");
+  }
+
   const canvas = $("#builder-canvas");
   canvas?.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -1442,34 +1546,83 @@
     canvas.classList.remove("drop-ready");
     try {
       const item = JSON.parse(e.dataTransfer.getData("application/x-builder") || "{}");
-      if (!item.id) return;
-      if (state.builderDropped.some((x) => x.id === item.id && x.kind === item.kind)) return;
-      state.builderDropped.push(item);
-      renderBuilderDropped();
+      addBuilderItem(item);
     } catch (_) {}
   });
 
-  $("#new-agent-btn")?.addEventListener("click", openAgentBuilder);
+  $("#new-agent-btn")?.addEventListener("click", () => openAgentBuilder(null));
   $("#agent-builder-cancel")?.addEventListener("click", () => $("#agent-builder-dialog")?.close());
   $("#agent-builder-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     setError("#agent-builder-error", "");
     const lens_ids = state.builderDropped.filter((x) => x.kind === "lens").map((x) => x.id);
-    const capability_ids = state.builderDropped.filter((x) => x.kind === "capability").map((x) => x.id);
-    const { res, data } = await api("/api/registry/agents", {
-      method: "POST",
-      body: JSON.stringify({
-        name: $("#agent-builder-name").value,
-        lens_ids,
-        capability_ids,
-      }),
-    });
+    const capability_ids = state.builderDropped
+      .filter((x) => x.kind === "capability")
+      .map((x) => x.id);
+    const prompt = ($("#agent-builder-prompt")?.value || "").trim();
+    if (!lens_ids.length && !capability_ids.length && !prompt) {
+      setError("#agent-builder-error", "Add a lens, capability, or prompt");
+      return;
+    }
+    const payload = {
+      name: $("#agent-builder-name").value,
+      lens_ids,
+      capability_ids,
+      prompt,
+    };
+    const editId = state.editingAgentId || $("#agent-builder-id")?.value || "";
+    const { res, data } = editId
+      ? await api(`/api/registry/agents/${encodeURIComponent(editId)}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        })
+      : await api("/api/registry/agents", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
     if (!res.ok) {
-      setError("#agent-builder-error", data?.error || "Could not create");
+      setError("#agent-builder-error", data?.error || "Could not save");
       return;
     }
     $("#agent-builder-dialog")?.close();
-    showFlowToast(`Agent “${data.agent?.name || "created"}” ready — add it to a room.`);
+    state.editingAgentId = null;
+    showFlowToast(
+      editId
+        ? `Updated “${data.agent?.name || "agent"}”`
+        : `Agent “${data.agent?.name || "created"}” ready — add it to a room.`
+    );
+    loadAgentsStudio();
+    refreshChatRails();
+  });
+
+  $("#studio-select-all")?.addEventListener("change", () => {
+    const on = !!$("#studio-select-all").checked;
+    $$("#studio-agents input.studio-agent-check").forEach((el) => {
+      el.checked = on;
+    });
+    syncStudioBulkButtons();
+  });
+
+  $("#edit-selected-agent-btn")?.addEventListener("click", () => {
+    const ids = selectedStudioAgentIds();
+    if (ids.length === 1) openAgentBuilder(ids[0]);
+  });
+
+  $("#delete-selected-agents-btn")?.addEventListener("click", async () => {
+    const ids = selectedStudioAgentIds();
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} custom agent${ids.length === 1 ? "" : "s"}? Built-ins are never deleted.`)) {
+      return;
+    }
+    const { res, data } = await api("/api/registry/agents/delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      setError("#agents-tab-error", data?.error || "Delete failed");
+      return;
+    }
+    showFlowToast(`Deleted ${(data.deleted || []).length} agent(s)`);
     loadAgentsStudio();
     refreshChatRails();
   });
@@ -1478,7 +1631,7 @@
     setError("#lens-new-error", "");
     $("#lens-name").value = "";
     $("#lens-prompt").value = "";
-    $("#lens-new-dialog")?.showModal?.();
+    openStudioDialog("#lens-new-dialog");
   });
   $("#lens-new-cancel")?.addEventListener("click", () => $("#lens-new-dialog")?.close());
   $("#lens-new-form")?.addEventListener("submit", async (e) => {
@@ -1500,7 +1653,7 @@
     setError("#cap-new-error", "");
     $("#cap-name").value = "";
     $("#cap-summary").value = "";
-    $("#cap-new-dialog")?.showModal?.();
+    openStudioDialog("#cap-new-dialog");
   });
   $("#cap-new-cancel")?.addEventListener("click", () => $("#cap-new-dialog")?.close());
   $("#cap-new-form")?.addEventListener("submit", async (e) => {
