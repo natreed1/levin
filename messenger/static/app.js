@@ -1330,7 +1330,7 @@
   }
 
   function selectedStudioAgentIds() {
-    return $$('#studio-agents input.studio-agent-check:checked').map((el) => el.value);
+    return $$("#studio-agents input.studio-agent-check:checked").map((el) => el.value);
   }
 
   function syncStudioBulkButtons() {
@@ -1339,6 +1339,24 @@
     const delBtn = $("#delete-selected-agents-btn");
     if (editBtn) editBtn.disabled = ids.length !== 1;
     if (delBtn) delBtn.disabled = ids.length < 1;
+  }
+
+  function compactLibraryRow(title, meta, body, actions) {
+    const row = document.createElement("div");
+    row.className = "studio-compact-row";
+    const text = document.createElement("div");
+    text.innerHTML = `<strong></strong><p class="muted tiny-hint"></p>`;
+    text.querySelector("strong").textContent = title;
+    const hint = meta ? `${meta}${body ? " · " + body : ""}` : body || "";
+    text.querySelector(".tiny-hint").textContent = hint;
+    row.appendChild(text);
+    if (actions?.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "card-actions";
+      actions.forEach((btn) => wrap.appendChild(btn));
+      row.appendChild(wrap);
+    }
+    return row;
   }
 
   async function loadAgentsStudio() {
@@ -1351,46 +1369,26 @@
     const agentsEl = $("#studio-agents");
     const lensesEl = $("#studio-lenses");
     const capsEl = $("#studio-caps");
+    const emptyEl = $("#studio-agents-empty");
     if (agentsEl) agentsEl.innerHTML = "";
     if (lensesEl) lensesEl.innerHTML = "";
     if (capsEl) capsEl.innerHTML = "";
     const selectAll = $("#studio-select-all");
     if (selectAll) selectAll.checked = false;
 
-    (agents.data?.agents || []).forEach((a) => {
-      const addBtn = document.createElement("button");
-      addBtn.type = "button";
-      addBtn.className = "tiny";
-      addBtn.textContent = "Add to open room";
-      addBtn.addEventListener("click", async () => {
-        if (state.kind === "people" && state.roomId) {
-          await addAgentToRoom(state.roomId, a.id);
-          showFlowToast(`Added ${a.name} to the room`);
-          switchTab("chats");
-        } else {
-          showFlowToast("Open a room first, then add the agent.");
-          switchTab("chats");
-        }
-      });
-      const actions = [addBtn];
-      if (a.editable) {
-        const editBtn = document.createElement("button");
-        editBtn.type = "button";
-        editBtn.className = "ghost tiny";
-        editBtn.textContent = "Edit";
-        editBtn.addEventListener("click", () => openAgentBuilder(a.id));
-        actions.push(editBtn);
-      }
-      const capsLabel =
-        (a.capability_details || []).map((c) => c.name || c.id).join(", ") || "prompt only";
-      const card = studioCard(
-        a.name,
-        a.kind || "agent",
-        `${a.mention || ""} · ${capsLabel}`,
-        actions
-      );
-      if (a.kind) card.classList.add(a.kind);
+    const allAgents = agents.data?.agents || [];
+    const yours = allAgents.filter((a) => a.editable);
+    const builtins = allAgents.filter(
+      (a) => !a.editable && a.id !== "master" && a.room_palette !== false
+    );
+
+    if (emptyEl) emptyEl.classList.toggle("hidden", yours.length > 0);
+
+    function renderAgentCard(a) {
+      const card = document.createElement("article");
+      card.className = "studio-agent-card" + (a.editable ? " editable" : " builtin");
       card.dataset.agentId = a.id;
+
       if (a.editable) {
         const label = document.createElement("label");
         label.className = "studio-card-check";
@@ -1401,19 +1399,92 @@
         box.addEventListener("change", syncStudioBulkButtons);
         label.appendChild(box);
         label.appendChild(document.createTextNode(" Select"));
-        card.insertBefore(label, card.firstChild);
+        card.appendChild(label);
       }
-      agentsEl?.appendChild(card);
-    });
+
+      const head = document.createElement("header");
+      const title = document.createElement("h3");
+      title.textContent = a.name;
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = a.editable ? "yours" : a.kind || "built-in";
+      head.appendChild(title);
+      head.appendChild(badge);
+      card.appendChild(head);
+
+      const capsLabel =
+        (a.capability_details || []).map((c) => c.name || c.id).join(", ") || "prompt only";
+      const meta = document.createElement("p");
+      meta.className = "meta";
+      meta.textContent = `${a.mention || ""} · ${capsLabel}`;
+      card.appendChild(meta);
+
+      const actions = document.createElement("div");
+      actions.className = "card-actions";
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = a.editable ? "" : "tiny";
+      addBtn.textContent = "Add to room";
+      addBtn.addEventListener("click", async () => {
+        if (state.kind === "people" && state.roomId) {
+          await addAgentToRoom(state.roomId, a.id);
+          showFlowToast(`Added ${a.name} to the room`);
+          switchTab("chats");
+        } else {
+          showFlowToast("Open a room first, then add the agent.");
+          switchTab("chats");
+        }
+      });
+      actions.appendChild(addBtn);
+      if (a.editable) {
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "ghost tiny";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", () => openAgentBuilder(a.id));
+        actions.appendChild(editBtn);
+      }
+      card.appendChild(actions);
+      return card;
+    }
+
+    yours.forEach((a) => agentsEl?.appendChild(renderAgentCard(a)));
+
+    const addTile = document.createElement("button");
+    addTile.type = "button";
+    addTile.className = "studio-add-tile";
+    addTile.innerHTML = `<span class="plus">+</span><strong>Add agent</strong><span class="muted tiny-hint">Compose from lenses &amp; capabilities</span>`;
+    addTile.addEventListener("click", () => openAgentBuilder(null));
+    agentsEl?.appendChild(addTile);
     syncStudioBulkButtons();
 
-    (lenses.data?.lenses || []).forEach((ln) => {
+    const builtinsEl = $("#studio-builtins");
+    if (builtinsEl) {
+      builtinsEl.innerHTML = "";
+      builtins.forEach((a) => builtinsEl.appendChild(renderAgentCard(a)));
+    }
+    const builtinsCount = $("#studio-builtins-count");
+    if (builtinsCount) builtinsCount.textContent = `${builtins.length}`;
+
+    const lensRows = lenses.data?.lenses || [];
+    const capRows = caps.data?.capabilities || [];
+    const lensCount = $("#studio-lenses-count");
+    const capCount = $("#studio-caps-count");
+    if (lensCount) lensCount.textContent = `${lensRows.length}`;
+    if (capCount) capCount.textContent = `${capRows.length}`;
+
+    lensRows.forEach((ln) => {
       lensesEl?.appendChild(
-        studioCard(ln.name, ln.kind === "builtin" ? "built-in" : "yours", ln.summary || ln.mention || "", [])
+        compactLibraryRow(
+          ln.name,
+          ln.kind === "builtin" ? "built-in" : "yours",
+          ln.summary || ln.mention || "",
+          []
+        )
       );
     });
 
-    (caps.data?.capabilities || []).forEach((c) => {
+    capRows.forEach((c) => {
       const actions = [];
       if (c.kind === "user" && !c.approved && c.ritual_id) {
         const btn = document.createElement("button");
@@ -1424,7 +1495,7 @@
         actions.push(btn);
       }
       capsEl?.appendChild(
-        studioCard(c.name || c.id, c.kind || "cap", c.summary || c.invoke || "", actions)
+        compactLibraryRow(c.name || c.id, c.kind || "cap", c.summary || c.invoke || "", actions)
       );
     });
   }

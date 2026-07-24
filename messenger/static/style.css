@@ -170,6 +170,25 @@
   margin: 0.5rem var(--page-pad) 0.35rem;
 }
 .studio-section-head .section-title { margin: 0; }
+.studio-hero-head {
+  align-items: flex-end;
+}
+.studio-lead {
+  margin: 0.35rem 0 0;
+  max-width: 36rem;
+}
+.studio-add-btn {
+  font-size: 1rem;
+  padding: 0.7rem 1.25rem;
+  font-weight: 600;
+}
+.studio-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 var(--page-pad) 0.75rem;
+}
 .studio-agent-actions {
   display: flex;
   flex-wrap: wrap;
@@ -189,6 +208,165 @@
   font-size: 0.78rem;
   color: var(--muted);
   margin-bottom: 0.35rem;
+}
+.studio-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.85rem;
+  margin: 0 var(--page-pad) 1.25rem;
+}
+.studio-agent-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.studio-agent-card.editable {
+  border-color: rgba(96,165,250,0.45);
+}
+.studio-agent-card.builtin {
+  opacity: 0.92;
+}
+.studio-agent-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.studio-agent-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.studio-agent-card .meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.studio-agent-card .card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+.studio-add-tile {
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  min-height: 9.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  font: inherit;
+  padding: 1rem;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.studio-add-tile:hover {
+  border-color: rgba(52,211,153,0.65);
+  background: rgba(52,211,153,0.06);
+}
+.studio-add-tile .plus {
+  font-size: 1.75rem;
+  line-height: 1;
+  font-weight: 600;
+}
+.studio-add-tile strong {
+  font-size: 1rem;
+}
+.studio-empty {
+  margin: -0.5rem var(--page-pad) 1rem;
+}
+.studio-empty.hidden { display: none; }
+.studio-libraries {
+  margin: 0.5rem var(--page-pad) 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 52rem;
+}
+.studio-builtins-grid {
+  margin: 0;
+}
+.studio-builtins-grid .studio-agent-card {
+  min-height: auto;
+  padding: 0.75rem;
+}
+.studio-dropdown {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+.studio-dropdown > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  user-select: none;
+}
+.studio-dropdown > summary::-webkit-details-marker { display: none; }
+.studio-dropdown > summary::after {
+  content: "▾";
+  color: var(--muted);
+  font-weight: 400;
+  transition: transform 0.15s ease;
+}
+.studio-dropdown[open] > summary::after {
+  transform: rotate(180deg);
+}
+.studio-dropdown-body {
+  border-top: 1px solid var(--border);
+  padding: 0.65rem 0.85rem 0.85rem;
+}
+.studio-dropdown-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+.studio-compact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 16rem;
+  overflow: auto;
+}
+.studio-compact-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.55rem;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  border: 1px solid transparent;
+}
+.studio-compact-row strong {
+  display: block;
+  font-size: 0.9rem;
+}
+.studio-compact-row .tiny-hint {
+  margin: 0.15rem 0 0;
+}
+@media (max-width: 720px) {
+  .studio-hero-head {
+    align-items: stretch;
+  }
+  .studio-add-btn {
+    width: 100%;
+  }
 }
 .autonomy-toggle {
   display: inline-flex;

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=41" />
+  <link rel="stylesheet" href="/static/style.css?v=42" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -297,41 +297,65 @@
 
       <!-- AGENTS STUDIO -->
       <section id="tab-agents" class="tab-panel hidden">
-        <header class="page-header">
+        <header class="page-header studio-hero-head">
           <div>
             <p class="eyebrow">Studio</p>
             <h1>Agents</h1>
+            <p class="sub muted studio-lead">Your agents run in rooms. Add one, then assign it and turn on Autonomy.</p>
           </div>
           <div class="header-actions">
             <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
+            <button type="button" id="new-agent-btn" class="studio-add-btn">Add agent</button>
           </div>
         </header>
-        <p class="sub muted">Compose agents from lenses and capabilities, then assign them to rooms. Work runs in rooms — turn on Autonomy to let agents converse.</p>
 
-        <div class="studio-section-head">
-          <h2 class="section-title">Agents</h2>
-          <div class="studio-agent-actions">
-            <label class="studio-select-all muted tiny-hint">
-              <input type="checkbox" id="studio-select-all" /> Select custom
-            </label>
-            <button type="button" id="edit-selected-agent-btn" class="ghost tiny" disabled>Edit</button>
-            <button type="button" id="delete-selected-agents-btn" class="ghost danger tiny" disabled>Delete</button>
-            <button type="button" id="new-agent-btn" class="tiny">New</button>
-          </div>
+        <div class="studio-toolbar">
+          <label class="studio-select-all muted tiny-hint">
+            <input type="checkbox" id="studio-select-all" /> Select custom
+          </label>
+          <button type="button" id="edit-selected-agent-btn" class="ghost tiny" disabled>Edit</button>
+          <button type="button" id="delete-selected-agents-btn" class="ghost danger tiny" disabled>Delete</button>
         </div>
-        <div id="studio-agents" class="agent-card-grid"></div>
+        <div id="studio-agents" class="studio-agent-grid"></div>
+        <p id="studio-agents-empty" class="studio-empty muted hidden">No custom agents yet — hit Add agent to compose one from lenses and capabilities.</p>
 
-        <div class="studio-section-head">
-          <h2 class="section-title">Lenses</h2>
-          <button type="button" id="new-lens-btn" class="tiny">Add new</button>
-        </div>
-        <div id="studio-lenses" class="agent-card-grid"></div>
+        <div class="studio-libraries">
+          <details class="studio-dropdown" id="studio-builtins-dropdown">
+            <summary>
+              <span>Built-in agents</span>
+              <span class="muted tiny-hint" id="studio-builtins-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div id="studio-builtins" class="studio-agent-grid studio-builtins-grid"></div>
+            </div>
+          </details>
 
-        <div class="studio-section-head">
-          <h2 class="section-title">Capabilities</h2>
-          <button type="button" id="new-cap-btn" class="tiny">Add new</button>
+          <details class="studio-dropdown" id="studio-lenses-dropdown">
+            <summary>
+              <span>Lenses</span>
+              <span class="muted tiny-hint" id="studio-lenses-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div class="studio-dropdown-actions">
+                <button type="button" id="new-lens-btn" class="ghost tiny">Add lens</button>
+              </div>
+              <div id="studio-lenses" class="studio-compact-list"></div>
+            </div>
+          </details>
+
+          <details class="studio-dropdown" id="studio-caps-dropdown">
+            <summary>
+              <span>Capabilities</span>
+              <span class="muted tiny-hint" id="studio-caps-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div class="studio-dropdown-actions">
+                <button type="button" id="new-cap-btn" class="ghost tiny">Add capability</button>
+              </div>
+              <div id="studio-caps" class="studio-compact-list"></div>
+            </div>
+          </details>
         </div>
-        <div id="studio-caps" class="agent-card-grid"></div>
         <p id="agents-tab-error" class="error" hidden></p>
       </section>
 
@@ -355,7 +379,7 @@
             <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (listed under Agents → Capabilities). Approve &amp; enable, then add them to an agent or a room’s skills. In a room, <code>/automate</code> opens Design.</p>
+        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (open Agents → Capabilities). Approve &amp; enable, then add them to an agent or a room’s skills. In a room, <code>/automate</code> opens Design.</p>
         <h2 class="section-title">Open proposals</h2>
         <div class="table-wrap">
           <table class="data-table" id="review-proposals-table">
@@ -743,6 +767,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=44"></script>
+  <script src="/static/app.js?v=45"></script>
 </body>
 </html>
