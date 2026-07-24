@@ -116,3 +116,77 @@ def test_automate_from_chat_creates_draft_capability_loop(
     assert approved.status_code == 200, approved.text
     loops2 = client.get("/api/automations/loops")
     assert any(a["id"] == "morning_brief_loop" for a in loops2.json()["automations"])
+
+
+def test_registry_studio_compose_and_room_objective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="studio@example.com")
+
+    lens = client.post(
+        "/api/registry/lenses",
+        json={"name": "Cautious", "prompt": "Flag uncertainty."},
+    )
+    assert lens.status_code == 200, lens.text
+    lens_id = lens.json()["lens"]["id"]
+
+    cap = client.post(
+        "/api/registry/capabilities",
+        json={"name": "Clip notes", "summary": "Summarize clips"},
+    )
+    assert cap.status_code == 200, cap.text
+
+    agent = client.post(
+        "/api/registry/agents",
+        json={
+            "name": "Cautious scout",
+            "lens_ids": [lens_id],
+            "capability_ids": ["web_research"],
+        },
+    )
+    assert agent.status_code == 200, agent.text
+    agent_id = agent.json()["agent"]["id"]
+
+    agents = client.get("/api/registry/agents")
+    assert any(a["id"] == agent_id for a in agents.json()["agents"])
+
+    room = client.post("/api/rooms", json={"title": "Desk", "name": "Layers"})
+    assert room.status_code == 200, room.text
+    room_id = room.json()["room_id"]
+
+    added = client.post(
+        f"/api/rooms/{room_id}/agents",
+        json={"agent_id": agent_id},
+    )
+    assert added.status_code == 200, added.text
+
+    patched = client.patch(
+        f"/api/rooms/{room_id}/config",
+        json={
+            "objective": "Keep NVDA filings current",
+            "prompts": "Prefer primary sources\nCall out uncertainty",
+            "skills": ["sec_filings_check"],
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    cfg = patched.json()["config"]
+    assert cfg["objective"] == "Keep NVDA filings current"
+    assert "Prefer primary sources" in cfg["prompts"]
+    assert cfg["skills"] == ["sec_filings_check"]
+
+    # Need a second agent for continuous debate; add a builtin.
+    client.post(f"/api/rooms/{room_id}/agents", json={"agent_id": "qwen-bull"})
+    auto = client.post(
+        f"/api/rooms/{room_id}/autonomy",
+        json={"enabled": True, "stub": True},
+    )
+    assert auto.status_code == 200, auto.text
+    assert auto.json()["autonomy"]["enabled"] is True
+
+    stop = client.post(
+        f"/api/rooms/{room_id}/autonomy",
+        json={"enabled": False},
+    )
+    assert stop.status_code == 200, stop.text
+    assert stop.json()["autonomy"]["enabled"] is False

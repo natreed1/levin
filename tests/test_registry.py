@@ -73,3 +73,57 @@ def test_create_automation_persists_registry_capability(tmp_path: Path, monkeypa
         assert caps["desk_loop"].kind == "user"
         assert caps["desk_loop"].steps == ("web_research", "sec_filings_check")
         assert list_automations(ledger=Ledger()) == []
+
+
+def test_compose_custom_agent_from_lenses_and_caps(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ANALYST_LEDGER_DATA", str(tmp_path / "ledger"))
+    from analyst_ledger.paths import use_data_dir
+    from analyst_ledger.registry import (
+        create_composed_agent,
+        create_lens,
+        create_user_capability,
+        get_agent,
+        known_agent_ids,
+        list_lenses,
+        list_room_palette_public,
+    )
+    from analyst_ledger.friend_personalities import resolve_specialists
+
+    with use_data_dir(tmp_path / "ledger"):
+        lens = create_lens(name="Filings hawk", prompt="Prefer primary SEC sources.")
+        assert lens.id in {ln.id for ln in list_lenses()}
+        cap = create_user_capability(
+            name="Desk note", summary="Draft a short desk note", runner="note_digest"
+        )
+        agent = create_composed_agent(
+            name="Filings scout",
+            lens_ids=[lens.id],
+            capability_ids=["sec_filings_check", cap.id],
+        )
+        assert agent.id.startswith("agent_")
+        loaded = get_agent(agent.id)
+        assert loaded is not None
+        assert "sec_filings_check" in loaded.capabilities
+        assert "Prefer primary SEC sources" in loaded.prompt
+        assert agent.id in known_agent_ids()
+        palette_ids = {a["id"] for a in list_room_palette_public()}
+        assert agent.id in palette_ids
+        resolved = resolve_specialists([agent.id, "qwen-bull"])
+        assert {p.id for p in resolved} == {agent.id, "qwen-bull"}
+
+
+def test_room_guidance_includes_objective():
+    from messenger.specialist_room import _room_guidance
+
+    text = _room_guidance(
+        {
+            "config": {
+                "objective": "Keep NVDA filings current",
+                "prompts": ["Prefer primary sources"],
+                "skills": ["sec_filings_check"],
+            }
+        }
+    )
+    assert "Keep NVDA filings current" in text
+    assert "Prefer primary sources" in text
+    assert "sec_filings_check" in text

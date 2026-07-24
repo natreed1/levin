@@ -33,6 +33,7 @@ from messenger.routers import (
     auth_router,
     automations_router,
     capabilities_router,
+    registry_router,
     review_router,
     tracking_router,
 )
@@ -276,6 +277,7 @@ def create_app() -> FastAPI:
     app.include_router(tracking_router)
     app.include_router(capabilities_router)
     app.include_router(agents_catalog_router)
+    app.include_router(registry_router)
     app.include_router(automations_router)
     app.include_router(agent_chats_router)
     app.include_router(review_router)
@@ -717,6 +719,7 @@ def create_app() -> FastAPI:
                     "display_name": user["display_name"],
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "dev_auto_login": False,
                 }
             )
         if identity:
@@ -730,9 +733,22 @@ def create_app() -> FastAPI:
                     "name": identity["name"],
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "dev_auto_login": False,
                 }
             )
-        return JSONResponse({"ok": False, "name": None}, status_code=401)
+        from messenger.auth import dev_auto_login_enabled, dev_user_email, dev_user_name
+
+        payload: dict[str, Any] = {
+            "ok": False,
+            "name": None,
+            "dev_auto_login": dev_auto_login_enabled(),
+        }
+        if payload["dev_auto_login"]:
+            payload["dev_user"] = {
+                "email": dev_user_email(),
+                "display_name": dev_user_name(),
+            }
+        return JSONResponse(payload, status_code=401)
 
     # --- People rooms ---------------------------------------------------------
 
@@ -829,9 +845,12 @@ def create_app() -> FastAPI:
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
         agent_id = str((body or {}).get("agent_id") or "").strip().lower()
-        from analyst_ledger.friend_personalities import PERSONALITIES_BY_ID
+        from analyst_ledger.registry import known_agent_ids
+        from messenger.tenancy import user_context
 
-        if agent_id not in PERSONALITIES_BY_ID:
+        with user_context(user["user_id"]):
+            known = known_agent_ids()
+        if agent_id not in known:
             return JSONResponse(
                 {"ok": False, "error": "unknown_agent"}, status_code=400
             )
@@ -839,7 +858,7 @@ def create_app() -> FastAPI:
         agents = [
             str(value)
             for value in (config.get("agents") or config.get("specialists") or [])
-            if str(value) in PERSONALITIES_BY_ID
+            if str(value) in known or str(value) == agent_id
         ]
         if agent_id not in agents:
             agents.append(agent_id)
@@ -1075,8 +1094,138 @@ def create_app() -> FastAPI:
             }
         )
 
+    @app.patch("/api/rooms/{room_id}/config")
+    async def room_config_patch(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        config = dict(room.get("config") or {})
+        if "objective" in body:
+            config["objective"] = str(body.get("objective") or "").strip()[:800]
+        if "prompts" in body:
+            raw = body.get("prompts")
+            if isinstance(raw, str):
+                prompts = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            elif isinstance(raw, list):
+                prompts = [str(p).strip() for p in raw if str(p).strip()]
+            else:
+                prompts = []
+            config["prompts"] = prompts[:12]
+        if "skills" in body:
+            raw = body.get("skills")
+            if isinstance(raw, list):
+                config["skills"] = [str(s).strip() for s in raw if str(s).strip()][:20]
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse({"ok": True, "room": updated, "config": config})
+
+    @app.post("/api/rooms/{room_id}/autonomy")
+    async def room_autonomy(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        """Toggle autonomous agent conversation in this room."""
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = bool((body or {}).get("enabled"))
+        config = dict(room.get("config") or {})
+        from messenger.specialist_room import job_registry, start_specialist_job
+        from datetime import datetime, timezone
+
+        if not enabled:
+            job_registry().stop_room(room_id)
+            config["autonomy"] = {"enabled": False, "started_at": None}
+            updated = store.update_room_config(room_id, config)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "autonomy": config["autonomy"],
+                    "room": updated,
+                    "message": "Autonomy stopped.",
+                }
+            )
+
+        agents = config.get("agents") or config.get("specialists") or []
+        if len(agents) < 1:
+            return JSONResponse(
+                {"ok": False, "error": "add_agents_first", "message": "Assign agents to this room first."},
+                status_code=400,
+            )
+        existing = job_registry().active_for_room(room_id)
+        if existing:
+            config["autonomy"] = {
+                "enabled": True,
+                "started_at": (config.get("autonomy") or {}).get("started_at"),
+            }
+            store.update_room_config(room_id, config)
+            return JSONResponse(
+                {"ok": True, "autonomy": config["autonomy"], "job": existing.public(), "already_running": True}
+            )
+
+        objective = str(config.get("objective") or "").strip()
+        topic = objective or "Pursue the room objective and keep the conversation useful."
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        config["autonomy"] = {"enabled": True, "started_at": started}
+        store.update_room_config(room_id, config)
+        owner_id = room.get("owner_user_id") or user["user_id"]
+        # Refresh room after config write
+        room = store.room(room_id) or room
+        try:
+            job = start_specialist_job(
+                store=store,
+                hub=hub,
+                room=room,
+                action="debate" if len(agents) >= 2 else "present",
+                topic=topic,
+                owner_user_id=owner_id,
+                stub=bool((body or {}).get("stub", False)),
+                rounds=5,
+                continuous=len(agents) >= 2,
+                loop=getattr(app.state, "loop", None),
+            )
+        except ValueError as exc:
+            config["autonomy"] = {"enabled": False, "started_at": None}
+            store.update_room_config(room_id, config)
+            return JSONResponse(
+                {"ok": False, "error": "bad_action", "message": str(exc)},
+                status_code=400,
+            )
+        # Announce in-room so runs are visible
+        store.add_message(
+            author="Moderator",
+            body=(
+                f"Autonomy on — agents will converse here"
+                f"{' guided by: ' + objective if objective else ''}."
+                " Toggle Autonomy off to stop."
+            ),
+            room_id=room_id,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "autonomy": config["autonomy"],
+                "job": job.public(),
+                "message": "Autonomy started — agents are conversing in this room.",
+            }
+        )
+
     @app.get("/api/rooms/{room_id}/specialist-status")
-    def specialist_status(
+    def specialist_status_after_autonomy(
         room_id: str,
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:

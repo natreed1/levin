@@ -367,6 +367,24 @@ def _user_capabilities_path() -> Path:
     return _registry_dir() / "capabilities.json"
 
 
+def _user_lenses_path() -> Path:
+    return _registry_dir() / "lenses.json"
+
+
+def _user_agents_path() -> Path:
+    return _registry_dir() / "agents.json"
+
+
+def _slug_id(name: str, *, prefix: str = "") -> str:
+    raw = (name or "").strip()
+    rid = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw).strip("_").lower()[:80]
+    if prefix and rid and not rid.startswith(prefix):
+        rid = f"{prefix}{rid}"
+    if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,120}$", rid):
+        raise ValueError("name must start with a letter/number")
+    return rid
+
+
 # ---------------------------------------------------------------------------
 # Capability API
 # ---------------------------------------------------------------------------
@@ -513,32 +531,231 @@ def list_capabilities_public(*, ledger: Any = None) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Lens API (prompt-only building blocks; builtins = lens-kind agents)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Lens:
+    id: str
+    name: str
+    prompt: str
+    kind: str = "user"  # builtin | user
+    mention: str = ""
+    role: str = "lens"
+    summary: str = ""
+
+    def to_public(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "prompt": self.prompt,
+            "kind": self.kind,
+            "mention": self.mention or f"@{self.name.replace(' ', '')}",
+            "role": self.role,
+            "summary": self.summary,
+        }
+
+
+def list_lenses() -> List[Lens]:
+    """Builtin lenses (from agents with kind=lens) + user lenses."""
+    out: List[Lens] = []
+    for agent in _BUILTIN_AGENTS:
+        if agent.kind != "lens":
+            continue
+        out.append(
+            Lens(
+                id=agent.id,
+                name=agent.name,
+                prompt=agent.prompt,
+                kind="builtin",
+                mention=agent.mention,
+                role=agent.role,
+                summary=agent.summary,
+            )
+        )
+    out.extend(_load_user_lenses())
+    return out
+
+
+def list_lenses_public() -> List[Dict[str, Any]]:
+    return [ln.to_public() for ln in list_lenses()]
+
+
+def get_lens(lens_id: str) -> Optional[Lens]:
+    lid = (lens_id or "").strip()
+    for ln in list_lenses():
+        if ln.id == lid:
+            return ln
+    return None
+
+
+def _load_user_lenses() -> List[Lens]:
+    path = _user_lenses_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = raw if isinstance(raw, list) else raw.get("lenses") or []
+    out: List[Lens] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        out.append(
+            Lens(
+                id=str(row["id"]),
+                name=str(row.get("name") or row["id"]),
+                prompt=str(row.get("prompt") or ""),
+                kind="user",
+                mention=str(row.get("mention") or ""),
+                role=str(row.get("role") or "lens"),
+                summary=str(row.get("summary") or ""),
+            )
+        )
+    return out
+
+
+def create_lens(*, name: str, prompt: str, summary: str = "") -> Lens:
+    rid = _slug_id(name, prefix="lens_")
+    if get_lens(rid) is not None or get_agent(rid) is not None:
+        raise ValueError(f"lens id {rid!r} already exists")
+    lens = Lens(
+        id=rid,
+        name=(name or "").strip() or rid,
+        prompt=(prompt or "").strip(),
+        kind="user",
+        mention=f"@{(name or rid).replace(' ', '')}",
+        summary=(summary or "").strip()[:240],
+    )
+    if not lens.prompt:
+        raise ValueError("prompt required")
+    existing = {ln.id: ln for ln in _load_user_lenses()}
+    existing[lens.id] = lens
+    _user_lenses_path().write_text(
+        json.dumps({"lenses": [ln.to_public() for ln in existing.values()]}, indent=2),
+        encoding="utf-8",
+    )
+    return lens
+
+
+def create_user_capability(*, name: str, summary: str, runner: Optional[str] = None) -> Capability:
+    rid = _slug_id(name)
+    if get_capability(rid) is not None:
+        raise ValueError(f"capability id {rid!r} already exists")
+    cap = Capability(
+        id=rid,
+        name=(name or "").strip() or rid,
+        kind="user",
+        summary=(summary or "").strip()[:400] or f"User capability {rid}",
+        invoke=f"room skill · {rid}",
+        schedulable=False,
+        approved=True,
+        enabled=True,
+        status="ready",
+        ritual_id=rid,
+        proposed_by="studio",
+        runner=runner,
+    )
+    return save_user_capability(cap)
+
+
+# ---------------------------------------------------------------------------
 # Agent API
 # ---------------------------------------------------------------------------
 
 
+def _load_user_agents() -> List[Agent]:
+    path = _user_agents_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = raw if isinstance(raw, list) else raw.get("agents") or []
+    out: List[Agent] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        lens_ids = tuple(row.get("lens_ids") or ())
+        caps = tuple(row.get("capability_ids") or row.get("capabilities") or ())
+        prompt = str(row.get("prompt") or "")
+        if not prompt and lens_ids:
+            parts = []
+            for lid in lens_ids:
+                ln = get_lens(str(lid))
+                if ln and ln.prompt:
+                    parts.append(f"[{ln.name}] {ln.prompt}")
+            prompt = "\n\n".join(parts)
+        out.append(
+            Agent(
+                id=str(row["id"]),
+                name=str(row.get("name") or row["id"]),
+                kind="operator" if caps else "composed",
+                role=str(row.get("role") or "custom"),
+                mention=str(row.get("mention") or f"@{str(row.get('name') or row['id']).replace(' ', '')}"),
+                prompt=prompt or "You are a custom room agent. Follow the room objective.",
+                capabilities=caps,
+                aliases=tuple(row.get("aliases") or ()),
+                legacy_names=tuple(row.get("legacy_names") or ()),
+                cookie_key=str(row.get("cookie_key") or row["id"]),
+                summary=str(row.get("summary") or "Custom agent composed in the Agents studio."),
+                how="Composed from lenses + capabilities in the studio.",
+                room_palette=bool(row.get("room_palette", True)),
+            )
+        )
+    return out
+
+
 def list_agents() -> List[Agent]:
-    return list(_BUILTIN_AGENTS)
+    by_id: Dict[str, Agent] = {a.id: a for a in _BUILTIN_AGENTS}
+    for agent in _load_user_agents():
+        by_id[agent.id] = agent
+    # User lenses also appear as standalone room-palette agents (prompt-only).
+    for ln in _load_user_lenses():
+        if ln.id in by_id:
+            continue
+        by_id[ln.id] = Agent(
+            id=ln.id,
+            name=ln.name,
+            kind="lens",
+            role=ln.role,
+            mention=ln.mention or f"@{ln.name.replace(' ', '')}",
+            prompt=ln.prompt,
+            capabilities=(),
+            cookie_key=ln.id,
+            summary=ln.summary or "User lens",
+            how="Prompt injection only.",
+            room_palette=True,
+        )
+    return list(by_id.values())
 
 
 def get_agent(agent_id: str) -> Optional[Agent]:
     aid = (agent_id or "").strip()
-    for agent in _BUILTIN_AGENTS:
+    for agent in list_agents():
         if agent.id == aid:
             return agent
     return None
 
 
+def known_agent_ids() -> set:
+    return {a.id for a in list_agents()}
+
+
 def list_agents_public() -> List[Dict[str, Any]]:
-    by_cap = {c.id: c for c in _BUILTIN_CAPABILITIES}
+    by_cap = {c.id: c for c in list_capabilities()}
     rows: List[Dict[str, Any]] = []
-    for agent in _BUILTIN_AGENTS:
+    for agent in list_agents():
         pub = agent.to_public()
         pub["capability_details"] = [
             {"id": cid, "name": (by_cap[cid].name if cid in by_cap else cid)}
             for cid in agent.capabilities
         ]
-        # Don't leak full prompts on the catalog API by default.
+        pub["composed"] = agent.id not in {a.id for a in _BUILTIN_AGENTS}
+        # Keep prompt off the catalog list (builder fetches detail if needed).
         pub.pop("prompt", None)
         rows.append(pub)
     return rows
@@ -557,9 +774,93 @@ def list_room_palette_public() -> List[Dict[str, Any]]:
             "kind": a.kind,
             "capabilities": list(a.capabilities),
         }
-        for a in _BUILTIN_AGENTS
-        if a.room_palette
+        for a in list_agents()
+        if a.room_palette and a.prompt
     ]
+
+
+def create_composed_agent(
+    *,
+    name: str,
+    lens_ids: Sequence[str] = (),
+    capability_ids: Sequence[str] = (),
+    prompt: str = "",
+    summary: str = "",
+) -> Agent:
+    """Create a custom agent from lenses + capabilities (studio drag-drop)."""
+    rid = _slug_id(name, prefix="agent_")
+    if get_agent(rid) is not None:
+        raise ValueError(f"agent id {rid!r} already exists")
+    lenses = [str(x).strip() for x in lens_ids if str(x).strip()]
+    caps = [str(x).strip() for x in capability_ids if str(x).strip()]
+    if not lenses and not caps and not (prompt or "").strip():
+        raise ValueError("add at least one lens, capability, or prompt")
+    for lid in lenses:
+        if get_lens(lid) is None and get_agent(lid) is None:
+            raise ValueError(f"unknown lens {lid!r}")
+    for cid in caps:
+        if get_capability(cid) is None:
+            raise ValueError(f"unknown capability {cid!r}")
+
+    composed_prompt = (prompt or "").strip()
+    if not composed_prompt and lenses:
+        parts = []
+        for lid in lenses:
+            ln = get_lens(lid) or (
+                Lens(
+                    id=lid,
+                    name=lid,
+                    prompt=(get_agent(lid).prompt if get_agent(lid) else ""),
+                )
+            )
+            if ln.prompt:
+                parts.append(f"[{ln.name}] {ln.prompt}")
+        composed_prompt = "\n\n".join(parts)
+    if not composed_prompt:
+        composed_prompt = (
+            f"You are {(name or rid).strip()}. Follow the room objective and use "
+            "your assigned capabilities when relevant. Never invent facts."
+        )
+
+    agent = Agent(
+        id=rid,
+        name=(name or "").strip() or rid,
+        kind="operator" if caps else "composed",
+        role="custom",
+        mention=f"@{(name or rid).replace(' ', '')}",
+        prompt=composed_prompt,
+        capabilities=tuple(caps),
+        cookie_key=rid,
+        summary=(summary or "").strip()[:240]
+        or f"Composed agent ({len(lenses)} lenses, {len(caps)} capabilities).",
+        how="Composed in Agents studio from lenses + capabilities.",
+        room_palette=True,
+    )
+    existing = {}
+    path = _user_agents_path()
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            rows = raw if isinstance(raw, list) else raw.get("agents") or []
+            for row in rows:
+                if isinstance(row, dict) and row.get("id"):
+                    existing[str(row["id"])] = row
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    existing[agent.id] = {
+        "id": agent.id,
+        "name": agent.name,
+        "mention": agent.mention,
+        "prompt": agent.prompt,
+        "lens_ids": lenses,
+        "capability_ids": caps,
+        "summary": agent.summary,
+        "role": agent.role,
+        "room_palette": True,
+        "kind": agent.kind,
+    }
+    path.write_text(json.dumps({"agents": list(existing.values())}, indent=2), encoding="utf-8")
+    return agent
 
 
 def agent_has_capability(agent_id: str, capability_id: str) -> bool:

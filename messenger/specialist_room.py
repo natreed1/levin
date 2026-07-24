@@ -162,6 +162,28 @@ def _live_reply(
     ).strip()
 
 
+def _room_guidance(room: dict[str, Any]) -> str:
+    """Objective + prompts from room config — guides autonomous / specialist turns."""
+    config = room.get("config") if isinstance(room.get("config"), dict) else {}
+    if not isinstance(config, dict):
+        return ""
+    parts: list[str] = []
+    objective = str(config.get("objective") or "").strip()
+    if objective:
+        parts.append(f"Room objective: {objective}")
+    prompts = config.get("prompts") or []
+    if isinstance(prompts, list):
+        cleaned = [str(p).strip() for p in prompts if str(p).strip()]
+        if cleaned:
+            parts.append("Room prompts:\n- " + "\n- ".join(cleaned[:8]))
+    skills = config.get("skills") or []
+    if isinstance(skills, list):
+        ids = [str(s).strip() for s in skills if str(s).strip()]
+        if ids:
+            parts.append("Room skills (capabilities): " + ", ".join(ids[:12]))
+    return "\n".join(parts)
+
+
 def _speak(
     personality: FriendPersonality,
     *,
@@ -173,6 +195,7 @@ def _speak(
     round_num: int = 1,
     rounds_total: int = 1,
     continuous: bool = False,
+    room_guidance: str = "",
 ) -> str:
     round_hint = ""
     if mode == "debate":
@@ -194,9 +217,11 @@ def _speak(
                     f"Final argument round {round_num} of {rounds_total}. "
                     "Close your case; name what would change your mind."
                 )
+    guidance_block = f"\n{room_guidance}\n" if room_guidance else ""
     user_prompt = (
         f"Topic: {topic or '(none)'}\n"
-        f"{round_hint}\n\n"
+        f"{round_hint}\n"
+        f"{guidance_block}\n"
         f"Ledger brief (INTERNAL only):\n{brief}\n\n"
         f"Prior turns:\n" + ("\n---\n".join(prior[-12:]) if prior else "(none)") + "\n\n"
         "Write your turn now. Plain text, under 350 words. No markdown fences."
@@ -206,6 +231,10 @@ def _speak(
         "Never invent facts, dates, numbers, or sources. "
         "If evidence is thin, say what is missing."
     )
+    if room_guidance:
+        system_extra += (
+            " Honor the room objective and prompts; treat them as standing instructions."
+        )
     if not stub:
         try:
             live = _live_reply(
@@ -450,6 +479,7 @@ def _run_specialist_action_body(
     prior: list[str] = []
     posted = 0
     stopped_early = False
+    guidance = _room_guidance(room)
 
     def _stopped() -> bool:
         return stop.is_set()
@@ -466,6 +496,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
             )
             _post(store, hub, room_id, personality.name, body, loop=loop)
             prior.append(f"{personality.name}: {body}")
@@ -486,6 +517,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
             )
             _post(store, hub, room_id, personality.name, body, loop=loop)
             prior.append(f"{personality.name}: {body}")
@@ -518,6 +550,7 @@ def _run_specialist_action_body(
                     brief=brief,
                     prior=prior,
                     stub=stub,
+                room_guidance=guidance,
                     round_num=round_num,
                     rounds_total=rounds_n,
                     continuous=continuous,
@@ -542,6 +575,7 @@ def _run_specialist_action_body(
                     brief=brief,
                     prior=prior,
                     stub=stub,
+                room_guidance=guidance,
                     round_num=round_num,
                     rounds_total=rounds_n,
                     continuous=True,
@@ -562,6 +596,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
                 round_num=rounds_n,
                 rounds_total=rounds_n,
             )

@@ -1,8 +1,7 @@
 """Named specialist personalities for People / specialist rooms.
 
-SoR is ``analyst_ledger.registry.Agent``. This module adapts registry agents
-into ``FriendPersonality`` for mention matching and room orchestration.
-Which model runs is chosen in Settings or per-room via the model toggle.
+SoR is ``analyst_ledger.registry.Agent``. Builtin personalities are adapted at
+import time; custom studio agents resolve dynamically via ``get_agent``.
 """
 
 from __future__ import annotations
@@ -21,19 +20,19 @@ class FriendPersonality:
     mention: str
     cookie_key: str
     prompt: str
-    role: str = "analyst"  # analyst | bull | bear | synthesizer
+    role: str = "analyst"
     aliases: Tuple[str, ...] = field(default_factory=tuple)
     legacy_names: Tuple[str, ...] = field(default_factory=tuple)
 
 
-def _personality_from_agent(agent_id: str) -> Optional[FriendPersonality]:
+def personality_from_agent_id(agent_id: str) -> Optional[FriendPersonality]:
     agent = get_agent(agent_id)
-    if agent is None or not agent.prompt:
+    if agent is None or not (agent.prompt or "").strip():
         return None
     return FriendPersonality(
         id=agent.id,
         name=agent.name,
-        mention=agent.mention,
+        mention=agent.mention if agent.mention.startswith("@") else f"@{agent.name.replace(' ', '')}",
         cookie_key=agent.cookie_key or agent.id,
         prompt=agent.prompt,
         role=agent.role,
@@ -47,13 +46,15 @@ def _build_personalities() -> Tuple[FriendPersonality, ...]:
     for agent in list_agents():
         if not agent.room_palette or not agent.prompt:
             continue
-        p = _personality_from_agent(agent.id)
+        # Builtins only at import — user agents resolve dynamically.
+        if agent.id.startswith("agent_") or agent.id.startswith("lens_"):
+            continue
+        p = personality_from_agent_id(agent.id)
         if p is not None:
             out.append(p)
     return tuple(out)
 
 
-# Stable public order (tests / UI). Mention matching uses longest-first separately.
 PERSONALITIES = _build_personalities()
 PERSONALITIES_BY_ID = {personality.id: personality for personality in PERSONALITIES}
 DEFAULT_PERSONALITY = PERSONALITIES_BY_ID["qwen"]
@@ -64,7 +65,6 @@ def _all_mention_tokens(personality: FriendPersonality) -> Tuple[str, ...]:
 
 
 def _mention_lookup() -> dict:
-    """Map casefolded mention/alias → personality (longest keys win in matching)."""
     out = {}
     for personality in PERSONALITIES:
         for token in _all_mention_tokens(personality):
@@ -73,13 +73,10 @@ def _mention_lookup() -> dict:
 
 
 _MENTION_LOOKUP = _mention_lookup()
-_MENTION_TOKENS = tuple(
-    sorted(_MENTION_LOOKUP.keys(), key=len, reverse=True)
-)
+_MENTION_TOKENS = tuple(sorted(_MENTION_LOOKUP.keys(), key=len, reverse=True))
 
 
 def _mention_pattern(token: str) -> str:
-    """Escape a mention token; guard spaced child forms for dashed prefixes."""
     child_suffixes = [
         other[len(token) + 1 :]
         for other in _MENTION_TOKENS
@@ -109,7 +106,6 @@ MENTION_RE = re.compile(
 
 
 def match_personality(text: str) -> Optional[FriendPersonality]:
-    """Return the first named personality mentioned in ``text``."""
     match = MENTION_RE.search(text or "")
     if not match:
         return None
@@ -117,7 +113,6 @@ def match_personality(text: str) -> Optional[FriendPersonality]:
 
 
 def mentioned_personalities(text: str) -> List[FriendPersonality]:
-    """Return each personality mentioned in text, in message order."""
     found: List[FriendPersonality] = []
     seen = set()
     for match in MENTION_RE.finditer(text or ""):
@@ -133,15 +128,19 @@ def strip_personality_mentions(text: str) -> str:
 
 
 def resolve_specialists(ids: Optional[Sequence[str]] = None) -> List[FriendPersonality]:
-    """Resolve specialist ids; default to bull + contrarian + synthesizer."""
+    """Resolve specialist ids from registry (builtins + custom studio agents)."""
     if not ids:
         ids = ["qwen-bull", "qwen-contrarian", "qwen-synthesizer"]
     out: List[FriendPersonality] = []
+    seen = set()
     for raw in ids:
         key = str(raw or "").strip()
-        personality = PERSONALITIES_BY_ID.get(key)
-        if personality and personality not in out:
+        if not key or key in seen:
+            continue
+        personality = PERSONALITIES_BY_ID.get(key) or personality_from_agent_id(key)
+        if personality:
             out.append(personality)
+            seen.add(personality.id)
     return out
 
 
@@ -153,9 +152,12 @@ def all_agent_author_names() -> set:
     names: set = set()
     for personality in PERSONALITIES:
         names |= author_names_for(personality)
+    for agent in list_agents():
+        if agent.room_palette:
+            names.add(agent.name)
+            names |= set(agent.legacy_names)
     return names
 
 
 def specialists_public() -> List[dict]:
-    """Room palette — same registry SoR as the Agents tab."""
     return list_room_palette_public()

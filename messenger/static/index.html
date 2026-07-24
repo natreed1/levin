@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=36" />
+  <link rel="stylesheet" href="/static/style.css?v=40" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -31,6 +31,10 @@
           <button type="button" id="resend-verify-btn" class="linkish hidden">Resend verification</button>
         </p>
       </form>
+      <div id="dev-login-panel" class="dev-login-panel hidden">
+        <p class="muted tiny-hint">Local development — skip the password.</p>
+        <button type="button" id="dev-login-btn" class="ghost">Continue as local Dev</button>
+      </div>
       <form id="otp-form" class="hidden">
         <p class="sub" id="otp-hint">Enter the 6-digit code we emailed you.</p>
         <label>Sign-in code
@@ -76,9 +80,7 @@
       </div>
       <nav class="rail-nav" aria-label="Primary">
         <button type="button" class="nav-btn active" data-tab="chats">Rooms</button>
-        <button type="button" class="nav-btn" data-tab="capabilities">Capabilities</button>
         <button type="button" class="nav-btn" data-tab="agents">Agents</button>
-        <button type="button" class="nav-btn" data-tab="automations">Automations</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
         <button type="button" class="nav-btn" data-tab="settings">Settings</button>
@@ -106,8 +108,8 @@
             <div class="rail-section agent-dock">
               <header class="section-head">
                 <div>
-                  <h2>Specialists</h2>
-                  <p>Lenses for this room — not automations</p>
+                  <h2>Agents</h2>
+                  <p>Drag into a room</p>
                 </div>
               </header>
               <ul id="agent-palette" class="agent-palette"></ul>
@@ -131,7 +133,11 @@
                 </div>
               </div>
               <div class="header-actions">
-                <button type="button" id="automate-room-btn" class="ghost hidden" title="Turn this chat into an automation">Automate</button>
+                <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, prompts, skills">Design</button>
+                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Agents converse on their own in this room">
+                  <input type="checkbox" id="autonomy-toggle" />
+                  <span>Autonomy</span>
+                </label>
                 <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
                 <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
                 <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
@@ -208,178 +214,115 @@
             <p id="debate-error" class="error" hidden></p>
           </form>
         </dialog>
-        <dialog id="automate-dialog">
-          <form id="automate-form" method="dialog" class="automate-dialog-form">
-            <h3>Automate this conversation</h3>
-            <p class="muted tiny-hint">Pick capabilities to loop. Saves as a draft — nothing runs until you approve.</p>
-            <div class="automate-dual">
-              <div class="automate-pane">
-                <h4>From this chat</h4>
-                <textarea id="automate-transcript" rows="12" readonly></textarea>
-              </div>
-              <div class="automate-pane">
-                <h4>Build the loop</h4>
-                <label>Name <input id="automate-name" type="text" maxlength="80" placeholder="e.g. morning_nvda_brief" required /></label>
-                <fieldset class="cap-picker">
-                  <legend>Capabilities to run (in order)</legend>
-                  <div id="automate-cap-list" class="cap-picker-list"></div>
-                </fieldset>
-                <label>When
-                  <select id="automate-schedule-preset">
-                    <option value="">Only when I run it</option>
-                    <option value="0 7 * * 1-5">Weekday mornings (7:00)</option>
-                    <option value="0 12 * * 1-5">Weekday noon</option>
-                    <option value="0 18 * * 1-5">Weekday evenings (18:00)</option>
-                    <option value="custom">Custom cron…</option>
-                  </select>
-                </label>
-                <label id="automate-schedule-custom-wrap" class="hidden">Custom schedule
-                  <input id="automate-schedule" type="text" maxlength="64" placeholder="0 7 * * 1-5" />
-                </label>
-              </div>
-            </div>
-            <ol class="flow-steps tiny-hint muted">
-              <li>Save draft</li>
-              <li>Approve in Capabilities</li>
-              <li>It appears under Automations and can run on a schedule</li>
-            </ol>
+        <dialog id="room-design-dialog">
+          <form id="room-design-form" method="dialog" class="automate-dialog-form">
+            <h3>Design this room</h3>
+            <p class="muted tiny-hint">Objective and prompts guide agents when Autonomy is on. Skills are capabilities they can use.</p>
+            <label>Objective
+              <textarea id="room-objective" rows="3" maxlength="800" placeholder="e.g. Keep NVDA filings and sentiment current"></textarea>
+            </label>
+            <label>Prompts (one per line)
+              <textarea id="room-prompts" rows="4" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
+            </label>
+            <fieldset class="cap-picker">
+              <legend>Skills (capabilities)</legend>
+              <div id="room-skills-list" class="cap-picker-list"></div>
+            </fieldset>
             <div class="dialog-actions">
-              <button type="button" id="automate-cancel" class="ghost">Cancel</button>
-              <button type="submit" id="automate-save">Save draft</button>
+              <button type="button" id="room-design-cancel" class="ghost">Cancel</button>
+              <button type="submit">Save</button>
             </div>
-            <p id="automate-error" class="error" hidden></p>
+            <p id="room-design-error" class="error" hidden></p>
+          </form>
+        </dialog>
+
+        <dialog id="agent-builder-dialog">
+          <form id="agent-builder-form" method="dialog" class="automate-dialog-form">
+            <h3>New agent</h3>
+            <p class="muted tiny-hint">Drag lenses and capabilities onto the canvas, then save. Assign the agent to rooms from the rail.</p>
+            <label>Name <input id="agent-builder-name" type="text" maxlength="80" required placeholder="e.g. Filings scout" /></label>
+            <div class="builder-layout">
+              <div class="builder-palette">
+                <h4>Lenses</h4>
+                <ul id="builder-lenses" class="builder-chips"></ul>
+                <h4>Capabilities</h4>
+                <ul id="builder-caps" class="builder-chips"></ul>
+              </div>
+              <div class="builder-canvas" id="builder-canvas" data-drop="agent">
+                <p class="muted tiny-hint">Drop here</p>
+                <ul id="builder-dropped" class="builder-dropped"></ul>
+              </div>
+            </div>
+            <div class="dialog-actions">
+              <button type="button" id="agent-builder-cancel" class="ghost">Cancel</button>
+              <button type="submit">Create agent</button>
+            </div>
+            <p id="agent-builder-error" class="error" hidden></p>
+          </form>
+        </dialog>
+
+        <dialog id="lens-new-dialog">
+          <form id="lens-new-form" method="dialog">
+            <h3>New lens</h3>
+            <label>Name <input id="lens-name" type="text" maxlength="80" required /></label>
+            <label>Prompt <textarea id="lens-prompt" rows="5" required placeholder="System prompt / stance…"></textarea></label>
+            <div class="dialog-actions">
+              <button type="button" id="lens-new-cancel" class="ghost">Cancel</button>
+              <button type="submit">Create</button>
+            </div>
+            <p id="lens-new-error" class="error" hidden></p>
+          </form>
+        </dialog>
+
+        <dialog id="cap-new-dialog">
+          <form id="cap-new-form" method="dialog">
+            <h3>New capability</h3>
+            <label>Name <input id="cap-name" type="text" maxlength="80" required /></label>
+            <label>Summary <textarea id="cap-summary" rows="3" required placeholder="What this verb does…"></textarea></label>
+            <div class="dialog-actions">
+              <button type="button" id="cap-new-cancel" class="ghost">Cancel</button>
+              <button type="submit">Create</button>
+            </div>
+            <p id="cap-new-error" class="error" hidden></p>
           </form>
         </dialog>
       </section>
 
       <div id="flow-toast" class="flow-toast hidden" role="status"></div>
 
-      <!-- CAPABILITIES (layer 1) -->
-      <section id="tab-capabilities" class="tab-panel hidden">
-        <header class="page-header">
-          <div>
-            <p class="eyebrow">Building blocks</p>
-            <h1>Capabilities</h1>
-          </div>
-          <div class="header-actions">
-            <button type="button" id="mine-btn" class="ghost">Find from my work</button>
-            <button type="button" id="refresh-caps-btn" class="ghost">Refresh</button>
-          </div>
-        </header>
-        <p class="sub muted">Registry verbs — built-ins (including Web research) plus drafts you approve. Agents and automations call these by id.</p>
-        <nav class="flow-rail" aria-label="How this fits together">
-          <span class="flow-rail-step done">1. Capability</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step">2. Agent uses it</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step">3. Automation loops it</span>
-        </nav>
-        <div id="caps-next" class="flow-callout hidden"></div>
-        <h2 class="section-title">Needs your approval</h2>
-        <div class="table-wrap">
-          <table class="data-table" id="caps-drafts-table">
-            <thead>
-              <tr>
-                <th>Draft</th>
-                <th>Source</th>
-                <th>Steps</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <p id="caps-drafts-empty" class="empty muted">No drafts. In a room, click <strong>Automate</strong> or type <code>/automate</code>.</p>
-        <h2 class="section-title">Ready to use</h2>
-        <div class="table-wrap">
-          <table class="data-table" id="caps-ready-table">
-            <thead>
-              <tr>
-                <th>Capability</th>
-                <th>Type</th>
-                <th>How to use</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <p id="caps-empty" class="empty muted hidden">No capabilities yet.</p>
-        <p id="caps-error" class="error" hidden></p>
-      </section>
-
-      <!-- AGENTS (layer 2) -->
+      <!-- AGENTS STUDIO -->
       <section id="tab-agents" class="tab-panel hidden">
         <header class="page-header">
           <div>
-            <p class="eyebrow">Who uses the verbs</p>
+            <p class="eyebrow">Studio</p>
             <h1>Agents</h1>
           </div>
           <div class="header-actions">
             <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Same registry as the room Specialists rail. <strong>Lenses</strong> only change the prompt (Bullish, Contrarian). <strong>Operators</strong> own capabilities (Analyst → Web research).</p>
-        <nav class="flow-rail" aria-label="How this fits together">
-          <span class="flow-rail-step">1. Capability</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step done">2. Agent uses it</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step">3. Automation loops it</span>
-        </nav>
-        <h2 class="section-title">Operators</h2>
-        <div id="agents-operators" class="agent-card-grid"></div>
-        <h2 class="section-title">Lenses (prompt only)</h2>
-        <div id="agents-lenses" class="agent-card-grid"></div>
-        <p id="agents-tab-empty" class="empty muted hidden">No agents defined.</p>
+        <p class="sub muted">Compose agents from lenses and capabilities, then assign them to rooms. Work runs in rooms — turn on Autonomy to let agents converse.</p>
+
+        <div class="studio-section-head">
+          <h2 class="section-title">Agents</h2>
+          <button type="button" id="new-agent-btn" class="tiny">New</button>
+        </div>
+        <div id="studio-agents" class="agent-card-grid"></div>
+
+        <div class="studio-section-head">
+          <h2 class="section-title">Lenses</h2>
+          <button type="button" id="new-lens-btn" class="tiny">Add new</button>
+        </div>
+        <div id="studio-lenses" class="agent-card-grid"></div>
+
+        <div class="studio-section-head">
+          <h2 class="section-title">Capabilities</h2>
+          <button type="button" id="new-cap-btn" class="tiny">Add new</button>
+        </div>
+        <div id="studio-caps" class="agent-card-grid"></div>
         <p id="agents-tab-error" class="error" hidden></p>
       </section>
 
-      <!-- AUTOMATIONS (layer 3) -->
-      <section id="tab-automations" class="tab-panel hidden">
-        <header class="page-header">
-          <div>
-            <p class="eyebrow">Running loops</p>
-            <h1>Automations</h1>
-          </div>
-          <div class="header-actions">
-            <button type="button" id="goto-automate-btn" class="ghost">Create from a room</button>
-            <button type="button" id="refresh-autos-btn" class="ghost">Refresh</button>
-          </div>
-        </header>
-        <p class="sub muted">Approved capability loops that can run on a schedule or on demand. Create them from a chat — not from this list.</p>
-        <nav class="flow-rail" aria-label="How this fits together">
-          <span class="flow-rail-step">1. Capability</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step">2. Agent uses it</span>
-          <span class="flow-rail-sep">→</span>
-          <span class="flow-rail-step done">3. Automation loops it</span>
-        </nav>
-        <div class="table-wrap">
-          <table class="data-table" id="autos-table">
-            <thead>
-              <tr>
-                <th>Automation</th>
-                <th>Capability loop</th>
-                <th>When</th>
-                <th>Last run</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div id="autos-empty" class="empty-card">
-          <p class="empty muted">No running automations yet.</p>
-          <ol class="flow-steps">
-            <li>Open a room and talk through the workflow</li>
-            <li>Click <strong>Automate</strong> (or type <code>/automate</code>)</li>
-            <li>Approve the draft under Capabilities</li>
-          </ol>
-          <button type="button" id="autos-empty-rooms-btn" class="tiny">Go to Rooms</button>
-        </div>
-        <p id="autos-error" class="error" hidden></p>
-      </section>
 
       <!-- REVIEW -->
       <section id="tab-review" class="tab-panel hidden">
@@ -400,7 +343,7 @@
             <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (also listed under Capabilities). Approve &amp; enable — then they show up as Automations. Room <code>/automate</code> is the fastest path from a chat.</p>
+        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (listed under Agents → Capabilities). Approve &amp; enable, then add them to an agent or a room’s skills. In a room, <code>/automate</code> opens Design.</p>
         <h2 class="section-title">Open proposals</h2>
         <div class="table-wrap">
           <table class="data-table" id="review-proposals-table">
@@ -788,6 +731,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=41"></script>
+  <script src="/static/app.js?v=43"></script>
 </body>
 </html>

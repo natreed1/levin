@@ -180,6 +180,16 @@ def _reply_qwen(
         except Exception:
             context_text = f"{author}: {text}"
 
+    room_guidance = ""
+    try:
+        room = store.room(room_id) if store is not None else None
+        if isinstance(room, dict):
+            from messenger.specialist_room import _room_guidance
+
+            room_guidance = _room_guidance(room)
+    except Exception:
+        room_guidance = ""
+
     def _unavailable(exc: BaseException) -> str:
         return (
             f"(Live model unavailable: {exc}. "
@@ -205,7 +215,12 @@ def _reply_qwen(
                 system=(
                     f"You are {personality.name} in a chat room. "
                     f"{personality.prompt} Never invent facts. "
-                    "If the user asks for current news, filings, or a live lookup, "
+                    + (
+                        f"\n{room_guidance}\nHonor the room objective and prompts."
+                        if room_guidance
+                        else ""
+                    )
+                    + " If the user asks for current news, filings, or a live lookup, "
                     "say you need a research pass rather than inventing sources."
                 ),
                 temperature=0.35,
@@ -323,8 +338,9 @@ def _kick_workflow(
                 msg = store.add_message(
                     author="Workflow",
                     body=(
-                        f"Workflow '{ritual_id}' is not approved/enabled for this "
-                        "account. Approve it under Automations first."
+                        f"Skill '{ritual_id}' is not approved/enabled for this "
+                        "account. Approve it under Agents → Capabilities, then add "
+                        "it to a room’s skills or an agent."
                     ),
                     room_id=room_id,
                 )
@@ -332,7 +348,7 @@ def _kick_workflow(
                 return
             started = store.add_message(
                 author="Workflow",
-                body=f"Starting workflow `{ritual_id}`…",
+                body=f"Ran `{ritual_id}`…",
                 room_id=room_id,
             )
             _broadcast(hub, loop, room_id, {"type": "message", "message": started})
@@ -347,7 +363,7 @@ def _kick_workflow(
                 )
                 done = store.add_message(
                     author="Workflow",
-                    body=f"`{ritual_id}` finished.\n{summary}",
+                    body=f"Ran `{ritual_id}` — finished.\n{summary}",
                     room_id=room_id,
                 )
                 _broadcast(hub, loop, room_id, {"type": "message", "message": done})

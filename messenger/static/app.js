@@ -21,6 +21,8 @@
     resetToken: null,
     specialistJob: null,
     specialistPoll: null,
+    devAutoLogin: false,
+    devUser: null,
   };
 
   const THEME_KEY = "flyleaf-theme";
@@ -71,10 +73,21 @@
 
   // --- Auth -----------------------------------------------------------------
 
-  function showAuth() {
+  function showAuth(opts = {}) {
     show($("#auth-screen"));
     hide($("#shell"));
     renderModelStatus(null);
+    if (opts.dev_auto_login != null) state.devAutoLogin = !!opts.dev_auto_login;
+    if (opts.dev_user !== undefined) state.devUser = opts.dev_user;
+    const panel = $("#dev-login-panel");
+    const btn = $("#dev-login-btn");
+    if (panel && state.devAutoLogin) {
+      show(panel);
+      const name = state.devUser?.display_name || "Dev";
+      if (btn) btn.textContent = `Continue as ${name}`;
+    } else if (panel) {
+      hide(panel);
+    }
   }
   function showShell() {
     hide($("#auth-screen"));
@@ -327,7 +340,12 @@
     await api("/api/auth/logout", { method: "POST" });
     closeWs();
     state.me = null;
-    showAuth();
+    // Re-probe so the local Dev button stays available after logout.
+    const { data } = await api("/api/me");
+    showAuth({
+      dev_auto_login: !!data?.dev_auto_login,
+      dev_user: data?.dev_user || null,
+    });
   });
 
   // Capture room invite + handle verify / reset deep links (login required).
@@ -406,9 +424,7 @@
     $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => hide(p));
     show($(`#tab-${tab}`));
-    if (tab === "capabilities") loadCapabilities();
-    if (tab === "agents") loadAgentsCatalog();
-    if (tab === "automations") loadAutomations();
+    if (tab === "agents") loadAgentsStudio();
     if (tab === "review") loadReview();
     if (tab === "tracking") loadTracking();
     if (tab === "settings") {
@@ -863,10 +879,13 @@
     }
     if (state.me?.authenticated) {
       show($("#invite-friend-btn"));
-      show($("#automate-room-btn"));
+      show($("#room-design-btn"));
+      show($("#autonomy-toggle-wrap"));
+      syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
-      hide($("#automate-room-btn"));
+      hide($("#room-design-btn"));
+      hide($("#autonomy-toggle-wrap"));
     }
     if (state.shareRoomId !== roomId) closeShareDialog();
     updateRoomContext(room);
@@ -874,8 +893,8 @@
     enableComposer(
       true,
       hasAgents
-        ? "Message the room… /automate · specialists use the model above"
-        : "Message… Automate in the header, or @Bullish for a lens"
+        ? "Message the room… /automate opens Design · agents use the model above"
+        : "Message… Design in the header, or @Bullish for a lens"
     );
     renderRails();
     await refreshModelStatus();
@@ -901,7 +920,8 @@
     hide($("#clear-chat"));
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
-    hide($("#automate-room-btn"));
+    hide($("#room-design-btn"));
+    hide($("#autonomy-toggle-wrap"));
     closeShareDialog();
     if (state.compute) {
       const source = state.compute.is_local ? "Local compute" : "API compute";
@@ -1009,7 +1029,7 @@
     if (!body) return;
     if (/^\/automate(?:\s|$)/i.test(body)) {
       $("#body").value = "";
-      openAutomateEditor();
+      openRoomDesign();
       return;
     }
     if (state.kind === "people") {
@@ -1070,109 +1090,6 @@
 
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-  function openAutomateEditor() {
-    setError("#automate-error", "");
-    if (state.kind !== "people" || !state.roomId) {
-      showFlowToast("Open a people room first, then click Automate.");
-      switchTab("chats");
-      return;
-    }
-    const lines = [];
-    $$("#messages .msg").forEach((el) => {
-      const author = el.querySelector(".author")?.textContent?.trim() || "";
-      const text = el.querySelector(".body")?.textContent?.trim() || "";
-      if (text) lines.push(author ? `${author}: ${text}` : text);
-    });
-    $("#automate-transcript").value =
-      lines.slice(-40).join("\n") || "(empty room — pick capabilities on the right)";
-    const base = ($("#stage-title")?.textContent || "room_loop")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_|_$/g, "")
-      .slice(0, 40) || "room_loop";
-    $("#automate-name").value = base;
-    const list = $("#automate-cap-list");
-    if (list && !list.dataset.ready) {
-      // filled async below
-    }
-    fillAutomateCapPicker().then(() => {
-      const dlg = $("#automate-dialog");
-      if (dlg?.showModal) dlg.showModal();
-    });
-  }
-
-  async function fillAutomateCapPicker() {
-    const list = $("#automate-cap-list");
-    if (!list) return;
-    list.innerHTML = "";
-    const { data } = await api("/api/capabilities");
-    const caps = (data?.capabilities || []).filter(
-      (c) =>
-        c.kind === "builtin" &&
-        (c.schedulable || c.id === "web_research" || c.id === "find_files")
-    );
-    const defaults = new Set(["web_research", "sec_filings_check", "note_digest"]);
-    caps.forEach((c) => {
-      const id = `cap-pick-${c.id}`;
-      const label = document.createElement("label");
-      label.className = "cap-pick-row";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.name = "cap-step";
-      input.value = c.id;
-      input.id = id;
-      input.checked = defaults.has(c.id);
-      const text = document.createElement("span");
-      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>
-        <span class="muted tiny-hint">${escapeHtml(c.summary || "")}</span>`;
-      label.appendChild(input);
-      label.appendChild(text);
-      list.appendChild(label);
-    });
-    list.dataset.ready = "1";
-  }
-
-  $("#automate-cancel")?.addEventListener("click", () => {
-    $("#automate-dialog")?.close();
-  });
-
-  $("#automate-form")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setError("#automate-error", "");
-    const name = $("#automate-name").value.trim();
-    const steps = $$('#automate-cap-list input[name="cap-step"]:checked').map(
-      (el) => el.value
-    );
-    if (!steps.length) {
-      setError("#automate-error", "Pick at least one capability");
-      return;
-    }
-    const preset = $("#automate-schedule-preset")?.value || "";
-    let schedule = null;
-    if (preset === "custom") schedule = $("#automate-schedule").value.trim() || null;
-    else if (preset) schedule = preset;
-    const { res, data } = await api("/api/automations/from-chat", {
-      method: "POST",
-      body: JSON.stringify({
-        name,
-        steps,
-        schedule,
-        room_id: state.roomId || null,
-        transcript: $("#automate-transcript").value,
-      }),
-    });
-    if (!res.ok) {
-      setError("#automate-error", data?.error || "Could not save draft");
-      return;
-    }
-    $("#automate-dialog")?.close();
-    state.highlightCapability = data.ritual_id;
-    showFlowToast(`Draft “${data.ritual_id}” saved — approve it to start the loop.`, {
-      tab: "capabilities",
-    });
-    loadCapabilities();
-  });
-
   function openWs() {
     closeWs();
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -1229,7 +1146,8 @@
     hide($("#clear-chat"));
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
-    hide($("#automate-room-btn"));
+    hide($("#room-design-btn"));
+    hide($("#autonomy-toggle-wrap"));
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
     $("#messages").innerHTML = "";
@@ -1259,243 +1177,105 @@
     renderRails();
   }
 
-  $("#delete-room").addEventListener("click", async () => {
-    const room = currentRoom();
-    const roomId = state.roomId;
-    if (!roomId || roomId === "legacy") return;
-    if (room?.owner_user_id && room.owner_user_id !== state.me?.user_id) {
-      setError("#chat-error", "Only the room owner can delete this room");
-      return;
-    }
-    if (
-      !confirm(
-        "Delete this room for everyone? Messages and membership are permanently removed."
-      )
-    ) {
-      return;
-    }
-    setError("#chat-error", "");
-    const { res, data } = await api(`/api/rooms/${encodeURIComponent(roomId)}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      setError("#chat-error", data?.error || "Could not delete room");
-      return;
-    }
-    await leaveDeletedRoom(roomId);
-  });
-
-  async function loadSpecialists() {
-    const { res, data } = await api("/api/specialists");
-    if (!res.ok) return;
-    state.specialists = data.specialists || [];
+  function syncAutonomyToggle(room) {
+    const box = $("#autonomy-toggle");
+    if (!box) return;
+    const enabled = !!(room?.config?.autonomy?.enabled);
+    box.checked = enabled;
   }
 
-  $("#new-room-btn").addEventListener("click", async () => {
-    await loadSpecialists();
-    $("#new-room-dialog").showModal();
-  });
-  $("#new-room-cancel").addEventListener("click", () => {
-    $("#new-room-dialog").close();
-  });
-  $("#new-room-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setError("#new-room-error", "");
-    const title = $("#new-room-title").value.trim();
-    const payload = {
-      title,
-      name: state.me?.name || state.me?.display_name,
-      kind: "people",
-    };
-    const { res, data } = await api("/api/rooms", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      setError("#new-room-error", data?.error || "Create failed");
+  function openRoomDesign() {
+    setError("#room-design-error", "");
+    if (state.kind !== "people" || !state.roomId) {
+      showFlowToast("Open a room first to set objective and skills.");
+      switchTab("chats");
       return;
     }
-    $("#new-room-dialog").close();
-    openShareDialog(data.share_url, data.room_id);
+    const room = currentRoom() || {};
+    const config = room.config || {};
+    $("#room-objective").value = config.objective || "";
+    $("#room-prompts").value = (config.prompts || []).join("\n");
+    fillRoomSkillsPicker(config.skills || []).then(() => {
+      $("#room-design-dialog")?.showModal?.();
+    });
+  }
+
+  async function fillRoomSkillsPicker(selected) {
+    const list = $("#room-skills-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const sel = new Set(selected || []);
+    const { data } = await api("/api/registry/capabilities");
+    const caps = (data?.capabilities || []).filter((c) => c.kind === "builtin" || c.approved);
+    caps.forEach((c) => {
+      const label = document.createElement("label");
+      label.className = "cap-pick-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "room-skill";
+      input.value = c.id;
+      input.checked = sel.has(c.id);
+      const text = document.createElement("span");
+      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>
+        <span class="muted tiny-hint">${escapeHtml(c.summary || "")}</span>`;
+      label.appendChild(input);
+      label.appendChild(text);
+      list.appendChild(label);
+    });
+  }
+
+  $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
+  $("#room-design-cancel")?.addEventListener("click", () => $("#room-design-dialog")?.close());
+  $("#room-design-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#room-design-error", "");
+    if (!state.roomId) return;
+    const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
+    const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        objective: $("#room-objective").value,
+        prompts: $("#room-prompts").value,
+        skills,
+      }),
+    });
+    if (!res.ok) {
+      setError("#room-design-error", data?.error || "Could not save");
+      return;
+    }
+    $("#room-design-dialog")?.close();
+    showFlowToast("Room design saved — turn on Autonomy to let agents run here.");
     await refreshChatRails();
-    await selectPeople(data.room_id, data.room_title, {
-      room_id: data.room_id,
-      title: data.room_title,
-      kind: data.kind || "people",
-      config: data.config || {},
-      owner_user_id: data.owner_user_id || state.me?.user_id,
-    });
+    if (state.roomId) {
+      const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
+      if (room) await selectPeople(room.room_id, room.title, room);
+    }
   });
 
-  async function runSpecialistAction(action, topic, rounds, continuous) {
+  $("#autonomy-toggle")?.addEventListener("change", async () => {
     if (!state.roomId) return;
-    setError("#chat-error", "");
-    const payload = { action, topic: topic || "" };
-    if (action === "debate") {
-      if (continuous) {
-        payload.continuous = true;
-      } else {
-        payload.rounds = Math.max(1, Math.min(5, Number(rounds) || 1));
-      }
-    }
-    const { res, data } = await api(`/api/rooms/${state.roomId}/specialist-run`, {
+    const enabled = !!$("#autonomy-toggle").checked;
+    const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/autonomy`, {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ enabled }),
     });
     if (!res.ok) {
-      setError(
-        "#chat-error",
-        data?.message || data?.error || "Specialist run failed"
-      );
-      if (data?.job) setSpecialistRunUi(data.job);
+      $("#autonomy-toggle").checked = !enabled;
+      setError("#chat-error", data?.message || data?.error || "Autonomy failed");
       return;
     }
-    if (data?.job) setSpecialistRunUi(data.job);
-  }
-
-  $("#specialist-present-btn").addEventListener("click", () => {
-    runSpecialistAction("present", "");
-  });
-  $("#specialist-debate-btn").addEventListener("click", () => {
-    state.debateAction = "debate";
-    $("#debate-dialog-title").textContent = "Specialist debate";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    show($("#debate-rounds-wrap"));
-    show($("#debate-loop-wrap"));
-    show($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    $("#debate-rounds").disabled = false;
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#specialist-idea-btn").addEventListener("click", () => {
-    state.debateAction = "idea";
-    $("#debate-dialog-title").textContent = "Idea pass";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    hide($("#debate-rounds-wrap"));
-    hide($("#debate-loop-wrap"));
-    hide($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#debate-continuous").addEventListener("change", () => {
-    const on = $("#debate-continuous").checked;
-    $("#debate-rounds").disabled = on;
-    if (on) {
-      hide($("#debate-rounds-hint"));
-      show($("#debate-loop-hint"));
-    } else {
-      show($("#debate-rounds-hint"));
-      hide($("#debate-loop-hint"));
-    }
-  });
-  $("#debate-cancel").addEventListener("click", () => {
-    $("#debate-dialog").close();
-  });
-  $("#debate-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const topic = $("#debate-topic").value.trim();
-    if (!topic) {
-      setError("#debate-error", "Topic required");
-      return;
-    }
-    const action = state.debateAction || "debate";
-    const continuous =
-      action === "debate" && $("#debate-continuous").checked;
-    const rounds = action === "debate" ? ($("#debate-rounds").value || "2") : "1";
-    $("#debate-dialog").close();
-    await runSpecialistAction(action, topic, rounds, continuous);
-  });
-  $("#specialist-stop-btn").addEventListener("click", () => stopSpecialistRun());
-  $("#specialist-stop-banner-btn").addEventListener("click", () => stopSpecialistRun());
-
-  function openShareDialog(shareUrl, roomId) {
-    state.shareUrl = shareUrl || null;
-    state.shareRoomId = roomId || null;
-    $("#share-url").value = shareUrl || "";
-    const dialog = $("#share-dialog");
-    if (dialog && !dialog.open) dialog.showModal();
-  }
-
-  function closeShareDialog() {
-    const dialog = $("#share-dialog");
-    if (dialog?.open) dialog.close();
-  }
-
-  $("#copy-share").addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText($("#share-url").value);
-    } catch {}
-  });
-
-  $("#invite-friend-btn").addEventListener("click", async () => {
-    if (!state.roomId) return;
-    setError("#chat-error", "");
-    const { res, data } = await api(
-      `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
-      { method: "POST", body: "{}" }
-    );
-    if (!res.ok) {
-      setError("#chat-error", data?.error || "Could not create invite");
-      return;
-    }
-    openShareDialog(data.share_url, state.roomId);
-  });
-
-  ["dragover", "dragleave", "drop"].forEach((eventName) => {
-    $("#chat-stage").addEventListener(eventName, async (event) => {
-      if (!state.roomId || state.kind !== "people") return;
-      if (eventName === "dragover") {
-        if (!event.dataTransfer.types.includes("application/x-workflow-agent")) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
-        $("#chat-stage").classList.add("drop-ready");
-        return;
-      }
-      $("#chat-stage").classList.remove("drop-ready");
-      if (eventName !== "drop") return;
-      event.preventDefault();
-      const agentId =
-        event.dataTransfer.getData("application/x-workflow-agent") ||
-        event.dataTransfer.getData("text/plain");
-      if (agentId) await addAgentToRoom(state.roomId, agentId);
-    });
-  });
-
-  // Keyboard: j/k moves through the single room list.
-  document.addEventListener("keydown", (e) => {
-    if (state.tab !== "chats") return;
-    if (e.target.matches("input, textarea")) return;
-    if (e.key === "j" || e.key === "k") {
-      const items = [
-        ...state.rooms.map((r) => ({ kind: "people", id: r.room_id, title: r.title })),
-        ...state.threads.map((t) => ({
-          kind: "agents",
-          id: t.session_id,
-          title: t.title,
-          master: t.master,
-        })),
-      ];
-      if (!items.length) return;
-      const cur = items.findIndex(
-        (it) =>
-          (state.kind === "people" && it.kind === "people" && it.id === state.roomId) ||
-          (state.kind === "agents" && it.kind === "agents" && it.id === state.threadId)
-      );
-      const next = e.key === "j"
-        ? Math.min(items.length - 1, cur + 1)
-        : Math.max(0, cur < 0 ? 0 : cur - 1);
-      const it = items[next];
-      if (it.kind === "people") selectPeople(it.id, it.title);
-      else selectAgent(it.id, it.title, !!it.master);
-      e.preventDefault();
+    showFlowToast(data?.message || (enabled ? "Autonomy on" : "Autonomy off"));
+    await refreshChatRails();
+    if (state.roomId) {
+      const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
+      $("#messages").innerHTML = "";
+      (msgs.data?.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
     }
   });
 
-  // --- Capabilities / Agents / Automations (three layers) --------------------
+  // --- Agents studio ---------------------------------------------------------
+
+  state.builderDropped = [];
 
   function showFlowToast(message, { tab } = {}) {
     const el = $("#flow-toast");
@@ -1507,253 +1287,238 @@
     if (tab) switchTab(tab);
   }
 
-  function friendlySchedule(cron) {
-    const map = {
-      "0 7 * * 1-5": "Weekday mornings (7:00)",
-      "0 12 * * 1-5": "Weekday noon",
-      "0 18 * * 1-5": "Weekday evenings (18:00)",
-    };
-    if (!cron) return "On demand";
-    return map[cron] || cron;
-  }
-
   async function approveCapability(ritualId) {
     const { res, data } = await api("/api/capabilities/approve", {
       method: "POST",
       body: JSON.stringify({ ritual_id: ritualId }),
     });
     if (!res.ok) {
-      setError("#caps-error", data?.error || "Approve failed");
+      setError("#agents-tab-error", data?.error || "Approve failed");
       return false;
     }
-    showFlowToast(`“${ritualId}” approved — it’s now a running automation.`, {
-      tab: "automations",
+    showFlowToast(`“${ritualId}” approved — add it to an agent or room skills.`, {
+      tab: "agents",
     });
-    loadAutomations();
+    loadAgentsStudio();
     return true;
   }
 
-  async function loadCapabilities() {
-    setError("#caps-error", "");
-    const { res, data } = await api("/api/capabilities");
-    const draftsBody = $("#caps-drafts-table tbody");
-    const readyBody = $("#caps-ready-table tbody");
-    if (draftsBody) draftsBody.innerHTML = "";
-    if (readyBody) readyBody.innerHTML = "";
-    const rows = data?.capabilities || [];
-    if (!res.ok) {
-      setError("#caps-error", data?.error || "Failed to load");
-      return;
-    }
-    const MICRO = new Set([
-      "fetch_quote",
-      "fetch_calendar",
-      "fetch_headlines",
-      "public_web_search",
-      "classify_message",
-    ]);
-    const drafts = rows.filter((c) => c.kind === "user" && !c.approved);
-    const readyPrimary = rows.filter(
-      (c) =>
-        (c.kind === "builtin" || c.approved) &&
-        !(c.kind === "builtin" && MICRO.has(c.id))
-    );
-    const readyMicro = rows.filter(
-      (c) => c.kind === "builtin" && MICRO.has(c.id)
-    );
-    $("#caps-drafts-empty")?.classList.toggle("hidden", drafts.length > 0);
-    $("#caps-empty")?.classList.add("hidden");
-
-    const callout = $("#caps-next");
-    if (callout) {
-      if (drafts.length) {
-        callout.innerHTML = `<strong>Next:</strong> Approve a draft below to turn it into an Automation loop.`;
-        show(callout);
-      } else {
-        callout.innerHTML = `<strong>Tip:</strong> In a room, click <em>Automate</em> to draft a loop from the conversation.`;
-        show(callout);
-      }
-    }
-
-    drafts.forEach((c) => {
-      const tr = document.createElement("tr");
-      if (state.highlightCapability === c.ritual_id) tr.classList.add("row-highlight");
-      const source =
-        c.proposed_by === "room_automate"
-          ? "from chat"
-          : c.proposed_by === "chat_mining"
-            ? "from chat gaps"
-            : c.proposed_by === "claude_review"
-              ? "from review"
-              : "from your work";
-      const steps = (c.steps || []).map((s) => escapeHtml(String(s))).join(" → ")
-        || escapeHtml(c.runner || "—");
-      tr.innerHTML = `
-        <td>
-          <strong>${escapeHtml(c.name || c.id || "")}</strong>
-          <div class="muted tiny-hint">${escapeHtml(c.summary || "")}</div>
-        </td>
-        <td><span class="badge draft">${escapeHtml(source)}</span></td>
-        <td class="muted tiny-hint">${steps}</td>
-        <td></td>`;
-      const td = tr.querySelector("td:last-child");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "tiny";
-      btn.textContent = "Approve & enable";
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        const ok = await approveCapability(c.ritual_id);
-        if (!ok) btn.disabled = false;
-        else loadCapabilities();
-      });
-      td.appendChild(btn);
-      draftsBody?.appendChild(tr);
-    });
-
-    readyPrimary.forEach((c) => {
-      const tr = document.createElement("tr");
-      const type = c.kind === "builtin" ? "built-in" : "yours";
-      tr.innerHTML = `
-        <td>
-          <strong>${escapeHtml(c.name || c.id || "")}</strong>
-          <div class="muted tiny-hint">${escapeHtml(c.summary || "")}</div>
-        </td>
-        <td><span class="badge approved">${escapeHtml(type)}</span></td>
-        <td class="muted tiny-hint">${escapeHtml(c.invoke || "")}</td>
-        <td></td>`;
-      const td = tr.querySelector("td:last-child");
-      if (c.kind === "user" && c.ritual_id) {
-        const run = document.createElement("button");
-        run.type = "button";
-        run.className = "tiny";
-        run.textContent = "Run";
-        run.addEventListener("click", async () => {
-          await api("/api/capabilities/run", {
-            method: "POST",
-            body: JSON.stringify({ ritual_id: c.ritual_id, stub: true }),
-          });
-          showFlowToast(`Ran “${c.ritual_id}” (stub).`);
-          loadCapabilities();
-        });
-        td.appendChild(run);
-      }
-      readyBody?.appendChild(tr);
-    });
-    if (readyMicro.length && readyBody) {
-      const tr = document.createElement("tr");
-      tr.className = "micro-caps-row";
-      tr.innerHTML = `<td colspan="4" class="muted tiny-hint">Also available inside workflows: ${readyMicro
-        .map((c) => escapeHtml(c.name || c.id))
-        .join(" · ")}</td>`;
-      readyBody.appendChild(tr);
-    }
-    state.highlightCapability = null;
-  }
-
-  function renderAgentCard(a) {
+  function studioCard(title, meta, body, actions) {
     const card = document.createElement("article");
-    card.className = "agent-dir-card" + (a.kind === "lens" ? " lens" : " operator");
-    const caps = (a.capability_details || [])
-      .map((c) => escapeHtml(c.name || c.id))
-      .join(", ");
-    card.innerHTML = `
-      <header>
-        <strong>${escapeHtml(a.name || a.id || "")}</strong>
-        <span class="badge ${a.kind === "lens" ? "draft" : "approved"}">${escapeHtml(a.kind || "")}</span>
-      </header>
-      <p class="muted tiny-hint">${escapeHtml(a.mention || "")}</p>
-      <p>${escapeHtml(a.summary || "")}</p>
-      <p class="muted tiny-hint"><strong>Uses:</strong> ${caps || (a.kind === "lens" ? "none — prompt only" : "—")}</p>
-      <p class="muted tiny-hint">${escapeHtml(a.how || "")}</p>`;
+    card.className = "agent-dir-card";
+    card.innerHTML = `<header><strong></strong><span class="badge"></span></header><p class="muted tiny-hint"></p><p></p><div class="card-actions"></div>`;
+    card.querySelector("strong").textContent = title;
+    card.querySelector(".badge").textContent = meta;
+    card.querySelector(".tiny-hint").textContent = body || "";
+    const actionsEl = card.querySelector(".card-actions");
+    (actions || []).forEach((btn) => actionsEl.appendChild(btn));
     return card;
   }
 
-  async function loadAgentsCatalog() {
+  async function loadAgentsStudio() {
     setError("#agents-tab-error", "");
-    const ops = $("#agents-operators");
-    const lenses = $("#agents-lenses");
-    if (ops) ops.innerHTML = "";
-    if (lenses) lenses.innerHTML = "";
-    const { res, data } = await api("/api/agents");
-    const rows = data?.agents || [];
-    $("#agents-tab-empty")?.classList.toggle("hidden", rows.length > 0);
-    if (!res.ok) {
-      setError("#agents-tab-error", data?.error || "Failed to load");
-      return;
-    }
-    rows.forEach((a) => {
-      const card = renderAgentCard(a);
-      if (a.kind === "lens") lenses?.appendChild(card);
-      else ops?.appendChild(card);
-    });
-  }
+    const [agents, lenses, caps] = await Promise.all([
+      api("/api/registry/agents"),
+      api("/api/registry/lenses"),
+      api("/api/registry/capabilities"),
+    ]);
+    const agentsEl = $("#studio-agents");
+    const lensesEl = $("#studio-lenses");
+    const capsEl = $("#studio-caps");
+    if (agentsEl) agentsEl.innerHTML = "";
+    if (lensesEl) lensesEl.innerHTML = "";
+    if (capsEl) capsEl.innerHTML = "";
 
-  async function loadAutomations() {
-    setError("#autos-error", "");
-    const { res, data } = await api("/api/automations/loops");
-    const tbody = $("#autos-table tbody");
-    if (tbody) tbody.innerHTML = "";
-    const rows = data?.automations || [];
-    const empty = $("#autos-empty");
-    if (empty) empty.classList.toggle("hidden", rows.length > 0);
-    if (tbody) tbody.closest(".table-wrap")?.classList.toggle("hidden", rows.length === 0);
-    if (!res.ok) {
-      setError("#autos-error", data?.error || "Failed to load");
-      return;
-    }
-    rows.forEach((a) => {
-      const tr = document.createElement("tr");
-      const caps = (a.capabilities || []).map((c) => escapeHtml(String(c))).join(" → ")
-        || escapeHtml(a.runner || "—");
-      const last = a.last_run?.ts ? fmtTime(a.last_run.ts) : "Never";
-      tr.innerHTML = `
-        <td>
-          <strong>${escapeHtml(a.name || a.id || "")}</strong>
-          <div class="muted tiny-hint">from ${escapeHtml((a.source || "capability").replace(/_/g, " "))}</div>
-        </td>
-        <td class="muted tiny-hint">${caps}</td>
-        <td>${escapeHtml(friendlySchedule(a.schedule))}</td>
-        <td class="muted tiny-hint">${escapeHtml(last)}</td>
-        <td></td>`;
-      const td = tr.querySelector("td:last-child");
-      if (a.ritual_id) {
-        const run = document.createElement("button");
-        run.type = "button";
-        run.className = "tiny";
-        run.textContent = "Run now";
-        run.addEventListener("click", async () => {
-          await api("/api/automations/run", {
-            method: "POST",
-            body: JSON.stringify({ ritual_id: a.ritual_id, stub: true }),
-          });
-          showFlowToast(`Ran “${a.ritual_id}”.`);
-          loadAutomations();
-        });
-        td.appendChild(run);
+    (agents.data?.agents || []).forEach((a) => {
+      if (!a.room_palette && a.id === "master") {
+        // still show master as operator
       }
-      tbody?.appendChild(tr);
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "tiny";
+      addBtn.textContent = "Add to open room";
+      addBtn.addEventListener("click", async () => {
+        if (state.kind === "people" && state.roomId) {
+          await addAgentToRoom(state.roomId, a.id);
+          showFlowToast(`Added ${a.name} to the room`);
+          switchTab("chats");
+        } else {
+          showFlowToast("Open a room first, then add the agent.");
+          switchTab("chats");
+        }
+      });
+      const caps = (a.capability_details || []).map((c) => c.name || c.id).join(", ") || "prompt only";
+      const card = studioCard(
+        a.name,
+        a.kind || "agent",
+        `${a.mention || ""} · ${caps}`,
+        [addBtn]
+      );
+      if (a.kind) card.classList.add(a.kind);
+      agentsEl?.appendChild(card);
+    });
+
+    (lenses.data?.lenses || []).forEach((ln) => {
+      lensesEl?.appendChild(
+        studioCard(ln.name, ln.kind === "builtin" ? "built-in" : "yours", ln.summary || ln.mention || "", [])
+      );
+    });
+
+    (caps.data?.capabilities || []).forEach((c) => {
+      const actions = [];
+      if (c.kind === "user" && !c.approved && c.ritual_id) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tiny";
+        btn.textContent = "Approve";
+        btn.addEventListener("click", () => approveCapability(c.ritual_id));
+        actions.push(btn);
+      }
+      capsEl?.appendChild(
+        studioCard(c.name || c.id, c.kind || "cap", c.summary || c.invoke || "", actions)
+      );
     });
   }
 
-  $("#mine-btn")?.addEventListener("click", async () => {
-    await api("/api/capabilities/mine", { method: "POST", body: "{}" });
-    showFlowToast("Looked for repeated workflows in your tracking data.");
-    loadCapabilities();
-  });
-  $("#refresh-caps-btn")?.addEventListener("click", loadCapabilities);
-  $("#refresh-agents-tab-btn")?.addEventListener("click", loadAgentsCatalog);
-  $("#refresh-autos-btn")?.addEventListener("click", loadAutomations);
-  $("#goto-automate-btn")?.addEventListener("click", () => switchTab("chats"));
-  $("#autos-empty-rooms-btn")?.addEventListener("click", () => switchTab("chats"));
-  $("#automate-room-btn")?.addEventListener("click", () => openAutomateEditor());
+  async function openAgentBuilder() {
+    setError("#agent-builder-error", "");
+    state.builderDropped = [];
+    $("#agent-builder-name").value = "";
+    $("#builder-dropped").innerHTML = "";
+    const [lenses, caps] = await Promise.all([
+      api("/api/registry/lenses"),
+      api("/api/registry/capabilities"),
+    ]);
+    const lensList = $("#builder-lenses");
+    const capList = $("#builder-caps");
+    lensList.innerHTML = "";
+    capList.innerHTML = "";
+    function chip(item, kind) {
+      const li = document.createElement("li");
+      li.className = "builder-chip";
+      li.draggable = true;
+      li.dataset.kind = kind;
+      li.dataset.id = item.id;
+      li.textContent = item.name || item.id;
+      li.addEventListener("dragstart", (ev) => {
+        ev.dataTransfer.setData("application/x-builder", JSON.stringify({ kind, id: item.id, name: item.name }));
+      });
+      return li;
+    }
+    (lenses.data?.lenses || []).forEach((ln) => lensList.appendChild(chip(ln, "lens")));
+    (caps.data?.capabilities || [])
+      .filter((c) => c.kind === "builtin" || c.approved)
+      .forEach((c) => capList.appendChild(chip(c, "capability")));
+    $("#agent-builder-dialog")?.showModal?.();
+  }
 
-  $("#automate-schedule-preset")?.addEventListener("change", () => {
-    const preset = $("#automate-schedule-preset").value;
-    const wrap = $("#automate-schedule-custom-wrap");
-    if (preset === "custom") show(wrap);
-    else hide(wrap);
+  function renderBuilderDropped() {
+    const ul = $("#builder-dropped");
+    ul.innerHTML = "";
+    state.builderDropped.forEach((item, idx) => {
+      const li = document.createElement("li");
+      li.textContent = `${item.kind}: ${item.name || item.id}`;
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "ghost tiny";
+      rm.textContent = "×";
+      rm.addEventListener("click", () => {
+        state.builderDropped.splice(idx, 1);
+        renderBuilderDropped();
+      });
+      li.appendChild(rm);
+      ul.appendChild(li);
+    });
+  }
+
+  const canvas = $("#builder-canvas");
+  canvas?.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    canvas.classList.add("drop-ready");
   });
+  canvas?.addEventListener("dragleave", () => canvas.classList.remove("drop-ready"));
+  canvas?.addEventListener("drop", (e) => {
+    e.preventDefault();
+    canvas.classList.remove("drop-ready");
+    try {
+      const item = JSON.parse(e.dataTransfer.getData("application/x-builder") || "{}");
+      if (!item.id) return;
+      if (state.builderDropped.some((x) => x.id === item.id && x.kind === item.kind)) return;
+      state.builderDropped.push(item);
+      renderBuilderDropped();
+    } catch (_) {}
+  });
+
+  $("#new-agent-btn")?.addEventListener("click", openAgentBuilder);
+  $("#agent-builder-cancel")?.addEventListener("click", () => $("#agent-builder-dialog")?.close());
+  $("#agent-builder-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#agent-builder-error", "");
+    const lens_ids = state.builderDropped.filter((x) => x.kind === "lens").map((x) => x.id);
+    const capability_ids = state.builderDropped.filter((x) => x.kind === "capability").map((x) => x.id);
+    const { res, data } = await api("/api/registry/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("#agent-builder-name").value,
+        lens_ids,
+        capability_ids,
+      }),
+    });
+    if (!res.ok) {
+      setError("#agent-builder-error", data?.error || "Could not create");
+      return;
+    }
+    $("#agent-builder-dialog")?.close();
+    showFlowToast(`Agent “${data.agent?.name || "created"}” ready — add it to a room.`);
+    loadAgentsStudio();
+    refreshChatRails();
+  });
+
+  $("#new-lens-btn")?.addEventListener("click", () => {
+    setError("#lens-new-error", "");
+    $("#lens-name").value = "";
+    $("#lens-prompt").value = "";
+    $("#lens-new-dialog")?.showModal?.();
+  });
+  $("#lens-new-cancel")?.addEventListener("click", () => $("#lens-new-dialog")?.close());
+  $("#lens-new-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const { res, data } = await api("/api/registry/lenses", {
+      method: "POST",
+      body: JSON.stringify({ name: $("#lens-name").value, prompt: $("#lens-prompt").value }),
+    });
+    if (!res.ok) {
+      setError("#lens-new-error", data?.error || "Failed");
+      return;
+    }
+    $("#lens-new-dialog")?.close();
+    showFlowToast("Lens created");
+    loadAgentsStudio();
+  });
+
+  $("#new-cap-btn")?.addEventListener("click", () => {
+    setError("#cap-new-error", "");
+    $("#cap-name").value = "";
+    $("#cap-summary").value = "";
+    $("#cap-new-dialog")?.showModal?.();
+  });
+  $("#cap-new-cancel")?.addEventListener("click", () => $("#cap-new-dialog")?.close());
+  $("#cap-new-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const { res, data } = await api("/api/registry/capabilities", {
+      method: "POST",
+      body: JSON.stringify({ name: $("#cap-name").value, summary: $("#cap-summary").value }),
+    });
+    if (!res.ok) {
+      setError("#cap-new-error", data?.error || "Failed");
+      return;
+    }
+    $("#cap-new-dialog")?.close();
+    showFlowToast("Capability created");
+    loadAgentsStudio();
+  });
+
+  $("#refresh-agents-tab-btn")?.addEventListener("click", loadAgentsStudio);
 
   // --- Review ----------------------------------------------------------------
 
@@ -3159,13 +2924,39 @@
 
   applyFrontierPreset();
 
+  async function tryDevLogin() {
+    const { res, data } = await api("/api/auth/dev-login", {
+      method: "POST",
+      body: "{}",
+    });
+    return !!(res.ok && data?.ok);
+  }
+
+  $("#dev-login-btn")?.addEventListener("click", async () => {
+    setError("#login-error", "");
+    const ok = await tryDevLogin();
+    if (!ok) {
+      setError("#login-error", "Local auto-login failed. Is MESSENGER_DEV_AUTO_LOGIN=1?");
+      return;
+    }
+    await bootstrap();
+  });
+
   // --- Bootstrap -------------------------------------------------------------
 
   async function bootstrap() {
-    const { res, data } = await api("/api/me");
+    let { res, data } = await api("/api/me");
     // App shell requires a real account — invite-only / guest sessions stay on login.
+    if ((!res.ok || !data?.authenticated) && data?.dev_auto_login) {
+      if (await tryDevLogin()) {
+        ({ res, data } = await api("/api/me"));
+      }
+    }
     if (!res.ok || !data?.authenticated) {
-      showAuth();
+      showAuth({
+        dev_auto_login: !!data?.dev_auto_login,
+        dev_user: data?.dev_user || null,
+      });
       return;
     }
     const joined = await consumePendingInvite();
