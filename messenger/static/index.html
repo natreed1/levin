@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=42" />
+  <link rel="stylesheet" href="/static/style.css?v=43" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -175,10 +175,10 @@
           </form>
         </dialog>
         <dialog id="new-room-dialog">
-          <form id="new-room-form" method="dialog">
+          <form id="new-room-form">
             <h3>New room</h3>
             <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <p class="muted tiny-hint">Invite friends after creating it, or drag specialists into it from the room rail.</p>
+            <p class="muted tiny-hint">After create you’ll set the room Design (objective, prompts, skills). Invite friends anytime from the header.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -767,6 +767,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=45"></script>
+  <script src="/static/app.js?v=46"></script>
 </body>
 </html>

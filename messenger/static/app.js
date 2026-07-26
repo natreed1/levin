@@ -887,15 +887,17 @@
       hide($("#room-design-btn"));
       hide($("#autonomy-toggle-wrap"));
     }
-    if (state.shareRoomId !== roomId) closeShareDialog();
-    updateRoomContext(room);
-    updateSpecialistActions(room);
     enableComposer(
       true,
       hasAgents
         ? "Message the room… /automate opens Design · agents use the model above"
         : "Message… Design in the header, or @Bullish for a lens"
     );
+    if (state.shareRoomId !== roomId && typeof closeShareDialog === "function") {
+      closeShareDialog();
+    }
+    updateRoomContext(room);
+    updateSpecialistActions(room);
     renderRails();
     await refreshModelStatus();
 
@@ -1176,6 +1178,252 @@
     enableComposer(false, "Create or open a room to chat");
     renderRails();
   }
+
+  $("#delete-room").addEventListener("click", async () => {
+    const room = currentRoom();
+    const roomId = state.roomId;
+    if (!roomId || roomId === "legacy") return;
+    if (room?.owner_user_id && room.owner_user_id !== state.me?.user_id) {
+      setError("#chat-error", "Only the room owner can delete this room");
+      return;
+    }
+    if (
+      !confirm(
+        "Delete this room for everyone? Messages and membership are permanently removed."
+      )
+    ) {
+      return;
+    }
+    setError("#chat-error", "");
+    const { res, data } = await api(`/api/rooms/${encodeURIComponent(roomId)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      setError("#chat-error", data?.error || "Could not delete room");
+      return;
+    }
+    await leaveDeletedRoom(roomId);
+  });
+
+  async function loadSpecialists() {
+    const { res, data } = await api("/api/specialists");
+    if (!res.ok) return;
+    state.specialists = data.specialists || [];
+  }
+
+  $("#new-room-btn").addEventListener("click", async () => {
+    await loadSpecialists();
+    setError("#new-room-error", "");
+    const title = $("#new-room-title");
+    if (title) title.value = "";
+    const dlg = $("#new-room-dialog");
+    try {
+      dlg?.showModal?.();
+    } catch (err) {
+      setError("#chat-error", String(err.message || err));
+    }
+  });
+  $("#new-room-cancel").addEventListener("click", () => {
+    $("#new-room-dialog").close();
+  });
+  $("#new-room-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#new-room-error", "");
+    const title = $("#new-room-title").value.trim();
+    const payload = {
+      title,
+      name: state.me?.name || state.me?.display_name,
+      kind: "people",
+    };
+    const { res, data } = await api("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      setError("#new-room-error", data?.error || "Create failed");
+      return;
+    }
+    $("#new-room-dialog").close();
+    await refreshChatRails();
+    await selectPeople(data.room_id, data.room_title, {
+      room_id: data.room_id,
+      title: data.room_title,
+      kind: data.kind || "people",
+      config: data.config || {},
+      owner_user_id: data.owner_user_id || state.me?.user_id,
+    });
+    // Design is the room setup surface (objective / skills / prompts).
+    openRoomDesign();
+  });
+
+  async function runSpecialistAction(action, topic, rounds, continuous) {
+    if (!state.roomId) return;
+    setError("#chat-error", "");
+    const payload = { action, topic: topic || "" };
+    if (action === "debate") {
+      if (continuous) {
+        payload.continuous = true;
+      } else {
+        payload.rounds = Math.max(1, Math.min(5, Number(rounds) || 1));
+      }
+    }
+    const { res, data } = await api(`/api/rooms/${state.roomId}/specialist-run`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      setError(
+        "#chat-error",
+        data?.message || data?.error || "Specialist run failed"
+      );
+      if (data?.job) setSpecialistRunUi(data.job);
+      return;
+    }
+    if (data?.job) setSpecialistRunUi(data.job);
+  }
+
+  $("#specialist-present-btn").addEventListener("click", () => {
+    runSpecialistAction("present", "");
+  });
+  $("#specialist-debate-btn").addEventListener("click", () => {
+    state.debateAction = "debate";
+    $("#debate-dialog-title").textContent = "Specialist debate";
+    $("#debate-topic").value = "";
+    $("#debate-continuous").checked = false;
+    show($("#debate-rounds-wrap"));
+    show($("#debate-loop-wrap"));
+    show($("#debate-rounds-hint"));
+    hide($("#debate-loop-hint"));
+    $("#debate-rounds").disabled = false;
+    setError("#debate-error", "");
+    $("#debate-dialog").showModal();
+  });
+  $("#specialist-idea-btn").addEventListener("click", () => {
+    state.debateAction = "idea";
+    $("#debate-dialog-title").textContent = "Idea pass";
+    $("#debate-topic").value = "";
+    $("#debate-continuous").checked = false;
+    hide($("#debate-rounds-wrap"));
+    hide($("#debate-loop-wrap"));
+    hide($("#debate-rounds-hint"));
+    hide($("#debate-loop-hint"));
+    setError("#debate-error", "");
+    $("#debate-dialog").showModal();
+  });
+  $("#debate-continuous").addEventListener("change", () => {
+    const on = $("#debate-continuous").checked;
+    $("#debate-rounds").disabled = on;
+    if (on) {
+      hide($("#debate-rounds-hint"));
+      show($("#debate-loop-hint"));
+    } else {
+      show($("#debate-rounds-hint"));
+      hide($("#debate-loop-hint"));
+    }
+  });
+  $("#debate-cancel").addEventListener("click", () => {
+    $("#debate-dialog").close();
+  });
+  $("#debate-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const topic = $("#debate-topic").value.trim();
+    if (!topic) {
+      setError("#debate-error", "Topic required");
+      return;
+    }
+    const action = state.debateAction || "debate";
+    const continuous =
+      action === "debate" && $("#debate-continuous").checked;
+    const rounds = action === "debate" ? ($("#debate-rounds").value || "2") : "1";
+    $("#debate-dialog").close();
+    await runSpecialistAction(action, topic, rounds, continuous);
+  });
+  $("#specialist-stop-btn").addEventListener("click", () => stopSpecialistRun());
+  $("#specialist-stop-banner-btn").addEventListener("click", () => stopSpecialistRun());
+
+  function openShareDialog(shareUrl, roomId) {
+    state.shareUrl = shareUrl || null;
+    state.shareRoomId = roomId || null;
+    $("#share-url").value = shareUrl || "";
+    const dialog = $("#share-dialog");
+    if (dialog && !dialog.open) dialog.showModal();
+  }
+
+  function closeShareDialog() {
+    const dialog = $("#share-dialog");
+    if (dialog?.open) dialog.close();
+  }
+
+  $("#copy-share").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#share-url").value);
+    } catch {}
+  });
+
+  $("#invite-friend-btn").addEventListener("click", async () => {
+    if (!state.roomId) return;
+    setError("#chat-error", "");
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
+      { method: "POST", body: "{}" }
+    );
+    if (!res.ok) {
+      setError("#chat-error", data?.error || "Could not create invite");
+      return;
+    }
+    openShareDialog(data.share_url, state.roomId);
+  });
+
+  ["dragover", "dragleave", "drop"].forEach((eventName) => {
+    $("#chat-stage").addEventListener(eventName, async (event) => {
+      if (!state.roomId || state.kind !== "people") return;
+      if (eventName === "dragover") {
+        if (!event.dataTransfer.types.includes("application/x-workflow-agent")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        $("#chat-stage").classList.add("drop-ready");
+        return;
+      }
+      $("#chat-stage").classList.remove("drop-ready");
+      if (eventName !== "drop") return;
+      event.preventDefault();
+      const agentId =
+        event.dataTransfer.getData("application/x-workflow-agent") ||
+        event.dataTransfer.getData("text/plain");
+      if (agentId) await addAgentToRoom(state.roomId, agentId);
+    });
+  });
+
+  // Keyboard: j/k moves through the single room list.
+  document.addEventListener("keydown", (e) => {
+    if (state.tab !== "chats") return;
+    if (e.target.matches("input, textarea")) return;
+    if (e.key === "j" || e.key === "k") {
+      const items = [
+        ...state.rooms.map((r) => ({ kind: "people", id: r.room_id, title: r.title })),
+        ...state.threads.map((t) => ({
+          kind: "agents",
+          id: t.session_id,
+          title: t.title,
+          master: t.master,
+        })),
+      ];
+      if (!items.length) return;
+      const cur = items.findIndex(
+        (it) =>
+          (state.kind === "people" && it.kind === "people" && it.id === state.roomId) ||
+          (state.kind === "agents" && it.kind === "agents" && it.id === state.threadId)
+      );
+      const next = e.key === "j"
+        ? Math.min(items.length - 1, cur + 1)
+        : Math.max(0, cur < 0 ? 0 : cur - 1);
+      const it = items[next];
+      if (it.kind === "people") selectPeople(it.id, it.title);
+      else selectAgent(it.id, it.title, !!it.master);
+      e.preventDefault();
+    }
+  });
+
 
   function syncAutonomyToggle(room) {
     const box = $("#autonomy-toggle");
