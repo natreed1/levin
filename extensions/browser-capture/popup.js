@@ -11,7 +11,8 @@ const tabDot = document.getElementById("tabDot");
 const tabState = document.getElementById("tabState");
 const tabToggle = document.getElementById("tabToggle");
 
-const DEFAULT_ENDPOINT = "http://127.0.0.1:8790/api/ingest-browser";
+const DEFAULT_ORIGIN = "https://levin.fly.dev";
+const DEFAULT_ENDPOINT = DEFAULT_ORIGIN + "/api/ingest-browser";
 
 // Kept in sync with background.js
 const SITE_PRESETS = [
@@ -53,7 +54,7 @@ function apiBase() {
     const u = new URL(ep);
     return `${u.protocol}//${u.host}`;
   } catch {
-    return "http://127.0.0.1:8790";
+    return DEFAULT_ORIGIN;
   }
 }
 
@@ -61,12 +62,15 @@ function isLedgerAppUrl(url, endpoint) {
   try {
     const u = new URL(url);
     const h = (u.hostname || "").toLowerCase();
+    if (h === "levin.fly.dev" || h.endsWith(".levin.fly.dev")) return true;
     if (h !== "127.0.0.1" && h !== "localhost" && h !== "::1") return false;
     const port = parseInt(u.port, 10) || (u.protocol === "https:" ? 443 : 80);
     const ports = new Set([8788, 8790]);
     try {
       const ep = new URL(endpoint || DEFAULT_ENDPOINT);
-      ports.add(parseInt(ep.port, 10) || 80);
+      if (ep.hostname === "127.0.0.1" || ep.hostname === "localhost") {
+        ports.add(parseInt(ep.port, 10) || 80);
+      }
     } catch {
       /* ignore */
     }
@@ -177,15 +181,17 @@ function renderTabState() {
   cap.textContent = st.kind === "auto" ? "Capture now (also auto)" : "Capture this tab now";
 }
 
-function persist() {
-  chrome.storage.local.set({
+function persist(opts) {
+  const payload = {
     endpoint: endpointEl.value.trim() || DEFAULT_ENDPOINT,
     autoSession: autoEl.checked,
     enabled: enabledEl.checked,
     deepResearch: deepEl.checked,
     siteEnabled,
     excludedHosts,
-  });
+  };
+  if (opts && opts.pinEndpoint) payload.endpointPinned = true;
+  chrome.storage.local.set(payload);
 }
 
 function renderSites() {
@@ -316,7 +322,7 @@ deepEl.addEventListener("change", () => {
   );
 });
 autoEl.addEventListener("change", persist);
-endpointEl.addEventListener("change", persist);
+endpointEl.addEventListener("change", () => persist({ pinEndpoint: true }));
 
 document.getElementById("capture").addEventListener("click", () => {
   persist();

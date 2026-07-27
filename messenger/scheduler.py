@@ -204,3 +204,69 @@ class CloudScheduler:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("scheduler tick error: %s", exc)
             self._stop.wait(self._interval)
+
+
+class ClassifySweep:
+    """Background pass: fill missing kind labels via classify_pending (Qwen-capable)."""
+
+    def __init__(
+        self,
+        *,
+        list_user_ids: Callable[[], list[str]],
+        interval_seconds: float = 300.0,
+        limit_per_user: int = 20,
+    ) -> None:
+        self._list_user_ids = list_user_ids
+        self._interval = max(60.0, float(interval_seconds))
+        self._limit = max(1, int(limit_per_user))
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="messenger-classify-sweep", daemon=True
+        )
+        self._thread.start()
+        logger.info("ClassifySweep started (interval=%ss)", self._interval)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def tick(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        try:
+            user_ids = list(self._list_user_ids())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("classify sweep list_user_ids failed: %s", exc)
+            return results
+
+        from messenger.tenancy import user_context
+
+        for user_id in user_ids:
+            try:
+                with user_context(user_id) as ledger:
+                    from analyst_ledger.classify import classify_pending
+
+                    result = classify_pending(ledger, limit=self._limit)
+                    results.append({"user_id": user_id, **result})
+                    if result.get("classified"):
+                        logger.info(
+                            "classify sweep user=%s classified=%s",
+                            user_id,
+                            result.get("classified"),
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("classify sweep user %s failed: %s", user_id, exc)
+                results.append({"user_id": user_id, "error": str(exc)})
+        return results
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("classify sweep tick error: %s", exc)
+            self._stop.wait(self._interval)

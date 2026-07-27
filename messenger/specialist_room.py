@@ -75,7 +75,11 @@ def _room_specialists(room: dict[str, Any]) -> List[FriendPersonality]:
             config = json.loads(room["config_json"])
         except Exception:
             config = {}
-    ids = config.get("specialists") if isinstance(config, dict) else None
+    ids = (
+        config.get("agents") or config.get("specialists")
+        if isinstance(config, dict)
+        else None
+    )
     return resolve_specialists(ids)
 
 
@@ -158,6 +162,28 @@ def _live_reply(
     ).strip()
 
 
+def _room_guidance(room: dict[str, Any]) -> str:
+    """Objective + prompts from room config — guides autonomous / specialist turns."""
+    config = room.get("config") if isinstance(room.get("config"), dict) else {}
+    if not isinstance(config, dict):
+        return ""
+    parts: list[str] = []
+    objective = str(config.get("objective") or "").strip()
+    if objective:
+        parts.append(f"Room objective: {objective}")
+    prompts = config.get("prompts") or []
+    if isinstance(prompts, list):
+        cleaned = [str(p).strip() for p in prompts if str(p).strip()]
+        if cleaned:
+            parts.append("Room prompts:\n- " + "\n- ".join(cleaned[:8]))
+    skills = config.get("skills") or []
+    if isinstance(skills, list):
+        ids = [str(s).strip() for s in skills if str(s).strip()]
+        if ids:
+            parts.append("Room skills (capabilities): " + ", ".join(ids[:12]))
+    return "\n".join(parts)
+
+
 def _speak(
     personality: FriendPersonality,
     *,
@@ -169,6 +195,7 @@ def _speak(
     round_num: int = 1,
     rounds_total: int = 1,
     continuous: bool = False,
+    room_guidance: str = "",
 ) -> str:
     round_hint = ""
     if mode == "debate":
@@ -190,9 +217,11 @@ def _speak(
                     f"Final argument round {round_num} of {rounds_total}. "
                     "Close your case; name what would change your mind."
                 )
+    guidance_block = f"\n{room_guidance}\n" if room_guidance else ""
     user_prompt = (
         f"Topic: {topic or '(none)'}\n"
-        f"{round_hint}\n\n"
+        f"{round_hint}\n"
+        f"{guidance_block}\n"
         f"Ledger brief (INTERNAL only):\n{brief}\n\n"
         f"Prior turns:\n" + ("\n---\n".join(prior[-12:]) if prior else "(none)") + "\n\n"
         "Write your turn now. Plain text, under 350 words. No markdown fences."
@@ -202,6 +231,10 @@ def _speak(
         "Never invent facts, dates, numbers, or sources. "
         "If evidence is thin, say what is missing."
     )
+    if room_guidance:
+        system_extra += (
+            " Honor the room objective and prompts; treat them as standing instructions."
+        )
     if not stub:
         try:
             live = _live_reply(
@@ -302,7 +335,12 @@ class SpecialistJobRegistry:
             if job and job.status == "running":
                 job.stop_event.set()
                 return job
-            return job
+            return None
+
+    def latest_for_room(self, room_id: str) -> Optional[SpecialistJob]:
+        with self._lock:
+            jid = self._by_room.get(room_id)
+            return self._jobs.get(jid) if jid else None
 
 
 _REGISTRY = SpecialistJobRegistry()
@@ -328,8 +366,11 @@ def run_specialist_action(
     loop: Any = None,
 ) -> dict[str, Any]:
     action = str(action or "").strip().lower()
-    if action not in VALID_ACTIONS:
-        raise ValueError(f"Unknown action '{action}'. Expected: present, debate, idea")
+    if not action or action not in VALID_ACTIONS:
+        raise ValueError(
+            "Empty or unknown action "
+            f"{action!r}. Expected: present, debate, or idea"
+        )
 
     stop = stop_event or threading.Event()
     continuous = bool(continuous) and action == "debate"
@@ -344,11 +385,23 @@ def run_specialist_action(
         rounds_n = max(1, min(rounds_n, MAX_FIXED_ROUNDS))
 
     room_id = room["room_id"]
-    specialists = _room_specialists(room)
+    if owner_user_id:
+        from messenger.tenancy import user_context
+
+        with user_context(owner_user_id):
+            specialists = _room_specialists(room)
+    else:
+        specialists = _room_specialists(room)
     if len(specialists) < 2 and action != "present":
         raise ValueError("Specialist rooms need at least two specialists for debate/idea")
     if not specialists:
-        specialists = resolve_specialists(None)
+        if owner_user_id:
+            from messenger.tenancy import user_context
+
+            with user_context(owner_user_id):
+                specialists = resolve_specialists(None)
+        else:
+            specialists = resolve_specialists(None)
 
     topic = " ".join(str(topic or "").split())[:400]
     brief = _recent_work_brief(owner_user_id)
@@ -358,7 +411,11 @@ def run_specialist_action(
         try:
             from messenger.model_link import registry as model_registry
 
-            endpoint = model_registry().endpoint_for_call(owner_user_id)
+            room_profile = (room.get("config") or {}).get("model_profile_id")
+            endpoint = model_registry().endpoint_for_call(
+                owner_user_id,
+                profile_id=str(room_profile).strip() or None if room_profile else None,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("model link lookup failed: %s", exc)
 
@@ -434,6 +491,7 @@ def _run_specialist_action_body(
     prior: list[str] = []
     posted = 0
     stopped_early = False
+    guidance = _room_guidance(room)
 
     def _stopped() -> bool:
         return stop.is_set()
@@ -450,6 +508,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
             )
             _post(store, hub, room_id, personality.name, body, loop=loop)
             prior.append(f"{personality.name}: {body}")
@@ -470,6 +529,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
             )
             _post(store, hub, room_id, personality.name, body, loop=loop)
             prior.append(f"{personality.name}: {body}")
@@ -502,6 +562,7 @@ def _run_specialist_action_body(
                     brief=brief,
                     prior=prior,
                     stub=stub,
+                room_guidance=guidance,
                     round_num=round_num,
                     rounds_total=rounds_n,
                     continuous=continuous,
@@ -526,6 +587,7 @@ def _run_specialist_action_body(
                     brief=brief,
                     prior=prior,
                     stub=stub,
+                room_guidance=guidance,
                     round_num=round_num,
                     rounds_total=rounds_n,
                     continuous=True,
@@ -546,6 +608,7 @@ def _run_specialist_action_body(
                 brief=brief,
                 prior=prior,
                 stub=stub,
+                room_guidance=guidance,
                 round_num=rounds_n,
                 rounds_total=rounds_n,
             )
@@ -609,7 +672,13 @@ def start_specialist_job(
     loop: Any = None,
 ) -> SpecialistJob:
     """Register + spawn a background thread; returns immediately."""
-    continuous = bool(continuous) and str(action or "").strip().lower() == "debate"
+    action = str(action or "").strip().lower()
+    if not action or action not in VALID_ACTIONS:
+        raise ValueError(
+            "Empty or unknown action "
+            f"{action!r}. Expected: present, debate, or idea"
+        )
+    continuous = bool(continuous) and action == "debate"
     job = SpecialistJob(
         job_id="job_" + uuid.uuid4().hex[:12],
         room_id=room["room_id"],

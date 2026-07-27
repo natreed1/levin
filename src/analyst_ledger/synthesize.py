@@ -16,14 +16,27 @@ from .schema import Event, Sensitivity, Surface, sensitivity_allows_egress
 
 # Destinations whose model runs on this machine; everything else (including
 # unknown strings, which run_synthesis routes to Anthropic) counts as external.
-LOCAL_DESTINATIONS = {"qwen", "local_stub"}
+LOCAL_DESTINATIONS = {"qwen", "local_stub", "ollama", "lmstudio"}
+
+# Per-request / per-job override so each Workflow user can point at their own
+# Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
+_QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "qwen_endpoint", default=None
+)
 
 
 def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -> None:
     """Hard gate at the model-call boundary: external models (Anthropic/Bedrock)
     accept an egress ceiling of `internal` at most; local destinations may go up
     to `confidential`; `restricted` never goes to any model."""
-    is_local = destination in LOCAL_DESTINATIONS
+    dest = (destination or "").strip().lower()
+    is_local = dest in LOCAL_DESTINATIONS
+    # Endpoint overrides may mark is_local explicitly via ContextVar metadata.
+    override = _QWEN_ENDPOINT.get() or {}
+    if str(override.get("is_local") or "") in {"1", "true", "yes"}:
+        is_local = True
+    if str(override.get("destination") or "").strip().lower() in LOCAL_DESTINATIONS:
+        is_local = True
     ceiling = Sensitivity.CONFIDENTIAL if is_local else Sensitivity.INTERNAL
     if not sensitivity_allows_egress(max_sensitivity, ceiling):
         raise RuntimeError(
@@ -32,12 +45,6 @@ def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -
             f"'confidential' must stay on a local destination ({', '.join(sorted(LOCAL_DESTINATIONS))}); "
             f"'restricted' content never goes to any model."
         )
-
-# Per-request / per-job override so each Workflow user can point at their own
-# Claude / GPT / Ollama / OpenRouter endpoint instead of a shared operator machine.
-_QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
-    "qwen_endpoint", default=None
-)
 
 
 @contextmanager
@@ -238,7 +245,8 @@ def _call_anthropic_messages(
             "or use an OpenAI-compatible provider under Model."
         ) from exc
 
-    # Per-user Model-tab override first, then env; claude-sonnet-4-20250514 is retired.
+    # Per-user Model-tab override, else ANALYST_CLAUDE_MODEL.
+    # (claude-sonnet-4-20250514 is retired.)
     model = (
         (override.get("model") or "").strip()
         or os.environ.get("ANALYST_CLAUDE_MODEL", "claude-sonnet-5").strip()
@@ -338,18 +346,18 @@ def _call_openai_compatible_messages(
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         err = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"Qwen endpoint HTTP {exc.code}: {err}") from exc
+        raise RuntimeError(f"Local model HTTP {exc.code}: {err}") from exc
     except urllib.error.URLError as exc:
         hint = (
-            "Link your local model under the Model tab (run the tunnel on your computer), "
-            "or set ANALYST_QWEN_BASE_URL for a self-hosted server."
+            "Click Start local model (or Settings → Open source) so Companion "
+            "can open a tunnel, then try again."
         )
         raise RuntimeError(
-            f"Qwen endpoint unreachable at {base_url}. {hint}"
+            f"Local model unreachable at {base_url}. {hint}"
         ) from exc
     choices = body.get("choices") or []
     if not choices:
-        raise RuntimeError("Qwen endpoint returned no choices.")
+        raise RuntimeError("Local model returned no choices.")
     message = choices[0].get("message") or {}
     return str(message.get("content") or "").strip()
 

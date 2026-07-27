@@ -18,39 +18,53 @@ from messenger.auth import (
     COOKIE_NAME,
     invite_ok,
     normalize_name,
-    read_identity,
+    normalize_title,
 )
 from messenger.db import MessageStore
 from messenger.deps import (
     clear_session_cookie,
     current_user,
+    resolve_identity,
     set_session_cookie,
 )
 from messenger.routers import (
     agent_chats_router,
+    agents_catalog_router,
     auth_router,
     automations_router,
+    capabilities_router,
+    registry_router,
     review_router,
     tracking_router,
 )
-from messenger.scheduler import CloudScheduler
+from messenger.scheduler import CloudScheduler, ClassifySweep
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_LEN = 2000
 RATE_LIMIT_WINDOW = 10.0  # seconds
 RATE_LIMIT_MAX = 20  # messages per window per author
+LOGIN_RATE_LIMIT_WINDOW = 900.0  # 15 minutes
+LOGIN_RATE_LIMIT_MAX = 10
+AUTH_EMAIL_RATE_LIMIT_WINDOW = 900.0  # 15 minutes
+AUTH_EMAIL_RATE_LIMIT_MAX = 5
 
 
 class RateLimiter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        window: float = RATE_LIMIT_WINDOW,
+        max_hits: int = RATE_LIMIT_MAX,
+    ) -> None:
+        self._window = float(window)
+        self._max_hits = int(max_hits)
         self._hits: dict[str, list[float]] = {}
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         bucket = self._hits.setdefault(key, [])
-        cutoff = now - RATE_LIMIT_WINDOW
+        cutoff = now - self._window
         self._hits[key] = [t for t in bucket if t >= cutoff]
-        if len(self._hits[key]) >= RATE_LIMIT_MAX:
+        if len(self._hits[key]) >= self._max_hits:
             return False
         self._hits[key].append(now)
         return True
@@ -104,6 +118,45 @@ def _public_base_url(request: Request) -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
+
+def _capture_people_room_message(
+    store: MessageStore,
+    *,
+    room_id: str,
+    author: str,
+    text: str,
+    msg: dict[str, Any],
+    identity: dict[str, Any],
+) -> None:
+    """Mirror one People-room message into the room owner's Tracking ledger.
+
+    Non-blocking: must never raise into the chat send path.
+    """
+    try:
+        from analyst_ledger.messenger_sync import capture_room_message
+        from messenger.tenancy import user_context
+
+        owner_user_id = identity.get("user_id")
+        room_title = ""
+        if room_id != "legacy":
+            room = store.room(room_id) or {}
+            owner_user_id = room.get("owner_user_id") or owner_user_id
+            room_title = str(room.get("title") or "")
+        if not owner_user_id:
+            return
+        with user_context(str(owner_user_id)) as led:
+            capture_room_message(
+                led,
+                room_id,
+                author,
+                text,
+                room_title=room_title,
+                messenger_id=msg.get("id"),
+            )
+    except Exception:  # noqa: BLE001 — capture must never break chat
+        pass
+
+
 def _maybe_dispatch_agent_mention(
     app: FastAPI,
     *,
@@ -112,10 +165,21 @@ def _maybe_dispatch_agent_mention(
     body: str,
     owner_user_id: Optional[str],
 ) -> None:
-    """In-process @Qwen / @workflow hooks (no HTTP bridge hop)."""
+    """In-process agent / @workflow hooks (no HTTP bridge hop)."""
     text = body or ""
     lower = text.lower()
-    if "@qwen" not in lower and "@workflow" not in lower:
+    # Cheap prefilter before spinning a thread. Keep in sync with
+    # friend_personalities mentions (role names + legacy @Qwen*).
+    mention_hints = (
+        "@qwen",
+        "@analyst",
+        "@bullish",
+        "@bull",
+        "@contrarian",
+        "@synthesizer",
+        "@workflow",
+    )
+    if not any(h in lower for h in mention_hints):
         return
     # Defer to a daemon thread so the request path stays fast.
     import threading
@@ -145,6 +209,12 @@ def create_app() -> FastAPI:
     store = MessageStore()
     hub = RoomHub()
     limiter = RateLimiter()
+    login_limiter = RateLimiter(
+        window=LOGIN_RATE_LIMIT_WINDOW, max_hits=LOGIN_RATE_LIMIT_MAX
+    )
+    auth_email_limiter = RateLimiter(
+        window=AUTH_EMAIL_RATE_LIMIT_WINDOW, max_hits=AUTH_EMAIL_RATE_LIMIT_MAX
+    )
 
     from analyst_ledger.workflow_engine import JobManager
 
@@ -165,14 +235,28 @@ def create_app() -> FastAPI:
         interval_seconds=float(os.environ.get("MESSENGER_SCHEDULER_INTERVAL", "30")),
         run_stub=not live,
     )
+    classify_enabled = os.environ.get("MESSENGER_CLASSIFY_SWEEP", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    classify_sweep = ClassifySweep(
+        list_user_ids=store.list_user_ids,
+        interval_seconds=float(os.environ.get("MESSENGER_CLASSIFY_INTERVAL", "300")),
+        limit_per_user=int(os.environ.get("MESSENGER_CLASSIFY_LIMIT", "20")),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.loop = asyncio.get_running_loop()
         if scheduler_enabled:
             app.state.scheduler.start()
+        if classify_enabled:
+            app.state.classify_sweep.start()
         yield
         app.state.scheduler.stop()
+        app.state.classify_sweep.stop()
 
     app = FastAPI(
         title="Workflow Messenger",
@@ -183,11 +267,17 @@ def create_app() -> FastAPI:
     app.state.store = store
     app.state.hub = hub
     app.state.limiter = limiter
+    app.state.login_limiter = login_limiter
+    app.state.auth_email_limiter = auth_email_limiter
     app.state.jobs = jobs
     app.state.scheduler = scheduler
+    app.state.classify_sweep = classify_sweep
 
     app.include_router(auth_router)
     app.include_router(tracking_router)
+    app.include_router(capabilities_router)
+    app.include_router(agents_catalog_router)
+    app.include_router(registry_router)
     app.include_router(automations_router)
     app.include_router(agent_chats_router)
     app.include_router(review_router)
@@ -206,9 +296,9 @@ def create_app() -> FastAPI:
             return JSONResponse(
                 {
                     "error": (
-                        "Not logged in — sign in to Workflow first, or point the "
-                        "extension at http://127.0.0.1:8788/api/ingest-browser "
-                        "with analyst dashboard running."
+                        "Not logged in — sign in to Flyleaf (levin.fly.dev) in this "
+                        "browser so Capture can post visits, or point the extension "
+                        "Endpoint at a signed-in local Workflow."
                     )
                 },
                 status_code=401,
@@ -264,22 +354,61 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
-        try:
-            entry = registry.register(
-                user["user_id"],
-                str(body.get("base_url") or ""),
-                token=str(body.get("token") or ""),
+        base_url = str(body.get("base_url") or "").strip()
+        token = str(body.get("token") or "").strip()
+        if not base_url:
+            return JSONResponse(
+                {"ok": False, "error": "base_url_required", "message": "Companion URL is required."},
+                status_code=400,
             )
+        if not token:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "token_required",
+                    "message": "Paste the companion token from the terminal (or companion_token file).",
+                },
+                status_code=400,
+            )
+        try:
+            entry = registry.register(user["user_id"], base_url, token=token)
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        # healthz is open; verify the bearer token against an authenticated route
+        check = registry.verify_token(user["user_id"], timeout=3.0)
+        if check.get("error") == "invalid_token":
+            registry.unlink(user["user_id"])
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "invalid_token",
+                    "message": "Companion rejected that token. Copy the token from the companion terminal again.",
+                },
+                status_code=400,
+            )
         return JSONResponse(
             {
                 "ok": True,
+                "reachable": bool(check.get("reachable")),
+                "authenticated": bool(check.get("authenticated")),
                 "companion": {
                     "user_id": entry["user_id"],
                     "base_url": entry["base_url"],
                     "registered_at": entry["registered_at"],
                 },
+                "error": None if check.get("ok") else check.get("error"),
+                "message": (
+                    None
+                    if check.get("ok")
+                    else (
+                        "Saved, but companion is not reachable from this server. "
+                        "If you're on the cloud app, use a public tunnel URL to the companion "
+                        "(not http://127.0.0.1)."
+                        if not check.get("reachable")
+                        else "Companion linked but auth check failed."
+                    )
+                ),
             }
         )
 
@@ -300,7 +429,222 @@ def create_app() -> FastAPI:
         existed = registry.unlink(user["user_id"])
         return JSONResponse({"ok": True, "unlinked": existed})
 
-    # --- Per-user local model (each person tunnels their own Ollama) -----------
+    # --- Settings → Models (multi-profile) ------------------------------------
+
+    @app.get("/api/settings/models")
+    def settings_models_list(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+        from messenger.model_link import registry as model_registry
+
+        payload = model_registry().list_profiles(user["user_id"])
+        payload["profiles"] = settings_models.annotate_open_source_reachability(
+            user["user_id"], payload.get("profiles") or []
+        )
+        payload["companion"] = settings_models.companion_health(user["user_id"])
+        active = model_registry().active_profile(user["user_id"])
+        if active:
+            public_active = model_registry().public_profile(active)
+            # Mirror reachability onto the active summary when it's the enabled local.
+            for row in payload["profiles"]:
+                if row.get("id") == public_active.get("id"):
+                    public_active = {**public_active, "reachable": row.get("reachable")}
+                    break
+            payload["active"] = public_active
+        else:
+            payload["active"] = None
+        return JSONResponse(payload)
+
+    @app.post("/api/settings/models")
+    async def settings_models_add_frontier(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().add_frontier(
+                user["user_id"],
+                provider=str(body.get("provider") or "anthropic"),
+                api_key=str(body.get("api_key") or ""),
+                model=str(body.get("model") or ""),
+                base_url=str(body.get("base_url") or ""),
+                label=str(body.get("label") or ""),
+                activate=bool(body.get("activate", True)),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.post("/api/settings/models/open-source/draft")
+    async def settings_models_os_draft(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().add_open_source_draft(
+                user["user_id"],
+                candidate_id=str(body.get("candidate_id") or body.get("id") or ""),
+                runtime=str(body.get("runtime") or "ollama"),
+                model=str(body.get("model") or body.get("label") or ""),
+                label=str(body.get("label") or ""),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.patch("/api/settings/models/{profile_id}")
+    async def settings_models_patch(
+        profile_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        try:
+            profile = model_registry().update_profile(
+                user["user_id"],
+                profile_id,
+                label=body.get("label"),
+                model=body.get("model"),
+                api_key=body.get("api_key"),
+                base_url=body.get("base_url"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.delete("/api/settings/models/{profile_id}")
+    def settings_models_delete(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        existed = model_registry().delete_profile(user["user_id"], profile_id)
+        return JSONResponse({"ok": True, "deleted": existed})
+
+    @app.post("/api/settings/models/{profile_id}/activate")
+    def settings_models_activate(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        try:
+            profile = model_registry().activate(user["user_id"], profile_id)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "profile": profile})
+
+    @app.post("/api/settings/models/{profile_id}/establish")
+    def settings_models_establish(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.establish_pipeline(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/rebuild")
+    def settings_models_rebuild(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.rebuild_pipeline(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/enable")
+    def settings_models_enable(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.enable_profile(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/models/{profile_id}/disable")
+    def settings_models_disable(
+        profile_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.disable_profile(user["user_id"], profile_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.get("/api/settings/models/status")
+    def settings_models_status(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger.model_link import registry as model_registry
+
+        return JSONResponse(model_registry().probe(user["user_id"]))
+
+    @app.post("/api/settings/local-model/discover")
+    def settings_local_discover(
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.discover(user["user_id"])
+        code = 200 if result.get("ok") is not False else 400
+        if result.get("error") in {"needs_companion", "companion_unreachable"}:
+            code = 400
+        return JSONResponse(result, status_code=code)
+
+    @app.post("/api/settings/local-model/pull")
+    async def settings_local_pull(
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        result = settings_models.pull_model(
+            user["user_id"], str((body or {}).get("model") or "")
+        )
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    @app.get("/api/settings/local-model/pull/{job_id}")
+    def settings_local_pull_status(
+        job_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        from messenger import settings_models
+
+        result = settings_models.pull_job_status(user["user_id"], job_id)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+
+    # --- Legacy per-user model aliases (/api/model/*) -------------------------
 
     @app.post("/api/model/link")
     async def model_link_route(
@@ -359,7 +703,7 @@ def create_app() -> FastAPI:
     @app.get("/api/me")
     def me_compat(request: Request) -> JSONResponse:
         """Backward-compatible /api/me → prefer account, fall back to invite session."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (identity or {}).get("user_id") if identity else None
         user = store.user_by_id(user_id) if user_id else None
         if user and identity:
@@ -375,6 +719,7 @@ def create_app() -> FastAPI:
                     "display_name": user["display_name"],
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "dev_auto_login": False,
                 }
             )
         if identity:
@@ -388,9 +733,22 @@ def create_app() -> FastAPI:
                     "name": identity["name"],
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "dev_auto_login": False,
                 }
             )
-        return JSONResponse({"ok": False, "name": None}, status_code=401)
+        from messenger.auth import dev_auto_login_enabled, dev_user_email, dev_user_name
+
+        payload: dict[str, Any] = {
+            "ok": False,
+            "name": None,
+            "dev_auto_login": dev_auto_login_enabled(),
+        }
+        if payload["dev_auto_login"]:
+            payload["dev_user"] = {
+                "email": dev_user_email(),
+                "display_name": dev_user_name(),
+            }
+        return JSONResponse(payload, status_code=401)
 
     # --- People rooms ---------------------------------------------------------
 
@@ -399,13 +757,234 @@ def create_app() -> FastAPI:
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:
         rooms = store.list_rooms_for_user(user["user_id"])
+        from messenger.model_link import registry as model_registry
+
+        models = model_registry()
+        for room in rooms:
+            owner_id = str(room.get("owner_user_id") or user["user_id"])
+            config = room.get("config") or {}
+            override_id = config.get("model_profile_id")
+            active = (
+                models.get_profile(owner_id, str(override_id))
+                if override_id
+                else models.active_profile(owner_id)
+            )
+            public = models.public_profile(active) if active else None
+            room["compute"] = (
+                {
+                    "label": public.get("label") or public.get("model"),
+                    "provider": public.get("provider_label") or public.get("provider"),
+                    "model": public.get("model"),
+                    "local": bool(public.get("is_local")),
+                    "profile_id": public.get("id"),
+                    "room_override": bool(override_id),
+                }
+                if public
+                else None
+            )
+            room["model_profile_id"] = (
+                str(override_id) if override_id else (public.get("id") if public else None)
+            )
         return JSONResponse({"ok": True, "rooms": rooms})
 
     @app.get("/api/specialists")
     def specialists_list() -> JSONResponse:
-        from messenger.specialist_room import list_specialists
+        """Room palette — same Agent registry as the Agents tab."""
+        from analyst_ledger.registry import list_room_palette_public
 
-        return JSONResponse({"ok": True, "specialists": list_specialists()})
+        return JSONResponse(
+            {"ok": True, "specialists": list_room_palette_public(), "source": "registry"}
+        )
+
+    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        room = store.room(room_id)
+        if not room:
+            return None, JSONResponse(
+                {"ok": False, "error": "not_found"}, status_code=404
+            )
+        if room.get("owner_user_id") != user_id:
+            return None, JSONResponse(
+                {"ok": False, "error": "owner_required"}, status_code=403
+            )
+        return room, None
+
+    @app.post("/api/rooms/{room_id}/invite")
+    def room_invite(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        _, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        room_invite = secrets.token_urlsafe(24)
+        token_hash = hashlib.sha256(room_invite.encode("utf-8")).hexdigest()
+        store.update_room_token(room_id, token_hash)
+        return JSONResponse(
+            {
+                "ok": True,
+                "room_id": room_id,
+                "share_url": (
+                    _public_base_url(request)
+                    + f"/?room={room_id}&invite={room_invite}"
+                ),
+            }
+        )
+
+    @app.post("/api/rooms/{room_id}/agents")
+    async def room_agent_add(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        agent_id = str((body or {}).get("agent_id") or "").strip().lower()
+        from analyst_ledger.registry import known_agent_ids
+        from messenger.tenancy import user_context
+
+        with user_context(user["user_id"]):
+            known = known_agent_ids()
+        if agent_id not in known:
+            return JSONResponse(
+                {"ok": False, "error": "unknown_agent"}, status_code=400
+            )
+        config = dict(room.get("config") or {})
+        agents = [
+            str(value)
+            for value in (config.get("agents") or config.get("specialists") or [])
+            if str(value) in known or str(value) == agent_id
+        ]
+        if agent_id not in agents:
+            agents.append(agent_id)
+        config["agents"] = agents
+        # Keep older specialist-room orchestration compatible with the room roster.
+        config["specialists"] = agents
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse(
+            {"ok": True, "room": updated, "agents": agents}
+        )
+
+    @app.delete("/api/rooms/{room_id}/agents/{agent_id}")
+    def room_agent_remove(
+        room_id: str,
+        agent_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        config = dict(room.get("config") or {})
+        agents = [
+            str(value)
+            for value in (config.get("agents") or config.get("specialists") or [])
+            if str(value) != agent_id
+        ]
+        config["agents"] = agents
+        config["specialists"] = agents
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse(
+            {"ok": True, "room": updated, "agents": agents}
+        )
+
+    @app.delete("/api/rooms/{room_id}")
+    async def delete_room(
+        room_id: str,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        """Owner-only: permanently delete a room (messages, members, config)."""
+        if room_id == "legacy":
+            return JSONResponse(
+                {"ok": False, "error": "cannot_delete_legacy"},
+                status_code=400,
+            )
+        _, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            from messenger.specialist_room import job_registry
+
+            job_registry().stop_room(room_id)
+        except Exception:
+            pass
+        await hub.broadcast(
+            room_id,
+            {
+                "type": "room_deleted",
+                "room_id": room_id,
+                "by": user.get("name") or user.get("display_name"),
+            },
+        )
+        if not store.delete_room(room_id):
+            return JSONResponse(
+                {"ok": False, "error": "not_found"}, status_code=404
+            )
+        return JSONResponse({"ok": True, "room_id": room_id})
+
+    @app.post("/api/rooms/{room_id}/model")
+    async def room_set_model(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        """Set which Settings model this room uses (null = account default)."""
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        raw = (body or {}).get("profile_id")
+        profile_id = str(raw).strip() if raw not in (None, "") else None
+        from messenger.model_link import registry as model_registry
+
+        models = model_registry()
+        if profile_id is not None:
+            profile = models.get_profile(user["user_id"], profile_id)
+            if not profile:
+                return JSONResponse(
+                    {"ok": False, "error": "unknown_profile"}, status_code=400
+                )
+        config = dict(room.get("config") or {})
+        if profile_id:
+            config["model_profile_id"] = profile_id
+        else:
+            config.pop("model_profile_id", None)
+        updated = store.update_room_config(room_id, config)
+        public = None
+        active = (
+            models.get_profile(user["user_id"], profile_id)
+            if profile_id
+            else models.active_profile(user["user_id"])
+        )
+        if active:
+            public = models.public_profile(active)
+        return JSONResponse(
+            {
+                "ok": True,
+                "room": updated,
+                "model_profile_id": profile_id,
+                "compute": (
+                    {
+                        "label": public.get("label") or public.get("model"),
+                        "provider": public.get("provider_label")
+                        or public.get("provider"),
+                        "model": public.get("model"),
+                        "local": bool(public.get("is_local")),
+                        "profile_id": public.get("id"),
+                        "room_override": bool(profile_id),
+                    }
+                    if public
+                    else None
+                ),
+            }
+        )
 
     @app.post("/api/rooms/{room_id}/specialist-run")
     async def specialist_run(
@@ -424,9 +1003,11 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         if not store.user_in_room(room_id, user["user_id"]):
             return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        if str(room.get("kind") or "people") != "specialist":
+        config = room.get("config") if isinstance(room.get("config"), dict) else {}
+        room_agents = config.get("agents") or config.get("specialists") or []
+        if str(room.get("kind") or "people") != "specialist" and not room_agents:
             return JSONResponse(
-                {"ok": False, "error": "not_a_specialist_room"}, status_code=400
+                {"ok": False, "error": "room_has_no_agents"}, status_code=400
             )
         action = str(body.get("action") or "").strip().lower()
         topic = str(body.get("topic") or "")
@@ -453,18 +1034,24 @@ def create_app() -> FastAPI:
             )
 
         owner_id = room.get("owner_user_id") or user["user_id"]
-        job = start_specialist_job(
-            store=store,
-            hub=hub,
-            room=room,
-            action=action,
-            topic=topic,
-            owner_user_id=owner_id,
-            stub=stub,
-            rounds=rounds,
-            continuous=continuous,
-            loop=getattr(app.state, "loop", None),
-        )
+        try:
+            job = start_specialist_job(
+                store=store,
+                hub=hub,
+                room=room,
+                action=action,
+                topic=topic,
+                owner_user_id=owner_id,
+                stub=stub,
+                rounds=rounds,
+                continuous=continuous,
+                loop=getattr(app.state, "loop", None),
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"ok": False, "error": "bad_action", "message": str(exc)},
+                status_code=400,
+            )
         return JSONResponse(
             {
                 "ok": True,
@@ -507,8 +1094,138 @@ def create_app() -> FastAPI:
             }
         )
 
+    @app.patch("/api/rooms/{room_id}/config")
+    async def room_config_patch(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+        config = dict(room.get("config") or {})
+        if "objective" in body:
+            config["objective"] = str(body.get("objective") or "").strip()[:800]
+        if "prompts" in body:
+            raw = body.get("prompts")
+            if isinstance(raw, str):
+                prompts = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            elif isinstance(raw, list):
+                prompts = [str(p).strip() for p in raw if str(p).strip()]
+            else:
+                prompts = []
+            config["prompts"] = prompts[:12]
+        if "skills" in body:
+            raw = body.get("skills")
+            if isinstance(raw, list):
+                config["skills"] = [str(s).strip() for s in raw if str(s).strip()][:20]
+        updated = store.update_room_config(room_id, config)
+        return JSONResponse({"ok": True, "room": updated, "config": config})
+
+    @app.post("/api/rooms/{room_id}/autonomy")
+    async def room_autonomy(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        """Toggle autonomous agent conversation in this room."""
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = bool((body or {}).get("enabled"))
+        config = dict(room.get("config") or {})
+        from messenger.specialist_room import job_registry, start_specialist_job
+        from datetime import datetime, timezone
+
+        if not enabled:
+            job_registry().stop_room(room_id)
+            config["autonomy"] = {"enabled": False, "started_at": None}
+            updated = store.update_room_config(room_id, config)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "autonomy": config["autonomy"],
+                    "room": updated,
+                    "message": "Autonomy stopped.",
+                }
+            )
+
+        agents = config.get("agents") or config.get("specialists") or []
+        if len(agents) < 1:
+            return JSONResponse(
+                {"ok": False, "error": "add_agents_first", "message": "Assign agents to this room first."},
+                status_code=400,
+            )
+        existing = job_registry().active_for_room(room_id)
+        if existing:
+            config["autonomy"] = {
+                "enabled": True,
+                "started_at": (config.get("autonomy") or {}).get("started_at"),
+            }
+            store.update_room_config(room_id, config)
+            return JSONResponse(
+                {"ok": True, "autonomy": config["autonomy"], "job": existing.public(), "already_running": True}
+            )
+
+        objective = str(config.get("objective") or "").strip()
+        topic = objective or "Pursue the room objective and keep the conversation useful."
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        config["autonomy"] = {"enabled": True, "started_at": started}
+        store.update_room_config(room_id, config)
+        owner_id = room.get("owner_user_id") or user["user_id"]
+        # Refresh room after config write
+        room = store.room(room_id) or room
+        try:
+            job = start_specialist_job(
+                store=store,
+                hub=hub,
+                room=room,
+                action="debate" if len(agents) >= 2 else "present",
+                topic=topic,
+                owner_user_id=owner_id,
+                stub=bool((body or {}).get("stub", False)),
+                rounds=5,
+                continuous=len(agents) >= 2,
+                loop=getattr(app.state, "loop", None),
+            )
+        except ValueError as exc:
+            config["autonomy"] = {"enabled": False, "started_at": None}
+            store.update_room_config(room_id, config)
+            return JSONResponse(
+                {"ok": False, "error": "bad_action", "message": str(exc)},
+                status_code=400,
+            )
+        # Announce in-room so runs are visible
+        store.add_message(
+            author="Moderator",
+            body=(
+                f"Autonomy on — agents will converse here"
+                f"{' guided by: ' + objective if objective else ''}."
+                " Toggle Autonomy off to stop."
+            ),
+            room_id=room_id,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "autonomy": config["autonomy"],
+                "job": job.public(),
+                "message": "Autonomy started — agents are conversing in this room.",
+            }
+        )
+
     @app.get("/api/rooms/{room_id}/specialist-status")
-    def specialist_status(
+    def specialist_status_after_autonomy(
         room_id: str,
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:
@@ -517,11 +1234,12 @@ def create_app() -> FastAPI:
         from messenger.specialist_room import job_registry
 
         job = job_registry().active_for_room(room_id)
+        latest = job or job_registry().latest_for_room(room_id)
         return JSONResponse(
             {
                 "ok": True,
                 "running": job is not None,
-                "job": job.public() if job else None,
+                "job": latest.public() if latest else None,
             }
         )
 
@@ -545,7 +1263,7 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (identity or {}).get("user_id") if identity else None
         rate_key = (
             (request.client.host if request.client else "unknown")
@@ -557,7 +1275,7 @@ def create_app() -> FastAPI:
         name = normalize_name(str(body.get("name") or "")) or (
             identity["name"] if identity else None
         )
-        title = " ".join(str(body.get("title") or "").strip().split())[:80]
+        title = normalize_title(str(body.get("title") or ""))
         if not name:
             return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
         if not title:
@@ -628,11 +1346,13 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=name,
             room_id=room_id,
             can_create=True,
             user_id=user_id,
             email=(identity or {}).get("email") if identity else None,
+            revoke_sid=(identity or {}).get("sid") if identity else None,
         )
         return resp
 
@@ -645,7 +1365,7 @@ def create_app() -> FastAPI:
         invite = str(body.get("invite") or "")
         room_id = str(body.get("room_id") or "legacy").strip()
         name = normalize_name(str(body.get("name") or ""))
-        existing = read_identity(request.cookies.get(COOKIE_NAME))
+        existing = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         user_id = (existing or {}).get("user_id")
         email = (existing or {}).get("email")
         # Prefer account display name when logged in.
@@ -681,18 +1401,20 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=name,
             room_id=room_id,
             can_create=can_create,
             user_id=user_id,
             email=email,
+            revoke_sid=(existing or {}).get("sid") if existing else None,
         )
         return resp
 
     @app.post("/api/rooms/select")
     async def select_room(request: Request) -> JSONResponse:
         """Switch the active People room for an authenticated member."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity or not identity.get("user_id"):
             return JSONResponse({"ok": False, "error": "account_required"}, status_code=401)
         try:
@@ -722,11 +1444,13 @@ def create_app() -> FastAPI:
         )
         set_session_cookie(
             resp,
+            store=store,
             name=identity["name"],
             room_id=room_id,
             can_create=True,
             user_id=user_id,
             email=identity.get("email"),
+            revoke_sid=identity.get("sid"),
         )
         return resp
 
@@ -746,7 +1470,15 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "rooms": rooms})
 
     @app.post("/api/logout")
-    def logout() -> JSONResponse:
+    def logout(request: Request) -> JSONResponse:
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+        if not identity:
+            return JSONResponse(
+                {"ok": False, "error": "unauthorized"}, status_code=401
+            )
+        sid = (identity.get("sid") or "").strip()
+        if sid:
+            store.delete_session(sid)
         resp = JSONResponse({"ok": True})
         clear_session_cookie(resp)
         return resp
@@ -765,7 +1497,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/messages")
     def messages(request: Request, limit: int = 200) -> JSONResponse:
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         return JSONResponse(
@@ -782,7 +1514,7 @@ def create_app() -> FastAPI:
     @app.post("/api/messages")
     async def post_message(request: Request) -> JSONResponse:
         """HTTP send path for non-WS clients + agent hooks."""
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         try:
@@ -807,6 +1539,14 @@ def create_app() -> FastAPI:
             owner_user_id = (room or {}).get("owner_user_id") or identity.get("user_id")
         else:
             owner_user_id = identity.get("user_id")
+        _capture_people_room_message(
+            store,
+            room_id=room_id,
+            author=name,
+            text=text,
+            msg=msg,
+            identity=identity,
+        )
         _maybe_dispatch_agent_mention(
             app,
             room_id=room_id,
@@ -824,14 +1564,14 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/messages")
     async def delete_messages(request: Request) -> JSONResponse:
-        identity = read_identity(request.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
         if not identity:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         return JSONResponse(await _clear_chat(identity["name"], identity["room_id"]))
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
-        identity = read_identity(websocket.cookies.get(COOKIE_NAME))
+        identity = resolve_identity(websocket.cookies.get(COOKIE_NAME), store)
         if not identity:
             await websocket.close(code=4401)
             return
@@ -868,6 +1608,14 @@ def create_app() -> FastAPI:
                 if room_id != "legacy":
                     room = store.room(room_id)
                     owner_user_id = (room or {}).get("owner_user_id") or owner_user_id
+                _capture_people_room_message(
+                    store,
+                    room_id=room_id,
+                    author=name,
+                    text=text,
+                    msg=msg,
+                    identity=identity,
+                )
                 _maybe_dispatch_agent_mention(
                     app,
                     room_id=room_id,
@@ -889,7 +1637,19 @@ def create_app() -> FastAPI:
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
             },
+        )
+
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
+    @app.api_route("/favicon.svg", methods=["GET", "HEAD"])
+    def favicon() -> FileResponse:
+        svg = STATIC_DIR / "favicon.svg"
+        ico = STATIC_DIR / "favicon.ico"
+        path = ico if ico.is_file() else svg
+        return FileResponse(
+            path,
+            media_type="image/svg+xml" if path.suffix == ".svg" else "image/x-icon",
         )
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

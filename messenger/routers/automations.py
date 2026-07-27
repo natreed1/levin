@@ -1,4 +1,8 @@
-"""Automations / rituals APIs (per-user ledger)."""
+"""Automations / rituals APIs (per-user ledger).
+
+Layer 3: capability loops. Legacy list still returns ritual rows for
+compat; ``/api/automations/loops`` returns the Automations-tab catalog.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,56 @@ def list_automations(user: dict[str, Any] = Depends(current_user)) -> JSONRespon
 
     with user_context(user["user_id"]) as ledger:
         return JSONResponse({"ok": True, "automations": list_autos(ledger)})
+
+
+@router.get("/loops")
+def list_automation_loops(user: dict[str, Any] = Depends(current_user)) -> JSONResponse:
+    from analyst_ledger.registry import list_automations_public
+
+    with user_context(user["user_id"]) as ledger:
+        return JSONResponse(
+            {
+                "ok": True,
+                "automations": list_automations_public(ledger=ledger),
+                "source": "registry",
+                "hint": "Create new loops from a room with /automate (dual editor).",
+            }
+        )
+
+
+@router.post("/from-chat")
+async def create_automation_from_chat(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    """Draft an automation (capability loop) from a room /automate editor."""
+    from analyst_ledger.registry import create_automation_from_chat as create_loop
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+
+    steps_raw = body.get("steps") or body.get("capability_ids") or []
+    if isinstance(steps_raw, str):
+        steps_raw = [ln.strip() for ln in steps_raw.splitlines() if ln.strip()]
+    try:
+        with user_context(user["user_id"]):
+            spec = create_loop(
+                name=str(body.get("name") or body.get("ritual_id") or ""),
+                capability_ids=steps_raw if isinstance(steps_raw, list) else [],
+                schedule=(str(body.get("schedule") or "").strip() or None),
+                room_id=(str(body.get("room_id") or "").strip() or None),
+                transcript=str(body.get("transcript") or "")[:8000],
+                watchlist=body.get("watchlist") or [],
+            )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse(
+        {"ok": True, "automation": spec, "ritual_id": spec.get("name"), "source": "registry"}
+    )
 
 
 @router.get("/{ritual_id}")

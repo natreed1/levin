@@ -18,6 +18,33 @@ def _jobs(request: Request) -> Any:
     return request.app.state.jobs
 
 
+def _run_with_user_model(user_id: str, fn: Any) -> Any:
+    """Bind Settings → Models endpoint for the duration of an agent job.
+
+    Without this, WorkflowEngine/MasterCoordinator fall back to process env
+    (ANTHROPIC_API_KEY / localhost Ollama) and ignore the account's linked model.
+    If a local tunnel is stale, recover via Companion once and retry.
+    """
+    from analyst_ledger.synthesize import use_llm_endpoint
+    from messenger import settings_models
+    from messenger.model_link import registry as model_registry
+
+    endpoint = model_registry().endpoint_for_call(user_id)
+    try:
+        with use_llm_endpoint(endpoint):
+            return fn()
+    except Exception as exc:
+        if not settings_models.is_local_route_failure(endpoint, exc):
+            raise
+        recovered = settings_models.ensure_local_route(
+            user_id, force_recover=True
+        )
+        if not recovered.get("reachable") or not recovered.get("endpoint"):
+            raise
+        with use_llm_endpoint(recovered["endpoint"]):
+            return fn()
+
+
 @router.get("")
 def list_threads(user: dict[str, Any] = Depends(current_user)) -> JSONResponse:
     with user_context(user["user_id"]) as ledger:
@@ -38,11 +65,23 @@ def list_messages(
         if not session or session.surface != "chat":
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         messages = ledger.list_chat_messages(thread_id, limit=limit)
+        enriched = []
+        for msg in messages:
+            row = dict(msg)
+            eid = str(row.get("event_id") or "")
+            if eid:
+                try:
+                    kind = ledger.latest_kind_for(eid, thread_id)
+                except Exception:  # noqa: BLE001
+                    kind = None
+                if kind:
+                    row["resolved_kind"] = kind
+            enriched.append(row)
         return JSONResponse(
             {
                 "ok": True,
                 "thread_id": thread_id,
-                "messages": messages,
+                "messages": enriched,
                 "title": session.title,
                 "desk_tag": session.desk_tag,
             }
@@ -98,8 +137,11 @@ async def post_message(
                     job = jobs.start(
                         f"user:{uid}:file_search",
                         "file_search",
-                        lambda job: execute_file_search(
-                            ledger, thread_id, fq, stub=stub
+                        lambda job: _run_with_user_model(
+                            uid,
+                            lambda: execute_file_search(
+                                ledger, thread_id, fq, stub=stub
+                            ),
                         ),
                     )
                     return JSONResponse({"ok": True, "job": job.public()})
@@ -116,8 +158,11 @@ async def post_message(
                     job = jobs.start(
                         f"user:{uid}:workflow:{routed.ritual_id}",
                         "workflow_run",
-                        lambda job: execute_routed_run(
-                            ledger, thread_id, routed, stub=stub
+                        lambda job: _run_with_user_model(
+                            uid,
+                            lambda: execute_routed_run(
+                                ledger, thread_id, routed, stub=stub
+                            ),
                         ),
                     )
                     return JSONResponse({"ok": True, "job": job.public()})
@@ -159,7 +204,10 @@ async def post_message(
                 job = jobs.start(
                     f"user:{uid}:chat:master",
                     "master_chat",
-                    lambda job: MasterCoordinator(ledger).run(content, job=job),
+                    lambda job: _run_with_user_model(
+                        uid,
+                        lambda: MasterCoordinator(ledger).run(content, job=job),
+                    ),
                 )
                 return JSONResponse({"ok": True, "job": job.public()})
             ritual_id = str(session.desk_tag or "").removeprefix("chat:")
@@ -190,8 +238,11 @@ async def post_message(
             job = jobs.start(
                 f"user:{uid}:workflow:{ritual_id}",
                 "workflow_chat",
-                lambda job: WorkflowEngine(ledger).run(
-                    ritual_id, request=content, stub=False, job=job
+                lambda job: _run_with_user_model(
+                    uid,
+                    lambda: WorkflowEngine(ledger).run(
+                        ritual_id, request=content, stub=False, job=job
+                    ),
                 ),
             )
             return JSONResponse({"ok": True, "job": job.public()})

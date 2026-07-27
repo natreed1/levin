@@ -47,6 +47,7 @@ def _client(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MESSENGER_USERS_DIR", str(tmp_path / "users"))
     monkeypatch.setenv("MESSENGER_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MESSENGER_SCHEDULER", "0")
+    monkeypatch.setenv("MESSENGER_CLASSIFY_SWEEP", "0")
     monkeypatch.setenv("MESSENGER_EMAIL_DEV_EXPOSE", "1")
     monkeypatch.delenv("MESSENGER_COOKIE_SECURE", raising=False)
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
@@ -158,7 +159,6 @@ def test_signup_login_and_tracking(tmp_path: Path, monkeypatch):
 def test_forgot_and_reset_password(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _signup_and_login(client, email="reset@example.com", name="Reset")
-    client.post("/api/auth/logout")
 
     forgot = client.post(
         "/api/auth/forgot-password",
@@ -183,6 +183,12 @@ def test_forgot_and_reset_password(tmp_path: Path, monkeypatch):
         json={"token": token, "password": "newpassword99"},
     )
     assert ok.status_code == 200, ok.text
+    assert client.get("/api/auth/me").status_code == 401
+    reused = client.post(
+        "/api/auth/reset-password",
+        json={"token": token, "password": "anotherpassword99"},
+    )
+    assert reused.status_code == 400
 
     old = client.post(
         "/api/auth/login",
@@ -210,6 +216,39 @@ def test_owner_scoped_room_membership(tmp_path: Path, monkeypatch):
     store = MessageStore(db_path=tmp_path / "messages.sqlite3")
     room = store.room(room_id)
     assert room and room["owner_user_id"]
+
+
+def test_room_agents_can_be_added_drag_target_style(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="agents@example.com", name="Agents")
+    created = client.post("/api/rooms", json={"title": "Research", "name": "Agents"})
+    assert created.status_code == 200
+    room_id = created.json()["room_id"]
+
+    unknown = client.post(
+        f"/api/rooms/{room_id}/agents", json={"agent_id": "unknown"}
+    )
+    assert unknown.status_code == 400
+
+    added = client.post(
+        f"/api/rooms/{room_id}/agents", json={"agent_id": "qwen-bull"}
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["agents"] == ["qwen-bull"]
+
+    mine = client.get("/api/rooms/mine")
+    room = next(r for r in mine.json()["rooms"] if r["room_id"] == room_id)
+    assert room["config"]["agents"] == ["qwen-bull"]
+    assert room["config"]["specialists"] == ["qwen-bull"]
+    assert "compute" in room
+
+    invite = client.post(f"/api/rooms/{room_id}/invite", json={})
+    assert invite.status_code == 200
+    assert f"room={room_id}" in invite.json()["share_url"]
+
+    removed = client.delete(f"/api/rooms/{room_id}/agents/qwen-bull")
+    assert removed.status_code == 200
+    assert removed.json()["agents"] == []
 
 
 def test_specialist_workshop_create_and_debate(tmp_path: Path, monkeypatch):
@@ -268,7 +307,7 @@ def test_specialist_workshop_create_and_debate(tmp_path: Path, monkeypatch):
     bodies = [m.get("body") or "" for m in msgs.json()["messages"]]
     authors = {m["author"] for m in msgs.json()["messages"]}
     assert "Moderator" in authors
-    assert "Qwen Bull" in authors or "Qwen Contrarian" in authors
+    assert "Bullish Agent" in authors or "Contrarian Agent" in authors
     assert any("Round 1/2" in b for b in bodies)
     assert any("Round 2/2" in b for b in bodies)
 
@@ -346,16 +385,28 @@ def test_companion_link_requires_account(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     forbidden = client.post(
         "/api/companion/link",
-        json={"base_url": "http://127.0.0.1:8791"},
+        json={"base_url": "http://127.0.0.1:8791", "token": "tok"},
     )
     assert forbidden.status_code == 401
 
     _signup_and_login(client, email="c@example.com", name="C")
-    linked = client.post(
+    missing_token = client.post(
         "/api/companion/link",
         json={"base_url": "http://127.0.0.1:8791"},
     )
+    assert missing_token.status_code == 400
+    assert missing_token.json()["error"] == "token_required"
+
+    # Token is stored even when the companion isn't running (verify may be unreachable).
+    linked = client.post(
+        "/api/companion/link",
+        json={"base_url": "http://127.0.0.1:59999", "token": "test-companion-token"},
+    )
     assert linked.status_code == 200
+    body = linked.json()
+    assert body["ok"] is True
+    assert body.get("reachable") is False
     status = client.get("/api/companion/status")
     assert status.status_code == 200
     assert status.json()["linked"] is True
+    assert status.json()["base_url"] == "http://127.0.0.1:59999"

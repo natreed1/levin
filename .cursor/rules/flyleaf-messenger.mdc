@@ -1,0 +1,16 @@
+---
+description: Flyleaf (deployed messenger) is the default product surface
+alwaysApply: true
+---
+
+# Flyleaf is the default app
+
+**Flyleaf** = the Workflow messenger product (`messenger/`, deployed at `https://levin.fly.dev`).
+
+Unless the user explicitly asks for something else:
+
+- Implement and verify UI/features in `messenger/` (static + APIs).
+- Treat Flyleaf / the deployed messenger as the target environment.
+- Do **not** add product chat UX to `src/analyst_ledger/dashboard.py` (local `:8788`). That UI is **deprecated** for product work.
+
+Exceptions (only when the user asks): ledger CLI/rituals, local companion-only debugging, or explicit local dashboard work.

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable Local Companion (macOS LaunchAgent).
+  Install (once):
+    scripts/install_companion_launchagent.sh
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.flyleaf.companion
+    rm ~/Library/LaunchAgents/com.flyleaf.companion.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.flyleaf.companion</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VENV_PYTHON__</string>
+    <string>-u</string>
+    <string>-m</string>
+    <string>messenger.companion_app</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MESSENGER_DATA_DIR</key>
+    <string>__MESSENGER_DATA__</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <!-- LaunchAgents get a stripped PATH; include Homebrew so cloudflared is found. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/flyleaf-companion.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/flyleaf-companion.err.log</string>
+</dict>
+</plist>

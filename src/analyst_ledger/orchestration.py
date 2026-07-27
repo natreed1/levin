@@ -158,11 +158,29 @@ class ClaudeGateway:
         prompt = json.dumps(
             {"system": system, "messages": messages}, ensure_ascii=False, separators=(",", ":")
         )
-        destination = "qwen" if self.model == "qwen3-8b" else "anthropic"
+        # Prefer the per-user Settings endpoint (Claude / GPT / Ollama) when bound
+        # via use_llm_endpoint; otherwise fall back to ritual model / env defaults.
+        from .synthesize import _QWEN_ENDPOINT, call_chat_messages
+
+        override = _QWEN_ENDPOINT.get() or {}
+        if override:
+            kind = (override.get("kind") or "").strip().lower()
+            provider = (override.get("provider") or "").strip().lower()
+            dest_override = (override.get("destination") or "").strip().lower()
+            if kind == "anthropic" or provider == "anthropic":
+                destination = "anthropic"
+            else:
+                destination = dest_override if dest_override else "qwen"
+        else:
+            destination = "qwen" if self.model == "qwen3-8b" else "anthropic"
         assert_destination_allowed(destination, max_sensitivity)
         try:
             if self.responder:
                 output = self.responder(messages, max_tokens, system)
+            elif override:
+                output = call_chat_messages(
+                    messages, max_tokens=max_tokens, system=system
+                )
             elif destination == "qwen":
                 output = _call_openai_compatible_messages(
                     messages, max_tokens=max_tokens, system=system

@@ -3,14 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
   <title>Workflow</title>
-  <link rel="stylesheet" href="/static/style.css?v=30" />
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=43" />
 </head>
 <body>
-  <div id="auth-screen" class="auth-screen hidden">
+  <div id="auth-screen" class="auth-screen">
     <div class="auth-card">
       <h1>Workflow</h1>
-      <p class="sub">Rooms · Agent threads · Automations · Review · Tracking</p>
+      <p class="sub">Log in or create an account to continue</p>
       <div class="room-tabs auth-tabs">
         <button type="button" id="tab-login" class="active">Log in</button>
         <button type="button" id="tab-signup" class="ghost">Create account</button>
@@ -26,11 +31,28 @@
           <button type="button" id="resend-verify-btn" class="linkish hidden">Resend verification</button>
         </p>
       </form>
+      <div id="dev-login-panel" class="dev-login-panel hidden">
+        <p class="muted tiny-hint">Local development — skip the password.</p>
+        <button type="button" id="dev-login-btn" class="ghost">Continue as local Dev</button>
+      </div>
+      <form id="otp-form" class="hidden">
+        <p class="sub" id="otp-hint">Enter the 6-digit code we emailed you.</p>
+        <label>Sign-in code
+          <input id="otp-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="one-time-code" required />
+        </label>
+        <input type="hidden" id="otp-challenge-id" value="" />
+        <p id="otp-error" class="error" hidden></p>
+        <button type="submit">Verify and continue</button>
+        <p class="auth-links">
+          <button type="button" id="resend-otp-btn" class="linkish">Resend code</button>
+          <button type="button" id="otp-back-btn" class="linkish">Back to log in</button>
+        </p>
+      </form>
       <form id="signup-form" class="hidden">
         <label>Display name <input id="signup-name" type="text" maxlength="40" autocomplete="nickname" required /></label>
         <label>Email <input id="signup-email" type="email" autocomplete="username" required /></label>
         <label>Password <input id="signup-password" type="password" autocomplete="new-password" minlength="8" required /></label>
-        <p class="sub">At least 8 characters. We’ll email a verification link before you can log in.</p>
+        <p class="sub">At least 8 characters. We’ll email a verification link when mail is configured (otherwise you’ll see an error if signup can’t complete).</p>
         <p id="signup-error" class="error" hidden></p>
         <button type="submit">Create account</button>
       </form>
@@ -47,15 +69,6 @@
         <p id="reset-error" class="error" hidden></p>
         <button type="submit">Update password</button>
       </form>
-      <details class="guest-join">
-        <summary>Join a room with an invite link (guest)</summary>
-        <form id="guest-join-form">
-          <label>Invite token <input id="guest-invite" type="password" autocomplete="off" /></label>
-          <label>Display name <input id="guest-name" type="text" maxlength="40" /></label>
-          <p id="guest-error" class="error" hidden></p>
-          <button type="submit" class="ghost">Join room</button>
-        </form>
-      </details>
     </div>
   </div>
 
@@ -66,11 +79,11 @@
         <span id="who-label" class="muted"></span>
       </div>
       <nav class="rail-nav" aria-label="Primary">
-        <button type="button" class="nav-btn active" data-tab="chats">Chats</button>
-        <button type="button" class="nav-btn" data-tab="automations">Automations</button>
+        <button type="button" class="nav-btn active" data-tab="chats">Rooms</button>
+        <button type="button" class="nav-btn" data-tab="agents">Agents</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
-        <button type="button" class="nav-btn" data-tab="model">Model</button>
+        <button type="button" class="nav-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="rail-foot">
         <button type="button" id="logout-btn" class="ghost">Log out</button>
@@ -82,67 +95,90 @@
       <section id="tab-chats" class="tab-panel">
         <div class="chats-layout">
           <aside class="thread-rail">
-            <div class="rail-section people">
+            <div class="rail-section rooms-section">
               <header class="section-head">
-                <h2>Rooms</h2>
+                <div>
+                  <h2>Your rooms</h2>
+                  <p>People and work, together</p>
+                </div>
                 <button type="button" id="new-room-btn" class="ghost tiny" title="Create room">+</button>
               </header>
-              <ul id="people-list" class="thread-list"></ul>
+              <ul id="room-list" class="thread-list room-list"></ul>
             </div>
-            <div class="rail-section agents">
+            <div class="rail-section agent-dock">
               <header class="section-head">
-                <h2>Agents</h2>
+                <div>
+                  <h2>Agents</h2>
+                  <p>Drag into a room</p>
+                </div>
               </header>
-              <ul id="agents-list" class="thread-list"></ul>
+              <ul id="agent-palette" class="agent-palette"></ul>
             </div>
           </aside>
-          <div class="chat-stage">
+          <div class="chat-stage" id="chat-stage">
             <header class="stage-header">
               <div>
                 <p class="eyebrow" id="stage-kind">Room</p>
-                <h1 id="stage-title">Select a chat</h1>
+                <h1 id="stage-title">Select a room</h1>
+                <div class="room-context">
+                  <label class="room-model-wrap hidden" id="room-model-wrap">
+                    <span class="sr-only">Model for this room</span>
+                    <select id="room-model-select" class="room-model-select" title="Agents in this room use the model you pick here"></select>
+                  </label>
+                  <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this room"></span>
+                  <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
+                    Start local model
+                  </button>
+                  <div id="room-members" class="room-members"></div>
+                </div>
               </div>
               <div class="header-actions">
+                <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, prompts, skills">Design</button>
+                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Agents converse on their own in this room">
+                  <input type="checkbox" id="autonomy-toggle" />
+                  <span>Autonomy</span>
+                </label>
+                <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
                 <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
                 <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
                 <button type="button" id="specialist-idea-btn" class="ghost hidden">Ideas</button>
                 <button type="button" id="specialist-stop-btn" class="ghost danger hidden">Stop</button>
                 <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
+                <button type="button" id="delete-room" class="ghost danger hidden">Delete</button>
               </div>
             </header>
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
               <span id="specialist-run-text">Specialists running — safe to leave this room.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
             </div>
-            <div id="share-box" class="share-box hidden">
-              <label for="share-url">Invite link</label>
-              <div class="share-row">
-                <input id="share-url" type="text" readonly />
-                <button type="button" id="copy-share">Copy</button>
-              </div>
-            </div>
             <div id="messages" class="messages" aria-live="polite"></div>
             <form id="send-form" class="composer">
-              <input id="body" type="text" maxlength="2000" placeholder="Message… @Qwen or @workflow ritual_id" autocomplete="off" disabled />
+              <input id="body" type="text" maxlength="2000" placeholder="Message… @Bullish uses the model in the menu above" autocomplete="off" disabled />
               <button type="submit" disabled>Send</button>
             </form>
             <p id="chat-error" class="error" hidden></p>
           </div>
         </div>
 
+        <dialog id="share-dialog">
+          <form method="dialog" class="share-dialog-form">
+            <h3>Invite friend</h3>
+            <p class="muted tiny-hint">Anyone with this link can join the room.</p>
+            <label for="share-url">Invite link</label>
+            <div class="share-row">
+              <input id="share-url" type="text" readonly />
+              <button type="button" id="copy-share">Copy</button>
+            </div>
+            <div class="dialog-actions">
+              <button type="submit" value="close">Done</button>
+            </div>
+          </form>
+        </dialog>
         <dialog id="new-room-dialog">
-          <form id="new-room-form" method="dialog">
+          <form id="new-room-form">
             <h3>New room</h3>
             <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <fieldset class="scope-fieldset">
-              <legend>Type</legend>
-              <label class="scope-option"><input type="radio" name="room-kind" value="people" checked /> Shared room</label>
-              <label class="scope-option"><input type="radio" name="room-kind" value="specialist" /> Specialist workshop</label>
-            </fieldset>
-            <div id="specialist-picker" class="hidden">
-              <p class="muted tiny-hint">Pick at least two sides. They’ll present recent work, debate a topic, and synthesize ideas.</p>
-              <div id="specialist-checkboxes" class="specialist-checks"></div>
-            </div>
+            <p class="muted tiny-hint">After create you’ll set the room Design (objective, prompts, skills). Invite friends anytime from the header.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -178,37 +214,151 @@
             <p id="debate-error" class="error" hidden></p>
           </form>
         </dialog>
+        <dialog id="room-design-dialog">
+          <form id="room-design-form" method="dialog" class="automate-dialog-form">
+            <h3>Design this room</h3>
+            <p class="muted tiny-hint">Objective and prompts guide agents when Autonomy is on. Skills are capabilities they can use.</p>
+            <label>Objective
+              <textarea id="room-objective" rows="3" maxlength="800" placeholder="e.g. Keep NVDA filings and sentiment current"></textarea>
+            </label>
+            <label>Prompts (one per line)
+              <textarea id="room-prompts" rows="4" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
+            </label>
+            <fieldset class="cap-picker">
+              <legend>Skills (capabilities)</legend>
+              <div id="room-skills-list" class="cap-picker-list"></div>
+            </fieldset>
+            <div class="dialog-actions">
+              <button type="button" id="room-design-cancel" class="ghost">Cancel</button>
+              <button type="submit">Save</button>
+            </div>
+            <p id="room-design-error" class="error" hidden></p>
+          </form>
+        </dialog>
       </section>
 
-      <!-- AUTOMATIONS -->
-      <section id="tab-automations" class="tab-panel hidden">
-        <header class="page-header">
+      <div id="flow-toast" class="flow-toast hidden" role="status"></div>
+
+      <!-- Studio dialogs live outside tab panels so showModal works when Rooms is hidden -->
+      <dialog id="agent-builder-dialog">
+        <form id="agent-builder-form" class="automate-dialog-form">
+          <h3 id="agent-builder-title">New agent</h3>
+          <p class="muted tiny-hint">Click lenses and capabilities to add them (or drag onto the canvas). Assign the agent to rooms from the studio or rail.</p>
+          <label>Name <input id="agent-builder-name" type="text" maxlength="80" required placeholder="e.g. Filings scout" /></label>
+          <label>Extra prompt (optional)
+            <textarea id="agent-builder-prompt" rows="3" maxlength="2000" placeholder="Standing instructions beyond the lenses…"></textarea>
+          </label>
+          <input type="hidden" id="agent-builder-id" value="" />
+          <div class="builder-layout">
+            <div class="builder-palette">
+              <h4>Lenses</h4>
+              <ul id="builder-lenses" class="builder-chips"></ul>
+              <h4>Capabilities</h4>
+              <ul id="builder-caps" class="builder-chips"></ul>
+            </div>
+            <div class="builder-canvas" id="builder-canvas" data-drop="agent">
+              <p class="muted tiny-hint">Canvas — click chips to add, or drop here</p>
+              <ul id="builder-dropped" class="builder-dropped"></ul>
+            </div>
+          </div>
+          <div class="dialog-actions">
+            <button type="button" id="agent-builder-cancel" class="ghost">Cancel</button>
+            <button type="submit" id="agent-builder-save">Create agent</button>
+          </div>
+          <p id="agent-builder-error" class="error" hidden></p>
+        </form>
+      </dialog>
+
+      <dialog id="lens-new-dialog">
+        <form id="lens-new-form">
+          <h3>New lens</h3>
+          <label>Name <input id="lens-name" type="text" maxlength="80" required /></label>
+          <label>Prompt <textarea id="lens-prompt" rows="5" required placeholder="System prompt / stance…"></textarea></label>
+          <div class="dialog-actions">
+            <button type="button" id="lens-new-cancel" class="ghost">Cancel</button>
+            <button type="submit">Create</button>
+          </div>
+          <p id="lens-new-error" class="error" hidden></p>
+        </form>
+      </dialog>
+
+      <dialog id="cap-new-dialog">
+        <form id="cap-new-form">
+          <h3>New capability</h3>
+          <label>Name <input id="cap-name" type="text" maxlength="80" required /></label>
+          <label>Summary <textarea id="cap-summary" rows="3" required placeholder="What this verb does…"></textarea></label>
+          <div class="dialog-actions">
+            <button type="button" id="cap-new-cancel" class="ghost">Cancel</button>
+            <button type="submit">Create</button>
+          </div>
+          <p id="cap-new-error" class="error" hidden></p>
+        </form>
+      </dialog>
+
+      <!-- AGENTS STUDIO -->
+      <section id="tab-agents" class="tab-panel hidden">
+        <header class="page-header studio-hero-head">
           <div>
-            <p class="eyebrow">Control</p>
-            <h1>Automations</h1>
+            <p class="eyebrow">Studio</p>
+            <h1>Agents</h1>
+            <p class="sub muted studio-lead">Your agents run in rooms. Add one, then assign it and turn on Autonomy.</p>
           </div>
           <div class="header-actions">
-            <button type="button" id="mine-btn" class="ghost">Mine</button>
-            <button type="button" id="refresh-autos-btn" class="ghost">Refresh</button>
+            <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
+            <button type="button" id="new-agent-btn" class="studio-add-btn">Add agent</button>
           </div>
         </header>
-        <div class="table-wrap">
-          <table class="data-table" id="autos-table">
-            <thead>
-              <tr>
-                <th>Ritual</th>
-                <th>Status</th>
-                <th>Runner</th>
-                <th>Schedule</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+
+        <div class="studio-toolbar">
+          <label class="studio-select-all muted tiny-hint">
+            <input type="checkbox" id="studio-select-all" /> Select custom
+          </label>
+          <button type="button" id="edit-selected-agent-btn" class="ghost tiny" disabled>Edit</button>
+          <button type="button" id="delete-selected-agents-btn" class="ghost danger tiny" disabled>Delete</button>
         </div>
-        <p id="autos-empty" class="empty muted">No automations yet. Mine from tracked sessions or create drafts from the local ledger tools.</p>
-        <p id="autos-error" class="error" hidden></p>
+        <div id="studio-agents" class="studio-agent-grid"></div>
+        <p id="studio-agents-empty" class="studio-empty muted hidden">No custom agents yet — hit Add agent to compose one from lenses and capabilities.</p>
+
+        <div class="studio-libraries">
+          <details class="studio-dropdown" id="studio-builtins-dropdown">
+            <summary>
+              <span>Built-in agents</span>
+              <span class="muted tiny-hint" id="studio-builtins-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div id="studio-builtins" class="studio-agent-grid studio-builtins-grid"></div>
+            </div>
+          </details>
+
+          <details class="studio-dropdown" id="studio-lenses-dropdown">
+            <summary>
+              <span>Lenses</span>
+              <span class="muted tiny-hint" id="studio-lenses-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div class="studio-dropdown-actions">
+                <button type="button" id="new-lens-btn" class="ghost tiny">Add lens</button>
+              </div>
+              <div id="studio-lenses" class="studio-compact-list"></div>
+            </div>
+          </details>
+
+          <details class="studio-dropdown" id="studio-caps-dropdown">
+            <summary>
+              <span>Capabilities</span>
+              <span class="muted tiny-hint" id="studio-caps-count"></span>
+            </summary>
+            <div class="studio-dropdown-body">
+              <div class="studio-dropdown-actions">
+                <button type="button" id="new-cap-btn" class="ghost tiny">Add capability</button>
+              </div>
+              <div id="studio-caps" class="studio-compact-list"></div>
+            </div>
+          </details>
+        </div>
+        <p id="agents-tab-error" class="error" hidden></p>
       </section>
+
 
       <!-- REVIEW -->
       <section id="tab-review" class="tab-panel hidden">
@@ -229,13 +379,13 @@
             <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Claude (or a local stub) mines sessions and chat gaps into draft automations. Approve here — nothing runs until you do.</p>
+        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (open Agents → Capabilities). Approve &amp; enable, then add them to an agent or a room’s skills. In a room, <code>/automate</code> opens Design.</p>
         <h2 class="section-title">Open proposals</h2>
         <div class="table-wrap">
           <table class="data-table" id="review-proposals-table">
             <thead>
               <tr>
-                <th>Ritual</th>
+                <th>Capability</th>
                 <th>Source</th>
                 <th>Runner</th>
                 <th></th>
@@ -258,17 +408,23 @@
             <p class="eyebrow">Data</p>
             <h1>Tracking</h1>
           </div>
+          <div class="header-actions">
+            <button type="button" id="classify-pending-btn" class="ghost tiny">Classify pending</button>
+          </div>
         </header>
         <div class="cards">
           <div class="card">
             <h3>Active session</h3>
             <p id="active-session" class="muted">None</p>
             <p id="active-scope" class="muted tiny-hint" hidden></p>
+            <p id="capture-status" class="capture-status muted tiny-hint" data-state="unknown">
+              Checking Capture extension…
+            </p>
             <fieldset id="capture-scope-fieldset" class="scope-fieldset">
               <legend>Capture scope</legend>
               <label class="scope-option"><input type="radio" name="capture-scope" value="active_tab" checked /> Active tab</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="all_tabs" /> All open tabs</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs <span class="muted">(pick in extension)</span></label>
+              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="research_sites" /> Research sites only</label>
               <label class="scope-option"><input type="radio" name="capture-scope" value="notes_only" /> Notes only</label>
             </fieldset>
@@ -276,14 +432,15 @@
               <input id="session-title" type="text" placeholder="Research session" value="Research session" />
             </label>
             <div class="card-actions">
-              <button type="button" id="start-session-btn">Start</button>
+              <button type="button" id="start-session-btn">Start tracking</button>
+              <button type="button" id="open-capture-btn" class="ghost">Select tabs</button>
               <button type="button" id="end-session-btn" class="ghost">End</button>
             </div>
             <label class="inline-note">Note
               <input id="session-note" type="text" placeholder="Optional note…" />
             </label>
             <button type="button" id="add-note-btn" class="ghost tiny">Add note</button>
-            <p class="muted tiny-hint">Browser scopes need the Capture extension pointed at this app (:8790) while you stay signed in.</p>
+            <p id="capture-hint" class="muted tiny-hint">Browser tab capture needs the Capture extension. Notes and chat still work without it.</p>
           </div>
           <div class="card">
             <h3>Summary</h3>
@@ -294,7 +451,7 @@
         <div class="table-wrap">
           <table class="data-table" id="sessions-table">
             <thead>
-              <tr><th>Title</th><th>Surface</th><th>Status</th><th>Started</th></tr>
+              <tr><th>Title</th><th>Labels</th><th>Surface</th><th>Status</th><th>Started</th></tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -304,69 +461,312 @@
         <p id="track-error" class="error" hidden></p>
       </section>
 
-      <!-- MODEL (per-user providers: Claude, GPT, Ollama, …) -->
-      <section id="tab-model" class="tab-panel hidden">
+      <!-- SETTINGS → Models -->
+      <section id="tab-settings" class="tab-panel hidden">
         <header class="page-header">
           <div>
-            <p class="eyebrow">Your keys</p>
-            <h1>Model</h1>
-          </div>
-          <div class="header-actions">
-            <button type="button" id="model-refresh-btn" class="ghost">Refresh</button>
-            <button type="button" id="model-unlink-btn" class="ghost danger">Disconnect</button>
+            <p class="eyebrow">Your account</p>
+            <h1>Settings</h1>
           </div>
         </header>
-        <p class="muted" style="max-width:42rem;margin:0 1.25rem 1rem;">
-          Specialists use <strong>your</strong> provider — Claude, GPT, OpenRouter, or a local Ollama tunnel.
-          Keys stay on this account; other users bring their own.
-        </p>
-        <div class="cards">
-          <div class="card">
-            <h3>Status</h3>
-            <p id="model-status-line" class="muted">Not linked</p>
-            <p id="model-models-line" class="muted tiny-hint" hidden></p>
+
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="Settings sections">
+            <button type="button" class="settings-nav-btn active" data-settings-panel="profile">Profile</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="security">Security</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="preferences">Preferences</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="models">Models &amp; integrations</button>
+            <button type="button" class="settings-nav-btn" data-settings-panel="privacy">Privacy &amp; data</button>
+            <button type="button" class="settings-nav-btn danger" data-settings-panel="danger">Danger zone</button>
+          </nav>
+
+          <div class="settings-content">
+            <section id="settings-panel-profile" class="settings-panel">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Profile</h2>
+                  <p>Manage how you appear across Flyleaf.</p>
+                </div>
+              </div>
+              <form id="profile-settings-form" class="settings-account-form">
+                <label>Display name
+                  <input id="settings-display-name" type="text" maxlength="40" autocomplete="nickname" required />
+                </label>
+                <label>Email
+                  <input id="settings-email" type="email" readonly />
+                </label>
+                <div class="settings-inline-meta">
+                  <span id="settings-email-status" class="status-pill">Verification unknown</span>
+                  <span id="settings-member-since" class="muted"></span>
+                </div>
+                <div class="card-actions">
+                  <button type="submit">Save profile</button>
+                </div>
+                <p id="profile-settings-message" class="auth-banner" hidden></p>
+                <p id="profile-settings-error" class="error" hidden></p>
+              </form>
+            </section>
+
+            <section id="settings-panel-security" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Security</h2>
+                  <p>Change your password and control signed-in browsers.</p>
+                </div>
+              </div>
+              <form id="change-password-form" class="settings-account-form">
+                <label>Current password
+                  <input id="settings-current-password" type="password" autocomplete="current-password" required />
+                </label>
+                <label>New password
+                  <input id="settings-new-password" type="password" autocomplete="new-password" minlength="8" required />
+                </label>
+                <label>Confirm new password
+                  <input id="settings-confirm-password" type="password" autocomplete="new-password" minlength="8" required />
+                </label>
+                <div class="card-actions">
+                  <button type="submit">Change password</button>
+                </div>
+                <p id="password-settings-message" class="auth-banner" hidden></p>
+                <p id="password-settings-error" class="error" hidden></p>
+              </form>
+              <div class="settings-subcard">
+                <div>
+                  <strong>Email two-factor authentication</strong>
+                  <p id="settings-2fa-status" class="muted tiny-hint">Off. We’ll email a one-time code at each login when enabled.</p>
+                </div>
+                <form id="email-2fa-form" class="settings-account-form">
+                  <label>Confirm password
+                    <input id="settings-2fa-password" type="password" autocomplete="current-password" required />
+                  </label>
+                  <div class="card-actions">
+                    <button type="submit" id="toggle-2fa-btn">Enable email 2FA</button>
+                  </div>
+                  <p id="twofa-settings-message" class="auth-banner" hidden></p>
+                  <p id="twofa-settings-error" class="error" hidden></p>
+                </form>
+              </div>
+              <div class="settings-subcard">
+                <div>
+                  <strong>Active sessions</strong>
+                  <p id="settings-session-count" class="muted tiny-hint">This browser is signed in.</p>
+                </div>
+                <button type="button" id="logout-other-sessions-btn" class="ghost">Log out other sessions</button>
+              </div>
+            </section>
+
+            <section id="settings-panel-preferences" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Preferences</h2>
+                  <p>Personalize this browser’s Flyleaf experience.</p>
+                </div>
+              </div>
+              <form id="preferences-form" class="settings-account-form">
+                <label>Appearance
+                  <select id="settings-theme">
+                    <option value="system">Use system setting</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                  </select>
+                </label>
+                <label>Time zone
+                  <input id="settings-timezone" type="text" readonly />
+                </label>
+                <p class="muted tiny-hint">Appearance is saved in this browser. Times use your browser’s time zone.</p>
+                <p id="preferences-message" class="auth-banner" hidden></p>
+              </form>
+            </section>
+
+            <section id="settings-panel-models" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Models &amp; integrations</h2>
+                  <p>Agents (@Bullish, @Contrarian, …) are prompt roles on top of whichever model is active — Claude, GPT, or local.</p>
+                </div>
+                <button type="button" id="settings-refresh-btn" class="ghost">Refresh</button>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Active model</h3>
+                  <p id="settings-active-line" class="muted">None</p>
+                </div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Frontier</h3>
+                  <button type="button" id="frontier-add-btn" class="ghost tiny">Add</button>
+                </div>
+                <ul id="frontier-list" class="profile-list"></ul>
+                <div id="frontier-form" class="card settings-form hidden">
+                  <h3>Add frontier model</h3>
+                  <label>Provider
+                    <select id="frontier-provider">
+                      <option value="anthropic">Claude (Anthropic)</option>
+                      <option value="openai">GPT (OpenAI)</option>
+                    </select>
+                  </label>
+                  <p id="frontier-hint" class="muted tiny-hint"></p>
+                  <label>API key
+                    <input id="frontier-api-key" type="password" placeholder="sk-…" autocomplete="off" />
+                  </label>
+                  <label>Model
+                    <input id="frontier-model" type="text" list="frontier-model-suggestions" value="claude-sonnet-4-20250514" />
+                    <datalist id="frontier-model-suggestions"></datalist>
+                  </label>
+                  <div class="card-actions">
+                    <button type="button" id="frontier-save-btn">Save &amp; test</button>
+                    <button type="button" id="frontier-cancel-btn" class="ghost">Cancel</button>
+                  </div>
+                  <p id="frontier-error" class="error" hidden></p>
+                </div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-head">
+                  <h3>Open source</h3>
+                  <button type="button" id="os-add-btn" class="ghost tiny">Add your own</button>
+                </div>
+                <div id="durable-tunnel-card" class="settings-subcard stacked">
+                  <strong>Durable tunnel</strong>
+                  <p id="durable-tunnel-status" class="muted tiny-hint">Checking Local Companion…</p>
+                  <p class="muted tiny-hint">One-time Cloudflare named tunnel → same hostname after reboot. Then <strong>Start local model</strong> is one click.</p>
+                  <details id="durable-tunnel-setup">
+                    <summary class="muted tiny-hint">Set up durable hostname</summary>
+                    <ol class="muted tiny-hint" style="padding-left:1.2rem;line-height:1.55;margin:0.5rem 0;">
+                      <li>Install: <code>brew install cloudflared</code></li>
+                      <li>Cloudflare Zero Trust → Networks → Tunnels → Create → copy <strong>token</strong></li>
+                      <li>Public hostname → service <code>http://127.0.0.1:8791</code></li>
+                      <li>Paste token + <code>https://…</code> hostname below</li>
+                    </ol>
+                    <label>Tunnel token
+                      <input id="durable-tunnel-token" type="password" autocomplete="off" placeholder="eyJ…" />
+                    </label>
+                    <label>Public URL
+                      <input id="durable-tunnel-url" type="url" placeholder="https://flyleaf-mac.example.com" />
+                    </label>
+                    <div class="card-actions">
+                      <button type="button" id="durable-tunnel-save-btn">Save &amp; boot</button>
+                      <button type="button" id="durable-tunnel-clear-btn" class="ghost">Clear</button>
+                    </div>
+                    <p id="durable-tunnel-error" class="error" hidden></p>
+                  </details>
+                </div>
+                <ul id="os-list" class="profile-list"></ul>
+                <p id="settings-error" class="error" hidden></p>
+              </div>
+            </section>
+
+            <section id="settings-panel-privacy" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Privacy &amp; data</h2>
+                  <p>Understand where your information lives.</p>
+                </div>
+              </div>
+              <div class="settings-subcard stacked">
+                <strong>Your Flyleaf data</strong>
+                <p class="muted">Account details, rooms, and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account.</p>
+                <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
+                <button type="button" id="privacy-tracking-btn" class="ghost">Review tracking data</button>
+              </div>
+            </section>
+
+            <section id="settings-panel-danger" class="settings-panel hidden">
+              <div class="settings-panel-head">
+                <div>
+                  <h2>Danger zone</h2>
+                  <p>Irreversible account actions live here.</p>
+                </div>
+              </div>
+              <div class="settings-subcard danger-zone">
+                <div>
+                  <strong>Delete account</strong>
+                  <p class="muted tiny-hint">Account deletion is not available yet because shared-room messages do not currently retain reliable author ownership. This prevents incomplete deletion.</p>
+                </div>
+                <button type="button" class="ghost danger" disabled>Delete account</button>
+              </div>
+            </section>
           </div>
-          <div class="card">
-            <h3>Connect</h3>
-            <label>Provider
-              <select id="model-provider">
-                <option value="anthropic">Claude (Anthropic)</option>
-                <option value="openai">GPT (OpenAI)</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="ollama">Local Ollama (tunnel)</option>
-                <option value="custom">Custom OpenAI-compatible</option>
-              </select>
-            </label>
-            <p id="model-provider-hint" class="muted tiny-hint"></p>
-            <label id="model-base-url-wrap">Base URL
-              <input id="model-base-url" type="url" placeholder="https://….trycloudflare.com/v1" autocomplete="off" />
-            </label>
-            <label>API key
-              <input id="model-api-key" type="password" placeholder="sk-… or gateway token" autocomplete="off" />
-            </label>
-            <label>Model
-              <input id="model-id" type="text" list="model-id-suggestions" value="claude-sonnet-4-20250514" />
-              <datalist id="model-id-suggestions"></datalist>
-            </label>
-            <div class="card-actions">
-              <button type="button" id="model-link-btn">Save &amp; test</button>
+        </div>
+
+        <!-- Open-source wizard -->
+        <div id="os-wizard" class="wizard-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="os-wizard-title">
+          <div class="wizard-panel">
+            <header class="wizard-head">
+              <h2 id="os-wizard-title">Add a local model</h2>
+              <button type="button" id="os-wizard-close" class="ghost tiny" aria-label="Close">×</button>
+            </header>
+            <div id="os-step-companion" class="wizard-step">
+              <p>To use a model on this computer with the website, run Local Companion once. Keep the localhost URL — on Flyleaf we’ll open a secure tunnel for you.</p>
+              <ol class="muted tiny-hint" style="padding-left:1.2rem;line-height:1.55;">
+                <li>On this computer run: <code>python -m messenger.companion_app</code></li>
+                <li>Paste the printed token below (URL can stay <code>http://127.0.0.1:8791</code>)</li>
+                <li>Click Link companion</li>
+              </ol>
+              <form id="companion-link-form">
+                <label>Companion URL
+                  <input id="companion-url" type="url" placeholder="http://127.0.0.1:8791" value="http://127.0.0.1:8791" required />
+                </label>
+                <label>Token
+                  <input id="companion-token" type="password" placeholder="Companion token" autocomplete="off" required />
+                </label>
+                <div class="card-actions">
+                  <button type="submit" id="companion-link-btn">Link companion</button>
+                </div>
+                <p id="companion-error" class="error" hidden></p>
+              </form>
             </div>
-            <p id="model-error" class="error" hidden></p>
-          </div>
-          <div class="card" id="model-ollama-help">
-            <h3>Local Ollama only</h3>
-            <ol class="muted tiny-hint" style="margin:0;padding-left:1.2rem;line-height:1.5;">
-              <li>Install Ollama and pull <code>qwen3:8b</code></li>
-              <li>From the Workflow repo: <code>./scripts/secure_qwen_tunnel.sh</code></li>
-              <li>Paste the printed HTTPS <code>/v1</code> URL + token here</li>
-              <li>Leave the tunnel running while you debate</li>
-            </ol>
+            <div id="os-step-search" class="wizard-step hidden">
+              <p class="muted">Find models already on this computer (Ollama or LM Studio).</p>
+              <div class="card-actions">
+                <button type="button" id="os-search-btn">Find models on this computer</button>
+              </div>
+              <div id="os-empty" class="wizard-empty hidden">
+                <p id="os-empty-msg" class="muted">No models found.</p>
+                <p class="card-actions">
+                  <a id="os-install-ollama" class="ghost" href="https://ollama.com/download" target="_blank" rel="noopener">Install Ollama</a>
+                  <button type="button" id="os-pull-btn">Download recommended model</button>
+                  <button type="button" id="os-search-retry" class="ghost">Search again</button>
+                </p>
+                <p id="os-pull-status" class="muted tiny-hint" hidden></p>
+              </div>
+              <ul id="os-candidates" class="profile-list"></ul>
+            </div>
+            <div id="os-step-connect" class="wizard-step hidden">
+              <p>Selected: <strong id="os-selected-label"></strong></p>
+              <ol id="os-connect-checklist" class="connect-checklist muted tiny-hint">
+                <li data-step="runtime">Preparing runtime…</li>
+                <li data-step="gateway">Starting secure gateway…</li>
+                <li data-step="route">Opening reachability route…</li>
+                <li data-step="probe">Testing connection…</li>
+                <li data-step="save">Saving to your account…</li>
+              </ol>
+              <div class="card-actions">
+                <button type="button" id="os-establish-btn">Connect &amp; save</button>
+                <button type="button" id="os-back-btn" class="ghost">Back</button>
+              </div>
+              <p id="os-establish-error" class="error" hidden></p>
+              <details class="tech-details">
+                <summary class="muted tiny-hint">Technical details</summary>
+                <p id="os-tech-details" class="muted tiny-hint">—</p>
+              </details>
+            </div>
+            <div id="os-step-done" class="wizard-step hidden">
+              <p><strong>Ready.</strong> Your local model is saved. Turn it on from the list whenever you want.</p>
+              <div class="card-actions">
+                <button type="button" id="os-done-btn">Done</button>
+                <button type="button" id="os-done-enable-btn">Turn on now</button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
     </main>
   </div>
 
-  <script src="/static/app.js?v=30"></script>
+  <script src="/static/app.js?v=46"></script>
 </body>
 </html>

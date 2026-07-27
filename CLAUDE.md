@@ -4,6 +4,16 @@ Local-first capture of an analyst's research workflow. **The local store is the
 system of record**; models are only called on explicit, redacted synthesis jobs.
 Read this before touching the ledger or proposing automations.
 
+## Product UI (Flyleaf)
+
+**Default product surface is Flyleaf** — the Workflow messenger in `messenger/`,
+deployed at `https://levin.fly.dev`. Unless the human says otherwise, implement
+and verify chat/settings/rooms features there (not the local ledger dashboard).
+
+The local dashboard (`analyst dashboard` / `:8788`) is **deprecated for product
+chat UX**. Keep it for local ledger timeline / ritual review only; do not add
+new “model is active” or room-chat features to `dashboard.py`.
+
 ## Hard rules (non-negotiable)
 
 1. **Never** read, quote, or summarize events/artifacts labeled `restricted`.
@@ -23,7 +33,8 @@ Read this before touching the ledger or proposing automations.
   - `runners.py` — runner registry (`RUNNERS`) + `sec_filings_check`, `note_digest`
   - `morning_yf.py` — Yahoo watchlist scan runner
   - `redact.py` — redaction + egress filtering; `synthesize.py` — model calls + audit
-  - `dashboard.py` — local UI at http://127.0.0.1:8788/
+  - `dashboard.py` — **legacy** local ledger UI at http://127.0.0.1:8788/ (not Flyleaf)
+- `messenger/` — **Flyleaf** product UI (rooms, agents, settings/models); ship via Fly
 - `data/` (gitignored) — `ledger.sqlite3`, `events/*.jsonl`, `artifacts/`,
   `rituals/candidates.json`, `rituals/specs/*.json`, `rituals/builds/<id>/`
 - `tests/` — pytest; run with `python -m pytest tests/ -q`

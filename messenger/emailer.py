@@ -12,6 +12,7 @@ Set MESSENGER_PUBLIC_BASE_URL if links should not use the request host
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -66,18 +67,18 @@ def expose_dev_links() -> bool:
 
 
 def auto_verify_on_signup() -> bool:
-    """Skip inbox verification when mail cannot reach the user.
+    """Return the explicit break-glass verification bypass setting.
 
-    Local keeps the verify flow (dev links). On Fly with only the console
-    backend, verification emails never arrive — auto-verify so signup works.
-    Override with MESSENGER_AUTO_VERIFY=1/0.
+    Production must not silently turn verification off merely because outbound
+    mail is misconfigured. Local development uses exposed console links.
     """
     raw = (os.environ.get("MESSENGER_AUTO_VERIFY") or "").strip().lower()
-    if raw in {"1", "true", "yes"}:
-        return True
-    if raw in {"0", "false", "no"}:
-        return False
-    return bool((os.environ.get("FLY_APP_NAME") or "").strip()) and email_backend() == "console"
+    return raw in {"1", "true", "yes"}
+
+
+def email_delivery_available() -> bool:
+    """Whether email can leave this process and reach a user's inbox."""
+    return email_backend() in {"resend", "smtp"}
 
 
 def send_email(*, to: str, subject: str, text: str, html: Optional[str] = None) -> dict[str, Any]:
@@ -153,33 +154,53 @@ def _send_smtp(*, to: str, subject: str, text: str, html: Optional[str]) -> dict
 
 def send_verification_email(*, to: str, verify_url: str, display_name: str) -> dict[str, Any]:
     subject = "Verify your Workflow email"
+    safe_name = html.escape(display_name or "", quote=True)
     text = (
         f"Hi {display_name},\n\n"
         "Confirm your email to finish creating your Workflow account:\n"
         f"{verify_url}\n\n"
         "This link expires in 24 hours. If you did not sign up, ignore this email.\n"
     )
-    html = (
-        f"<p>Hi {display_name},</p>"
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
         "<p>Confirm your email to finish creating your Workflow account:</p>"
         f'<p><a href="{verify_url}">Verify email</a></p>'
         "<p>This link expires in 24 hours.</p>"
     )
-    return send_email(to=to, subject=subject, text=text, html=html)
+    return send_email(to=to, subject=subject, text=text, html=html_body)
 
 
 def send_password_reset_email(*, to: str, reset_url: str, display_name: str) -> dict[str, Any]:
     subject = "Reset your Workflow password"
+    safe_name = html.escape(display_name or "", quote=True)
     text = (
         f"Hi {display_name},\n\n"
         "Use this link to choose a new password:\n"
         f"{reset_url}\n\n"
         "This link expires in 1 hour. If you did not request a reset, ignore this email.\n"
     )
-    html = (
-        f"<p>Hi {display_name},</p>"
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
         "<p>Use this link to choose a new password:</p>"
         f'<p><a href="{reset_url}">Reset password</a></p>'
         "<p>This link expires in 1 hour.</p>"
     )
-    return send_email(to=to, subject=subject, text=text, html=html)
+    return send_email(to=to, subject=subject, text=text, html=html_body)
+
+
+def send_login_otp_email(*, to: str, code: str, display_name: str) -> dict[str, Any]:
+    subject = "Your Workflow sign-in code"
+    safe_name = html.escape(display_name or "", quote=True)
+    safe_code = html.escape(code or "", quote=True)
+    text = (
+        f"Hi {display_name},\n\n"
+        f"Your sign-in code is: {code}\n\n"
+        "It expires in 10 minutes. If you did not try to sign in, change your password.\n"
+    )
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
+        f"<p>Your sign-in code is:</p>"
+        f'<p style="font-size:1.5rem;letter-spacing:0.2em"><strong>{safe_code}</strong></p>'
+        "<p>It expires in 10 minutes.</p>"
+    )
+    return send_email(to=to, subject=subject, text=text, html=html_body)

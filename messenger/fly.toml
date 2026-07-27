@@ -27,6 +27,8 @@ primary_region = "sjc"
   MESSENGER_DATA_DIR = "/data"
   MESSENGER_USERS_DIR = "/data/users"
   MESSENGER_COOKIE_SECURE = "1"
+  MESSENGER_PUBLIC_BASE_URL = "https://levin.fly.dev"
+  MESSENGER_AUTO_VERIFY = "0"
   MESSENGER_SCHEDULER = "1"
   PYTHONPATH = "/app/src:/app"
 

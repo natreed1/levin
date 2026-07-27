@@ -37,6 +37,8 @@ Guest room join (invite link) still works for People chats without a full accoun
 
 Signup sends a verification email; login is blocked until verified.
 Forgot password sends a one-hour reset link.
+Optional email two-factor authentication (Settings → Security) emails a 6-digit
+code at each login after the password succeeds.
 
 Configure outbound mail (Fly secrets recommended):
 
@@ -51,8 +53,11 @@ fly secrets set -a levin \
 # MESSENGER_SMTP_HOST / PORT / USER / PASSWORD / TLS
 ```
 
-Without a mail backend, emails are logged to the server console and
-signup/forgot responses include `dev_verify_url` / `dev_reset_url` for local testing.
+Without a mail backend, local emails are logged to the server console and
+signup/forgot responses include `dev_verify_url` / `dev_reset_url` for testing
+(and `dev_otp_code` when email 2FA is on). On Fly, account creation fails closed
+until Resend or SMTP is configured; the server never exposes verification,
+reset, or OTP codes in production responses.
 
 ## Tabs
 
@@ -142,6 +147,13 @@ Until a companion is reachable, the cloud volume under `/data/users/{id}/` is th
 | `MESSENGER_SCHEDULER_LIVE` | `1` for non-stub scheduled runs |
 | `MESSENGER_SCHEDULER_INTERVAL` | Seconds between scheduler ticks (default 30) |
 | `MESSENGER_COOKIE_SECURE` | Force Secure cookies |
+| `MESSENGER_RESEND_API_KEY` | Resend API key for account email |
+| `MESSENGER_EMAIL_FROM` | Verified sender used for account email |
+| `MESSENGER_PUBLIC_BASE_URL` | Public origin used in verification/reset links |
+| `MESSENGER_SMTP_HOST` | SMTP host when Resend is not used |
+| `MESSENGER_SMTP_PORT` | SMTP port (default 587) |
+| `MESSENGER_SMTP_USER` / `MESSENGER_SMTP_PASSWORD` | Optional SMTP credentials |
+| `MESSENGER_AUTO_VERIFY` | Emergency bypass only; keep `0` in production |
 | `ANALYST_QWEN_BASE_URL` | OpenAI-compatible base (local Ollama or tunnel `/v1`) |
 | `ANALYST_QWEN_MODEL` | Model id (default `qwen3:8b`) |
 | `ANALYST_QWEN_API_KEY` | Bearer token (required for the secure gateway) |

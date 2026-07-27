@@ -133,6 +133,11 @@ class MessageStore:
                         "UPDATE users SET email_verified_at = created_at "
                         "WHERE email_verified_at IS NULL"
                     )
+                if "email_2fa_enabled" not in user_cols:
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN email_2fa_enabled "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -145,6 +150,16 @@ class MessageStore:
                     )
                     """
                 )
+                token_cols = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA table_info(auth_tokens)"
+                    ).fetchall()
+                }
+                if "code_hash" not in token_cols:
+                    conn.execute(
+                        "ALTER TABLE auth_tokens ADD COLUMN code_hash TEXT"
+                    )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_auth_tokens_user "
                     "ON auth_tokens(user_id, purpose)"
@@ -158,6 +173,19 @@ class MessageStore:
                         PRIMARY KEY (room_id, user_id)
                     )
                     """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        sid TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_room_id "
@@ -223,6 +251,7 @@ class MessageStore:
             return None
         data = dict(row)
         data["email_verified"] = bool(data.get("email_verified_at"))
+        data["email_2fa_enabled"] = bool(int(data.get("email_2fa_enabled") or 0))
         return data
 
     def user_by_email(self, email: str) -> dict[str, Any] | None:
@@ -231,7 +260,7 @@ class MessageStore:
             try:
                 row = conn.execute(
                     "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at FROM users WHERE email = ?",
+                    "email_verified_at, email_2fa_enabled FROM users WHERE email = ?",
                     (email,),
                 ).fetchone()
             finally:
@@ -244,7 +273,7 @@ class MessageStore:
             try:
                 row = conn.execute(
                     "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at FROM users WHERE user_id = ?",
+                    "email_verified_at, email_2fa_enabled FROM users WHERE user_id = ?",
                     (user_id,),
                 ).fetchone()
             finally:
@@ -277,6 +306,126 @@ class MessageStore:
             finally:
                 conn.close()
 
+    def update_display_name(self, user_id: str, display_name: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE users SET display_name = ? WHERE user_id = ?",
+                    (display_name, user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def set_email_2fa_enabled(self, user_id: str, enabled: bool) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE users SET email_2fa_enabled = ? WHERE user_id = ?",
+                    (1 if enabled else 0, user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    # --- sessions --------------------------------------------------------------
+
+    def create_session(
+        self,
+        *,
+        sid: str,
+        user_id: Optional[str],
+        expires_at: str,
+    ) -> None:
+        created_at = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO sessions (sid, user_id, created_at, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (sid, user_id, created_at, expires_at),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_session(self, sid: str) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT sid, user_id, created_at, expires_at FROM sessions "
+                    "WHERE sid = ?",
+                    (sid,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        return dict(row)
+
+    def session_is_active(self, sid: str) -> bool:
+        row = self.get_session(sid)
+        if not row:
+            return False
+        expires_at = str(row.get("expires_at") or "")
+        if not expires_at:
+            return False
+        return expires_at >= _utc_now()
+
+    def delete_session(self, sid: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def delete_sessions_for_user(self, user_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ?", (user_id,)
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
+            finally:
+                conn.close()
+
+    def delete_other_sessions_for_user(self, user_id: str, keep_sid: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ? AND sid != ?",
+                    (user_id, keep_sid),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
+            finally:
+                conn.close()
+
+    def count_sessions_for_user(self, user_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM sessions "
+                    "WHERE user_id = ? AND expires_at >= ?",
+                    (user_id, _utc_now()),
+                ).fetchone()
+            finally:
+                conn.close()
+        return int(row["count"] if row else 0)
+
     def create_auth_token(
         self,
         *,
@@ -284,6 +433,7 @@ class MessageStore:
         user_id: str,
         purpose: str,
         expires_at: str,
+        code_hash: Optional[str] = None,
     ) -> None:
         created_at = _utc_now()
         with self._lock:
@@ -298,16 +448,24 @@ class MessageStore:
                 conn.execute(
                     """
                     INSERT INTO auth_tokens
-                        (token_hash, user_id, purpose, created_at, expires_at, used_at)
-                    VALUES (?, ?, ?, ?, ?, NULL)
+                        (token_hash, user_id, purpose, created_at, expires_at,
+                         used_at, code_hash)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?)
                     """,
-                    (token_hash, user_id, purpose, created_at, expires_at),
+                    (
+                        token_hash,
+                        user_id,
+                        purpose,
+                        created_at,
+                        expires_at,
+                        code_hash,
+                    ),
                 )
                 conn.commit()
             finally:
                 conn.close()
 
-    def consume_auth_token(
+    def get_auth_token(
         self, *, token_hash: str, purpose: str
     ) -> dict[str, Any] | None:
         now = _utc_now()
@@ -316,7 +474,60 @@ class MessageStore:
             try:
                 row = conn.execute(
                     """
-                    SELECT token_hash, user_id, purpose, created_at, expires_at, used_at
+                    SELECT token_hash, user_id, purpose, created_at, expires_at,
+                           used_at, code_hash
+                    FROM auth_tokens WHERE token_hash = ? AND purpose = ?
+                    """,
+                    (token_hash, purpose),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        data = dict(row)
+        if data.get("used_at"):
+            return None
+        if str(data.get("expires_at") or "") < now:
+            return None
+        return data
+
+    def refresh_auth_token_code(
+        self,
+        *,
+        token_hash: str,
+        purpose: str,
+        code_hash: str,
+        expires_at: str,
+    ) -> bool:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE auth_tokens
+                    SET code_hash = ?, expires_at = ?, created_at = ?
+                    WHERE token_hash = ? AND purpose = ?
+                      AND used_at IS NULL AND expires_at >= ?
+                    """,
+                    (code_hash, expires_at, now, token_hash, purpose, now),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def consume_auth_token(
+        self, *, token_hash: str, purpose: str, code_hash: Optional[str] = None
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT token_hash, user_id, purpose, created_at, expires_at,
+                           used_at, code_hash
                     FROM auth_tokens WHERE token_hash = ? AND purpose = ?
                     """,
                     (token_hash, purpose),
@@ -327,6 +538,14 @@ class MessageStore:
                 if data.get("used_at"):
                     return None
                 if str(data.get("expires_at") or "") < now:
+                    return None
+                expected_code = data.get("code_hash")
+                if expected_code:
+                    if not code_hash or not hmac.compare_digest(
+                        str(expected_code), str(code_hash)
+                    ):
+                        return None
+                elif code_hash:
                     return None
                 conn.execute(
                     "UPDATE auth_tokens SET used_at = ? WHERE token_hash = ?",
@@ -481,6 +700,37 @@ class MessageStore:
                 conn.close()
         return _room_row(row) if row else None
 
+    def update_room_config(
+        self,
+        room_id: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        config_json = json.dumps(config if isinstance(config, dict) else {}, ensure_ascii=False)
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE rooms SET config_json = ? WHERE room_id = ?",
+                    (config_json, room_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return self.room(room_id) if cur.rowcount else None
+
+    def update_room_token(self, room_id: str, token_hash: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE rooms SET token_hash = ? WHERE room_id = ?",
+                    (token_hash, room_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
     def room_token_ok(self, room_id: str, token_hash: str) -> bool:
         room = self.room(room_id)
         return bool(room and hmac.compare_digest(str(room["token_hash"]), token_hash))
@@ -549,3 +799,31 @@ class MessageStore:
             finally:
                 conn.close()
         return count
+
+    def delete_room(self, room_id: str) -> bool:
+        """Permanently remove a room, its members, and messages.
+
+        Refuses the built-in ``legacy`` room. Returns False if the room
+        does not exist (or is legacy).
+        """
+        if room_id == "legacy":
+            return False
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM rooms WHERE room_id = ?",
+                    (room_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+                conn.execute(
+                    "DELETE FROM room_members WHERE room_id = ?",
+                    (room_id,),
+                )
+                conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        return True
