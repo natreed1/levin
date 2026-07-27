@@ -27,6 +27,7 @@ from .friend_personalities import (
     PERSONALITIES,
     PERSONALITIES_BY_ID,
     FriendPersonality,
+    _AT_TOKEN_RE,
     all_agent_author_names,
     author_names_for,
     match_personality,
@@ -550,8 +551,15 @@ def _wants_current_info(text: str) -> bool:
 
 
 def _is_research_request(body: str) -> bool:
+    """True when the message @-mentions someone and asks for current info.
+
+    Uses any ``@token`` (builtins + studio agents), not only the static
+    builtin ``MENTION_RE`` — otherwise composed agents never trigger research.
+    """
     text = body or ""
-    return bool(MENTION_RE.search(text) and _wants_current_info(text))
+    if not _AT_TOKEN_RE.search(text) and not MENTION_RE.search(text):
+        return False
+    return bool(_wants_current_info(text))
 
 
 _NONANSWER_RE = re.compile(

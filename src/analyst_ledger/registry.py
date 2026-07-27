@@ -78,6 +78,9 @@ class Agent:
     room_palette: bool = True
     # Lenses used when composing (custom agents only).
     lens_ids: Tuple[str, ...] = ()
+    # Orchestrator assembly labels
+    stage: str = "critique"  # research | critique | automate | synthesize | orchestrate
+    skills: Tuple[str, ...] = ()
 
     def to_public(self) -> Dict[str, Any]:
         return {
@@ -97,10 +100,32 @@ class Agent:
             "room_palette": self.room_palette,
             "uses_capabilities": bool(self.capabilities),
             "prompt": self.prompt,
+            "stage": self.stage,
+            "skills": list(self.skills),
         }
 
     def can_use(self, capability_id: str) -> bool:
         return capability_id in self.capabilities
+
+    def label_tokens(self) -> Tuple[str, ...]:
+        """Tokens for reverse-TF routing against this agent."""
+        parts: List[str] = [
+            self.id,
+            self.name,
+            self.role,
+            self.stage,
+            self.summary,
+            self.how,
+        ]
+        parts.extend(self.skills)
+        parts.extend(self.capabilities)
+        parts.extend(self.aliases)
+        blob = " ".join(str(p) for p in parts if p)
+        return tuple(
+            t
+            for t in re.findall(r"[a-z0-9][a-z0-9_-]*", blob.casefold())
+            if len(t) >= 3
+        )
 
 
 @dataclass(frozen=True)
@@ -264,6 +289,8 @@ _BUILTIN_AGENTS: Tuple[Agent, ...] = (
             "source, product, or company initiative."
         ),
         room_palette=True,
+        stage="research",
+        skills=("web research", "filings look up", "balanced analysis", "evidence"),
     ),
     Agent(
         id="qwen-bull",
@@ -285,6 +312,8 @@ _BUILTIN_AGENTS: Tuple[Agent, ...] = (
             "invent a fact, date, number, source, product, or company initiative."
         ),
         room_palette=True,
+        stage="critique",
+        skills=("bull case", "upside", "steelman", "discussion"),
     ),
     Agent(
         id="qwen-contrarian",
@@ -312,6 +341,8 @@ _BUILTIN_AGENTS: Tuple[Agent, ...] = (
             "product, or company initiative."
         ),
         room_palette=True,
+        stage="critique",
+        skills=("bear case", "contrarian", "falsification", "downside", "discussion"),
     ),
     Agent(
         id="qwen-synthesizer",
@@ -333,6 +364,8 @@ _BUILTIN_AGENTS: Tuple[Agent, ...] = (
             "number, source, product, or company initiative."
         ),
         room_palette=True,
+        stage="synthesize",
+        skills=("synthesize", "close debate", "next checks"),
     ),
     Agent(
         id="master",
@@ -354,6 +387,37 @@ _BUILTIN_AGENTS: Tuple[Agent, ...] = (
         prompt="",
         model="Settings active profile (for novel asks)",
         room_palette=False,
+        stage="automate",
+        skills=("automations", "rituals", "filings", "watchlist", "digest"),
+    ),
+    Agent(
+        id="orchestrator",
+        name="Orchestrator",
+        kind="operator",
+        role="orchestrator",
+        mention="@Orchestrator",
+        aliases=("@Orch", "@Boss"),
+        legacy_names=("Orchestrator",),
+        cookie_key="orchestrator",
+        capabilities=(),
+        summary="Draws org/flows from the team and runs multi-stage work.",
+        how="Complex/discussion messages route here; invents Research→Critique loops.",
+        prompt=(
+            "You are the team Orchestrator. You assemble a short organization and "
+            "flow from labeled agents and capabilities, then execute it. Prefer "
+            "retrieve before debate. Never invent market facts."
+        ),
+        room_palette=True,
+        stage="orchestrate",
+        skills=(
+            "orchestrate",
+            "plan",
+            "delegate",
+            "organize",
+            "roadmap",
+            "discussion",
+            "research then debate",
+        ),
     ),
 )
 
@@ -692,6 +756,16 @@ def _load_user_agents() -> List[Agent]:
                 if ln and ln.prompt:
                     parts.append(f"[{ln.name}] {ln.prompt}")
             prompt = "\n\n".join(parts)
+        stage = str(row.get("stage") or "").strip()
+        skills = tuple(
+            str(s).strip() for s in (row.get("skills") or ()) if str(s).strip()
+        )
+        if not stage or not skills:
+            inferred_stage, inferred_skills = _infer_stage_skills(
+                caps=caps, role=str(row.get("role") or "custom"), lens_ids=lens_ids
+            )
+            stage = stage or inferred_stage
+            skills = skills or inferred_skills
         out.append(
             Agent(
                 id=str(row["id"]),
@@ -708,9 +782,59 @@ def _load_user_agents() -> List[Agent]:
                 how="Composed from lenses + capabilities in the studio.",
                 room_palette=bool(row.get("room_palette", True)),
                 lens_ids=lens_ids,
+                stage=stage,
+                skills=skills,
             )
         )
     return out
+
+
+def _infer_stage_skills(
+    *,
+    caps: Sequence[str],
+    role: str = "custom",
+    lens_ids: Sequence[str] = (),
+) -> Tuple[str, Tuple[str, ...]]:
+    """Best-effort labels for composed agents missing explicit stage/skills."""
+    role_l = (role or "").casefold()
+    if role_l in {"bull", "bear", "contrarian"} or any(
+        "bull" in str(x).casefold() or "contrarian" in str(x).casefold()
+        for x in lens_ids
+    ):
+        return "critique", ("discussion", "critique", "case")
+    if role_l in {"synthesizer", "synth"}:
+        return "synthesize", ("synthesize", "close debate")
+    if role_l in {"orchestrator", "router"}:
+        return "orchestrate", ("orchestrate", "plan", "delegate")
+    retrieve_caps = {
+        "web_research",
+        "sec_filings_check",
+        "morning_yf_scan",
+        "generic_watchlist_scan",
+        "public_web_search",
+        "find_files",
+    }
+    auto_caps = {
+        "sec_filings_check",
+        "morning_yf_scan",
+        "generic_watchlist_scan",
+        "note_digest",
+    }
+    cap_set = {str(c) for c in caps}
+    skills: List[str] = []
+    for cid in caps:
+        skills.append(str(cid).replace("_", " "))
+    if cap_set & retrieve_caps and not (cap_set - retrieve_caps - auto_caps):
+        if cap_set & {"web_research", "public_web_search"}:
+            return "research", tuple(skills or ("web research",))
+        return "automate", tuple(skills or ("automation",))
+    if cap_set & retrieve_caps:
+        return "research", tuple(skills or ("research",))
+    if lens_ids and not caps:
+        return "critique", ("discussion",) + tuple(
+            str(x).replace("_", " ") for x in lens_ids[:4]
+        )
+    return "critique", tuple(skills or ("custom",))
 
 
 def _builtin_agent_ids() -> set:
@@ -827,6 +951,9 @@ def list_room_palette_public() -> List[Dict[str, Any]]:
             "role": a.role,
             "kind": a.kind,
             "capabilities": list(a.capabilities),
+            "stage": a.stage,
+            "skills": list(a.skills),
+            "summary": a.summary,
         }
         for a in list_agents()
         if a.room_palette and a.prompt
@@ -840,6 +967,8 @@ def create_composed_agent(
     capability_ids: Sequence[str] = (),
     prompt: str = "",
     summary: str = "",
+    stage: str = "",
+    skills: Sequence[str] = (),
 ) -> Agent:
     """Create a custom agent from lenses + capabilities (studio drag-drop)."""
     rid = _slug_id(name, prefix="agent_")
@@ -876,6 +1005,15 @@ def create_composed_agent(
             "your assigned capabilities when relevant. Never invent facts."
         )
 
+    skill_list = [str(s).strip() for s in skills if str(s).strip()][:12]
+    stage_s = str(stage or "").strip().casefold()
+    if not stage_s or not skill_list:
+        inferred_stage, inferred_skills = _infer_stage_skills(
+            caps=caps, role="custom", lens_ids=lenses
+        )
+        stage_s = stage_s or inferred_stage
+        skill_list = skill_list or list(inferred_skills)
+
     agent = Agent(
         id=rid,
         name=(name or "").strip() or rid,
@@ -890,6 +1028,8 @@ def create_composed_agent(
         how="Composed in Agents studio from lenses + capabilities.",
         room_palette=True,
         lens_ids=tuple(lenses),
+        stage=stage_s,
+        skills=tuple(skill_list),
     )
     existing = _read_user_agent_rows()
     existing[agent.id] = {
@@ -903,6 +1043,8 @@ def create_composed_agent(
         "role": agent.role,
         "room_palette": True,
         "kind": agent.kind,
+        "stage": agent.stage,
+        "skills": list(agent.skills),
     }
     _write_user_agent_rows(existing)
     return agent
@@ -916,6 +1058,8 @@ def update_composed_agent(
     capability_ids: Optional[Sequence[str]] = None,
     prompt: Optional[str] = None,
     summary: Optional[str] = None,
+    stage: Optional[str] = None,
+    skills: Optional[Sequence[str]] = None,
 ) -> Agent:
     """Update a user-composed agent (builtins are immutable)."""
     aid = (agent_id or "").strip()
@@ -967,6 +1111,17 @@ def update_composed_agent(
     row["kind"] = "operator" if caps else "composed"
     if summary is not None:
         row["summary"] = str(summary).strip()[:240]
+    if stage is not None:
+        row["stage"] = str(stage).strip().casefold()
+    if skills is not None:
+        row["skills"] = [str(s).strip() for s in skills if str(s).strip()][:12]
+    if not row.get("stage") or not row.get("skills"):
+        inferred_stage, inferred_skills = _infer_stage_skills(
+            caps=caps, role=str(row.get("role") or "custom"), lens_ids=lenses
+        )
+        row.setdefault("stage", inferred_stage)
+        if not row.get("skills"):
+            row["skills"] = list(inferred_skills)
     rows[aid] = row
     _write_user_agent_rows(rows)
     loaded = get_agent(aid)

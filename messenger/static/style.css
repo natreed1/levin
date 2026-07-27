@@ -21,10 +21,50 @@
   --page-pad: 1.25rem;
 }
 
-.automate-dialog-form {
-  width: min(92vw, 720px);
-  max-width: 92vw;
+.composer-wrap {
+  position: relative;
+  flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+}
+.composer-wrap #body {
+  width: 100%;
+}
+.mention-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  max-height: 12rem;
+  overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  z-index: 40;
+}
+.mention-suggest li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.mention-suggest li[aria-selected="true"],
+.mention-suggest li:hover {
+  background: var(--accent-soft);
+}
+.mention-suggest .mention-handle {
+  color: var(--accent);
+  font-weight: 600;
+}
+.mention-suggest .mention-meta {
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 .automate-dual {
   display: grid;
@@ -1214,10 +1254,14 @@ input:disabled, select:disabled, textarea:disabled {
   background: var(--bg-elev);
   min-width: 0;
 }
+.composer .composer-wrap {
+  flex: 1;
+  min-width: 0;
+}
 .composer input {
   flex: 1;
   min-width: 0;
-  width: auto;
+  width: 100%;
   height: var(--control-h);
   padding: 0 0.75rem;
   line-height: normal;
@@ -1786,3 +1830,83 @@ button.tiny, .ghost.tiny {
     padding-bottom: calc(0.85rem + env(safe-area-inset-bottom, 0px));
   }
 }
+
+/* Team harness */
+.harness-dialog-form {
+  width: min(94vw, 780px);
+  max-height: 90vh;
+  overflow: auto;
+}
+.harness-roles-list,
+.harness-loops-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+}
+.harness-role-row,
+.harness-loop-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: 0.4rem;
+  align-items: center;
+}
+.harness-add-agent-row,
+.harness-new-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: end;
+  margin-top: 0.35rem;
+}
+.harness-new-loop label {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+.harness-canvas-preview {
+  margin: 0.65rem 0 0.25rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  line-height: 1.45;
+}
+.harness-flow-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.harness-flow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text);
+}
+.cap-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.cap-badge.exec {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--caps);
+}
+.cap-badge.prompt {
+  background: rgba(167, 139, 250, 0.15);
+  color: var(--agents);
+}
+.cap-mode-tabs {
+  margin-bottom: 0.75rem;
+}
+

@@ -208,3 +208,29 @@ def utc_expiry_iso(*, hours: float = 24.0) -> str:
 
     when = datetime.now(timezone.utc) + timedelta(hours=hours)
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_fly_runtime() -> bool:
+    return bool((os.environ.get("FLY_APP_NAME") or "").strip())
+
+
+def dev_auto_login_enabled() -> bool:
+    """Local-only convenience login. Never active on Fly."""
+    if is_fly_runtime():
+        return False
+    raw = (os.environ.get("MESSENGER_DEV_AUTO_LOGIN") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def dev_user_email() -> str:
+    return normalize_email(os.environ.get("MESSENGER_DEV_EMAIL") or "dev@example.com") or "dev@example.com"
+
+
+def dev_user_name() -> str:
+    return normalize_name(os.environ.get("MESSENGER_DEV_NAME") or "Dev") or "Dev"
+
+
+def utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

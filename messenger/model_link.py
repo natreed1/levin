@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 import urllib.error
@@ -96,6 +97,33 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_PULL_MODEL = "qwen3:8b"
+
+
+def env_anthropic_api_key() -> str:
+    return (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+
+
+def env_anthropic_model() -> str:
+    return (
+        (os.environ.get("ANALYST_CLAUDE_MODEL") or "").strip()
+        or str(PROVIDERS["anthropic"]["default_model"])
+    )
+
+
+def env_anthropic_endpoint() -> Optional[dict[str, str]]:
+    """Operator/dev Claude from env when no per-user profile key is linked."""
+    key = env_anthropic_api_key()
+    if not key:
+        return None
+    return {
+        "provider": "anthropic",
+        "kind": "anthropic",
+        "base_url": "",
+        "api_key": key,
+        "model": env_anthropic_model(),
+        "is_local": "0",
+        "destination": "anthropic",
+    }
 
 
 def providers_public(*, category: Optional[str] = None) -> list[dict[str, Any]]:
@@ -316,16 +344,67 @@ class ModelLinkRegistry:
             if isinstance(p, dict) and p.get("id") == active_id:
                 if p.get("category") == "open_source" and not p.get("enabled", True):
                     return None
-                return p
-        # Fallback: first enabled / frontier
+                if self._api_key_for(p):
+                    return p
+        # Fallback: first enabled profile with a key
         for p in blob.get("profiles") or []:
             if not isinstance(p, dict):
                 continue
             if p.get("category") == "open_source" and not p.get("enabled"):
                 continue
-            if p.get("setup_complete", True):
+            if p.get("setup_complete", True) and self._api_key_for(p):
                 return p
         return None
+
+    def ensure_env_frontier_profile(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Seed Claude from ANTHROPIC_API_KEY when the user has no linked profile."""
+        key = env_anthropic_api_key()
+        if not key:
+            return None
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+        with self._lock:
+            blob = self._get_user_unlocked(uid)
+            profiles = [
+                p for p in (blob.get("profiles") or []) if isinstance(p, dict)
+            ]
+            keyed = [p for p in profiles if self._api_key_for(p)]
+            if keyed:
+                active_id = blob.get("active_profile_id")
+                for p in keyed:
+                    if p.get("id") == active_id:
+                        return p
+                return keyed[0]
+            # Mid-setup drafts (local model without a route) must not be overridden.
+            if profiles:
+                return None
+            meta = PROVIDERS["anthropic"]
+            profile = {
+                "id": _new_id(),
+                "category": "frontier",
+                "provider": "anthropic",
+                "kind": meta["kind"],
+                "label": "Claude (from env)",
+                "model": env_anthropic_model(),
+                "base_url": "",
+                "api_key_enc": encrypt_secret(key),
+                "runtime": "",
+                "source": {"method": "env_anthropic"},
+                "pipeline_route": None,
+                "setup_complete": True,
+                "enabled": True,
+                "auto_connect": False,
+                "created_at": _now(),
+                "last_ok_at": None,
+            }
+            profiles.append(profile)
+            blob["profiles"] = profiles
+            if not blob.get("active_profile_id"):
+                blob["active_profile_id"] = profile["id"]
+            self._put_user_unlocked(uid, blob)
+            logger.info("wired Claude from ANTHROPIC_API_KEY for user %s", uid)
+            return profile
 
     def add_frontier(
         self,
@@ -740,31 +819,43 @@ class ModelLinkRegistry:
         """Shape expected by analyst_ledger.synthesize.use_llm_endpoint.
 
         When ``profile_id`` is set (e.g. per-room model toggle), use that profile
-        instead of the account active model.
+        instead of the account active model. Falls back to ANTHROPIC_API_KEY in
+        the process env when no per-user key is linked.
         """
-        profile = (
-            self.get_profile(user_id, profile_id)
-            if profile_id
-            else self.active_profile(user_id)
-        )
-        if not profile:
-            return None
-        provider = str(profile.get("provider") or "ollama")
-        meta = PROVIDERS.get(provider) or {}
-        key = self._api_key_for(profile)
-        if not key:
-            return None
-        return {
-            "provider": provider,
-            "kind": str(profile.get("kind") or meta.get("kind") or "openai_compatible"),
-            "base_url": self._base_url_for(profile),
-            "api_key": key,
-            "model": str(
-                profile.get("model") or meta.get("default_model") or "qwen3:8b"
-            ),
-            "is_local": "1" if profile_is_local(profile) else "0",
-            "destination": destination_for_profile(profile),
-        }
+        profile: Optional[dict[str, Any]] = None
+        if profile_id:
+            profile = self.get_profile(user_id, profile_id)
+        else:
+            profile = self.active_profile(user_id)
+            if profile is None:
+                blob = self._get_user_unlocked(user_id)
+                if not (blob.get("profiles") or []):
+                    profile = self.ensure_env_frontier_profile(user_id)
+        if profile:
+            provider = str(profile.get("provider") or "ollama")
+            meta = PROVIDERS.get(provider) or {}
+            key = self._api_key_for(profile)
+            if key:
+                return {
+                    "provider": provider,
+                    "kind": str(
+                        profile.get("kind") or meta.get("kind") or "openai_compatible"
+                    ),
+                    "base_url": self._base_url_for(profile),
+                    "api_key": key,
+                    "model": str(
+                        profile.get("model")
+                        or meta.get("default_model")
+                        or "qwen3:8b"
+                    ),
+                    "is_local": "1" if profile_is_local(profile) else "0",
+                    "destination": destination_for_profile(profile),
+                }
+        # Env fallback only when the account has no profiles at all (never mid-setup).
+        blob = self._get_user_unlocked(user_id)
+        if not (blob.get("profiles") or []):
+            return env_anthropic_endpoint()
+        return None
 
     def probe_profile(
         self, user_id: str, profile_id: Optional[str] = None, timeout: float = 12.0
@@ -957,3 +1048,11 @@ _REGISTRY = ModelLinkRegistry()
 
 def registry() -> ModelLinkRegistry:
     return _REGISTRY
+
+
+def wire_env_claude_for_user(user_id: str) -> Optional[dict[str, Any]]:
+    """Persist env Claude as the user's active profile when none is linked."""
+    profile = registry().ensure_env_frontier_profile(user_id)
+    if profile is None:
+        return None
+    return registry().public_profile(profile)

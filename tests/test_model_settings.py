@@ -458,3 +458,27 @@ def test_settings_api_auth_and_crud(tmp_path: Path, monkeypatch):
     deleted = client.delete(f"/api/settings/models/{draft_id}")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
+
+
+def test_env_anthropic_seeds_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "test-secret-env")
+    reg = ModelLinkRegistry(path=tmp_path / "model_links.json")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-env-key-12345678")
+    monkeypatch.setenv("ANALYST_CLAUDE_MODEL", "claude-sonnet-5")
+    ep = reg.endpoint_for_call("user_env")
+    assert ep is not None
+    assert ep["provider"] == "anthropic"
+    assert ep["model"] == "claude-sonnet-5"
+    assert ep["kind"] == "anthropic"
+    prof = reg.active_profile("user_env")
+    assert prof is not None
+    assert prof.get("source", {}).get("method") == "env_anthropic"
+
+
+def test_env_anthropic_endpoint_without_user_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fallback-key-12345678")
+    from messenger.model_link import env_anthropic_endpoint
+
+    ep = env_anthropic_endpoint()
+    assert ep is not None
+    assert ep["provider"] == "anthropic"

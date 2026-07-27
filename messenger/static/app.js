@@ -490,7 +490,7 @@
 
     if (!entries.length) {
       const li = document.createElement("li");
-      li.innerHTML = '<button type="button" class="muted" disabled>No rooms yet</button>';
+      li.innerHTML = '<button type="button" class="muted" disabled>No teams yet</button>';
       list.appendChild(li);
     }
     entries.forEach((entry) => {
@@ -596,8 +596,8 @@
       enableComposer(
         true,
         hasAgents
-          ? "Message the room… /automate · agents use capabilities"
-          : "Message… @Analyst or /automate"
+          ? "Message the team… /automate opens Harness"
+          : "Message… @Analyst · /automate opens Harness"
       );
     }
   }
@@ -771,8 +771,8 @@
       : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
     const topicBit = job.topic ? ` “${job.topic}”` : "";
     text.textContent = job.continuous
-      ? `Looping${topicBit || " debate"} (${loopBit}) — safe to leave; turns keep posting.`
-      : `Running ${job.action || "specialists"}${topicBit} (${loopBit}) — safe to leave this room.`;
+      ? `Looping${topicBit || " harness"} (${loopBit}) — safe to leave; turns keep posting.`
+      : `Running ${job.action || "harness"}${topicBit} (${loopBit}) — safe to leave this team.`;
     show(banner);
     show(stopBtn);
     if (!state.specialistPoll && state.roomId) {
@@ -788,7 +788,9 @@
       return;
     }
     const room = currentRoom() || state.rooms.find((r) => r.room_id === roomId);
-    if (room && roomAgents(room).length === 0) {
+    const agents = room ? roomAgents(room) : [];
+    const skills = room?.config?.skills || [];
+    if (room && agents.length === 0 && skills.length === 0) {
       setSpecialistRunUi(null);
       return;
     }
@@ -869,8 +871,8 @@
     state.threadId = null;
     const room = roomMeta || currentRoom() || { room_id: roomId, title, kind: "people" };
     const hasAgents = roomAgents(room).length > 0;
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = title || room.title || "Room";
+    $("#stage-kind").textContent = "Team";
+    $("#stage-title").textContent = title || room.title || "Team";
     show($("#clear-chat"));
     if (room?.owner_user_id && room.owner_user_id === state.me?.user_id) {
       show($("#delete-room"));
@@ -890,8 +892,8 @@
     enableComposer(
       true,
       hasAgents
-        ? "Message the room… /automate opens Design · agents use the model above"
-        : "Message… Design in the header, or @Bullish for a lens"
+        ? "Message the team… /automate opens Harness · agents use the model above"
+        : "Message… open Harness, or @Bullish for a lens"
     );
     if (state.shareRoomId !== roomId && typeof closeShareDialog === "function") {
       closeShareDialog();
@@ -941,7 +943,7 @@
     setSpecialistRunUi(null);
     $("#stage-kind").textContent = "Room";
     $("#stage-title").textContent = title || "Room";
-    enableComposer(true, "Message this room… /automate to loop capabilities");
+    enableComposer(true, "Message this team… /automate opens Harness");
     await refreshModelStatus();
 
     if (!threadId) {
@@ -967,7 +969,142 @@
     input.disabled = !on;
     btn.disabled = !on;
     if (placeholder) input.placeholder = placeholder;
+    if (!on) hideMentionSuggest();
   }
+
+  function mentionCandidates() {
+    const room = currentRoom();
+    const roster = new Set(roomAgents(room));
+    const byId = new Map();
+    (state.specialists || []).forEach((a) => {
+      if (a?.id) byId.set(a.id, a);
+    });
+    // Prefer roster agents when a team is open; otherwise full palette.
+    const ids = roster.size ? [...roster] : [...byId.keys()];
+    return ids
+      .map((id) => {
+        const a = byId.get(id) || { id, name: id, mention: `@${id}` };
+        const handle = (a.mention && String(a.mention).startsWith("@")
+          ? a.mention
+          : `@${String(a.mention || a.name || id).replace(/\s+/g, "")}`
+        );
+        return {
+          id: a.id || id,
+          name: a.name || id,
+          mention: handle,
+          insert: handle.startsWith("@") ? handle : `@${handle}`,
+        };
+      })
+      .filter((a) => a.insert && a.insert !== "@");
+  }
+
+  function hideMentionSuggest() {
+    const el = $("#mention-suggest");
+    if (!el) return;
+    el.innerHTML = "";
+    hide(el);
+    state.mentionActiveIndex = -1;
+    state.mentionQuery = null;
+  }
+
+  function renderMentionSuggest(items, activeIndex) {
+    const el = $("#mention-suggest");
+    if (!el) return;
+    if (!items.length) {
+      hideMentionSuggest();
+      return;
+    }
+    el.innerHTML = "";
+    items.forEach((item, idx) => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", idx === activeIndex ? "true" : "false");
+      li.innerHTML = `<span class="mention-handle"></span><span class="mention-meta"></span>`;
+      li.querySelector(".mention-handle").textContent = item.insert;
+      li.querySelector(".mention-meta").textContent = item.name;
+      li.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        applyMentionSuggestion(item);
+      });
+      el.appendChild(li);
+    });
+    state.mentionItems = items;
+    state.mentionActiveIndex = activeIndex;
+    show(el);
+  }
+
+  function mentionQueryAtCaret(value, caret) {
+    const left = String(value || "").slice(0, caret ?? 0);
+    const m = left.match(/(^|[\s([{])@([A-Za-z0-9_-]*)$/);
+    if (!m) return null;
+    return { start: left.length - (m[2].length + 1), query: m[2] };
+  }
+
+  function refreshMentionSuggest() {
+    const input = $("#body");
+    if (!input || input.disabled || state.kind !== "people") {
+      hideMentionSuggest();
+      return;
+    }
+    const at = mentionQueryAtCaret(input.value, input.selectionStart);
+    if (!at) {
+      hideMentionSuggest();
+      return;
+    }
+    const q = at.query.toLowerCase();
+    const items = mentionCandidates()
+      .filter((a) => {
+        const hay = `${a.insert} ${a.name} ${a.id}`.toLowerCase();
+        return !q || hay.includes(q) || a.insert.toLowerCase().includes(`@${q}`);
+      })
+      .slice(0, 8);
+    state.mentionQuery = at;
+    renderMentionSuggest(items, items.length ? 0 : -1);
+  }
+
+  function applyMentionSuggestion(item) {
+    const input = $("#body");
+    if (!input || !item) return;
+    const at = state.mentionQuery || mentionQueryAtCaret(input.value, input.selectionStart);
+    if (!at) return;
+    const before = input.value.slice(0, at.start);
+    const after = input.value.slice(input.selectionStart || at.start);
+    const insert = item.insert + " ";
+    input.value = before + insert + after;
+    const pos = before.length + insert.length;
+    input.setSelectionRange(pos, pos);
+    hideMentionSuggest();
+    input.focus();
+  }
+
+  $("#body")?.addEventListener("input", () => refreshMentionSuggest());
+  $("#body")?.addEventListener("keydown", (e) => {
+    const el = $("#mention-suggest");
+    if (!el || el.classList.contains("hidden")) return;
+    const items = state.mentionItems || [];
+    if (!items.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = (state.mentionActiveIndex + 1) % items.length;
+      renderMentionSuggest(items, next);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = (state.mentionActiveIndex - 1 + items.length) % items.length;
+      renderMentionSuggest(items, next);
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      const item = items[state.mentionActiveIndex];
+      if (item) {
+        e.preventDefault();
+        applyMentionSuggestion(item);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      hideMentionSuggest();
+    }
+  });
+  $("#body")?.addEventListener("blur", () => {
+    setTimeout(() => hideMentionSuggest(), 120);
+  });
 
   function appendPeopleMessage(msg, me) {
     const div = document.createElement("div");
@@ -1105,6 +1242,24 @@
         (data.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
       } else if (data.type === "message" && data.message) {
         appendPeopleMessage(data.message, state.me?.name);
+      } else if (data.type === "orch_run") {
+        const job = data.job || {};
+        if (job.status === "running") {
+          const banner = $("#specialist-run-banner");
+          const text = $("#specialist-run-text");
+          const stopBanner = $("#specialist-stop-banner-btn");
+          if (text) {
+            text.textContent =
+              job.message ||
+              "Orchestrator working — safe to leave; report posts when done.";
+          }
+          if (stopBanner) hide(stopBanner);
+          show(banner);
+        } else {
+          setSpecialistRunUi(null);
+          const stopBanner = $("#specialist-stop-banner-btn");
+          if (stopBanner) show(stopBanner);
+        }
       } else if (data.type === "cleared") {
         $("#messages").innerHTML = "";
       } else if (data.type === "room_deleted") {
@@ -1274,7 +1429,7 @@
     if (!res.ok) {
       setError(
         "#chat-error",
-        data?.message || data?.error || "Specialist run failed"
+        data?.message || data?.error || "Agent run failed"
       );
       if (data?.job) setSpecialistRunUi(data.job);
       return;
@@ -1287,7 +1442,7 @@
   });
   $("#specialist-debate-btn").addEventListener("click", () => {
     state.debateAction = "debate";
-    $("#debate-dialog-title").textContent = "Specialist debate";
+    $("#debate-dialog-title").textContent = "Agent debate";
     $("#debate-topic").value = "";
     $("#debate-continuous").checked = false;
     show($("#debate-rounds-wrap"));
@@ -1432,10 +1587,37 @@
     box.checked = enabled;
   }
 
-  function openRoomDesign() {
+  function updateHarnessFlowStrip(room) {
+    const strip = $("#harness-flow-strip");
+    if (!strip) return;
+    if (!room || state.kind !== "people") {
+      hide(strip);
+      strip.innerHTML = "";
+      return;
+    }
+    const config = room.config || {};
+    const agents = roomAgents(room);
+    const roles = config.roles || {};
+    const skills = config.skills || [];
+    const orch = config.orchestrator || "chat";
+    const chips = [];
+    agents.forEach((id) => {
+      const role = roles[id] ? ` · ${roles[id]}` : "";
+      chips.push(`<span class="harness-flow-chip">${escapeHtml(id)}${escapeHtml(role)}</span>`);
+    });
+    if (skills.length) {
+      chips.push(`<span class="harness-flow-chip">→ ${escapeHtml(skills.join(" → "))}</span>`);
+    }
+    chips.push(`<span class="harness-flow-chip">${escapeHtml(orch)}</span>`);
+    strip.innerHTML = chips.join("") || "";
+    if (chips.length) show(strip);
+    else hide(strip);
+  }
+
+  async function openRoomDesign() {
     setError("#room-design-error", "");
     if (state.kind !== "people" || !state.roomId) {
-      showFlowToast("Open a room first to set objective and skills.");
+      showFlowToast("Open a team first to design its harness.");
       switchTab("chats");
       return;
     }
@@ -1443,9 +1625,70 @@
     const config = room.config || {};
     $("#room-objective").value = config.objective || "";
     $("#room-prompts").value = (config.prompts || []).join("\n");
-    fillRoomSkillsPicker(config.skills || []).then(() => {
-      $("#room-design-dialog")?.showModal?.();
+    const orch = $("#room-orchestrator");
+    if (orch) orch.value = config.orchestrator || "chat";
+    await Promise.all([
+      fillHarnessRoles(room),
+      fillRoomSkillsPicker(config.skills || []),
+      fillHarnessLoops(),
+    ]);
+    updateHarnessCanvasPreview();
+    $("#room-design-dialog")?.showModal?.();
+  }
+
+  async function fillHarnessRoles(room) {
+    const list = $("#harness-roles-list");
+    const select = $("#harness-add-agent-select");
+    if (!list) return;
+    list.innerHTML = "";
+    const config = room?.config || {};
+    const roles = config.roles || {};
+    const agents = roomAgents(room);
+    const { data } = await api("/api/registry/agents");
+    const byId = {};
+    (data?.agents || []).forEach((a) => {
+      byId[a.id] = a;
     });
+    agents.forEach((id) => {
+      const row = document.createElement("div");
+      row.className = "harness-role-row";
+      const name = document.createElement("span");
+      name.textContent = byId[id]?.name || id;
+      const roleInput = document.createElement("input");
+      roleInput.type = "text";
+      roleInput.maxLength = 80;
+      roleInput.placeholder = "Role (e.g. SEO research)";
+      roleInput.dataset.agentId = id;
+      roleInput.className = "harness-role-input";
+      roleInput.value = roles[id] || "";
+      roleInput.addEventListener("input", updateHarnessCanvasPreview);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "ghost tiny danger";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        row.remove();
+        updateHarnessCanvasPreview();
+      });
+      row.appendChild(name);
+      row.appendChild(roleInput);
+      row.appendChild(remove);
+      list.appendChild(row);
+    });
+    if (select) {
+      select.innerHTML = "";
+      const onTeam = new Set(
+        $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId)
+      );
+      (data?.agents || [])
+        .filter((a) => a.room_palette !== false && !onTeam.has(a.id))
+        .forEach((a) => {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.name;
+          select.appendChild(opt);
+        });
+    }
   }
 
   async function fillRoomSkillsPicker(selected) {
@@ -1463,14 +1706,126 @@
       input.name = "room-skill";
       input.value = c.id;
       input.checked = sel.has(c.id);
+      input.addEventListener("change", updateHarnessCanvasPreview);
       const text = document.createElement("span");
-      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>
+      const badge = c.executable
+        ? '<span class="cap-badge exec">executable</span>'
+        : '<span class="cap-badge prompt">prompt-only</span>';
+      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>${badge}
         <span class="muted tiny-hint">${escapeHtml(c.summary || "")}</span>`;
       label.appendChild(input);
       label.appendChild(text);
       list.appendChild(label);
     });
   }
+
+  async function fillHarnessLoops() {
+    const list = $("#harness-loops-list");
+    if (!list || !state.roomId) return;
+    list.innerHTML = "";
+    const { data } = await api("/api/automations");
+    const rows = (data?.automations || []).filter(
+      (a) => String(a.room_id || "") === String(state.roomId)
+    );
+    if (!rows.length) {
+      list.innerHTML = '<p class="muted tiny-hint">No loops bound to this team yet.</p>';
+      return;
+    }
+    rows.forEach((a) => {
+      const row = document.createElement("div");
+      row.className = "harness-loop-row";
+      const steps = (a.capability_ids || a.steps || []).join
+        ? (a.capability_ids || []).join(", ")
+        : "";
+      row.innerHTML = `<strong>${escapeHtml(a.name || a.ritual_id || "?")}</strong>
+        <span class="muted tiny-hint">${escapeHtml(steps || a.schedule || "")}</span>
+        <span class="muted tiny-hint">${a.approved ? "approved" : "draft"}</span>`;
+      list.appendChild(row);
+    });
+  }
+
+  function updateHarnessCanvasPreview() {
+    const el = $("#harness-canvas-preview");
+    if (!el) return;
+    const roles = $$("#harness-roles-list .harness-role-input").map((input) => {
+      const label = input.value.trim();
+      const name =
+        input.closest(".harness-role-row")?.querySelector("span")?.textContent ||
+        input.dataset.agentId;
+      return label ? `${name} (${label})` : name;
+    });
+    const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
+    const orch = $("#room-orchestrator")?.value || "chat";
+    const left = roles.length ? roles.join(" · ") : "(no agents)";
+    const right = skills.length ? skills.join(" → ") : "(no capabilities)";
+    el.textContent = `${left}  →  ${right}  ·  ${orch}`;
+  }
+
+  $("#harness-add-agent-btn")?.addEventListener("click", async () => {
+    const id = $("#harness-add-agent-select")?.value;
+    if (!id || !state.roomId) return;
+    await addAgentToRoom(state.roomId, id);
+    await refreshChatRails();
+    const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
+    await fillHarnessRoles(room || currentRoom());
+    updateHarnessCanvasPreview();
+  });
+
+  $("#harness-loop-create-btn")?.addEventListener("click", async () => {
+    setError("#room-design-error", "");
+    if (!state.roomId) return;
+    const name = ($("#harness-loop-name")?.value || "").trim();
+    const stepsRaw = ($("#harness-loop-steps")?.value || "").trim();
+    const schedule = ($("#harness-loop-schedule")?.value || "").trim() || null;
+    const steps = stepsRaw
+      .split(/[,\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!name || !steps.length) {
+      setError("#room-design-error", "Loop name and at least one capability id required");
+      return;
+    }
+    const { res, data } = await api("/api/automations/from-chat", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        steps,
+        schedule,
+        room_id: state.roomId,
+      }),
+    });
+    if (!res.ok) {
+      setError("#room-design-error", data?.error || "Could not create loop");
+      return;
+    }
+    if ($("#harness-loop-name")) $("#harness-loop-name").value = "";
+    if ($("#harness-loop-steps")) $("#harness-loop-steps").value = "";
+    if ($("#harness-loop-schedule")) $("#harness-loop-schedule").value = "";
+    showFlowToast(`Draft loop “${data?.ritual_id || name}” created — approve in Hire or Review.`);
+    await fillHarnessLoops();
+  });
+
+  $("#harness-run-loop-btn")?.addEventListener("click", async () => {
+    setError("#room-design-error", "");
+    if (!state.roomId) return;
+    // Persist orchestrator as workflow for this run context if needed
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/harness-run`,
+      { method: "POST", body: JSON.stringify({ stub: false }) }
+    );
+    if (!res.ok) {
+      setError("#room-design-error", data?.message || data?.error || "Harness run failed");
+      return;
+    }
+    $("#room-design-dialog")?.close();
+    showFlowToast(data?.message || "Workflow started");
+    if (data?.job) setSpecialistRunUi(data.job);
+    const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
+    $("#messages").innerHTML = "";
+    (msgs.data?.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
+  });
+
+  $("#room-orchestrator")?.addEventListener("change", updateHarnessCanvasPreview);
 
   $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
   $("#room-design-cancel")?.addEventListener("click", () => $("#room-design-dialog")?.close());
@@ -1479,12 +1834,20 @@
     setError("#room-design-error", "");
     if (!state.roomId) return;
     const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
+    const agents = $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId);
+    const roles = {};
+    $$("#harness-roles-list .harness-role-input").forEach((el) => {
+      roles[el.dataset.agentId] = el.value.trim();
+    });
     const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/config`, {
       method: "PATCH",
       body: JSON.stringify({
         objective: $("#room-objective").value,
         prompts: $("#room-prompts").value,
         skills,
+        agents,
+        roles,
+        orchestrator: $("#room-orchestrator")?.value || "chat",
       }),
     });
     if (!res.ok) {
@@ -1492,7 +1855,7 @@
       return;
     }
     $("#room-design-dialog")?.close();
-    showFlowToast("Room design saved — turn on Autonomy to let agents run here.");
+    showFlowToast("Harness saved — turn on Run harness to let the team work.");
     await refreshChatRails();
     if (state.roomId) {
       const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
@@ -1509,10 +1872,10 @@
     });
     if (!res.ok) {
       $("#autonomy-toggle").checked = !enabled;
-      setError("#chat-error", data?.message || data?.error || "Autonomy failed");
+      setError("#chat-error", data?.message || data?.error || "Harness failed");
       return;
     }
-    showFlowToast(data?.message || (enabled ? "Autonomy on" : "Autonomy off"));
+    showFlowToast(data?.message || (enabled ? "Harness on" : "Harness off"));
     await refreshChatRails();
     if (state.roomId) {
       const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
@@ -1521,10 +1884,69 @@
     }
   });
 
-  // --- Agents studio ---------------------------------------------------------
+  // --- Hire studio ---------------------------------------------------------
 
   state.builderDropped = [];
   state.editingAgentId = null;
+  state.teamPickerAgentId = null;
+  state.capCreateMode = "describe";
+
+  function setCapCreateMode(mode) {
+    state.capCreateMode = mode === "manual" ? "manual" : "describe";
+    const describe = state.capCreateMode === "describe";
+    $("#cap-mode-describe")?.classList.toggle("active", describe);
+    $("#cap-mode-describe")?.classList.toggle("ghost", !describe);
+    $("#cap-mode-manual")?.classList.toggle("active", !describe);
+    $("#cap-mode-manual")?.classList.toggle("ghost", describe);
+    if (describe) {
+      show($("#cap-describe-panel"));
+      hide($("#cap-manual-panel"));
+    } else {
+      hide($("#cap-describe-panel"));
+      show($("#cap-manual-panel"));
+    }
+  }
+
+  async function openTeamPicker(agent) {
+    setError("#team-picker-error", "");
+    state.teamPickerAgentId = agent?.id || null;
+    const label = $("#team-picker-agent-label");
+    if (label) label.textContent = agent ? `Assign ${agent.name} to a team.` : "";
+    const select = $("#team-picker-select");
+    if (!select) return;
+    select.innerHTML = "";
+    await refreshChatRails();
+    const rooms = (state.rooms || []).filter((r) => (r.kind || "people") !== "agent");
+    if (!rooms.length) {
+      showFlowToast("Create a team first, then assign agents.");
+      switchTab("chats");
+      return;
+    }
+    rooms.forEach((r) => {
+      const opt = document.createElement("option");
+      opt.value = r.room_id;
+      opt.textContent = r.title || r.room_id;
+      if (state.roomId && state.roomId === r.room_id) opt.selected = true;
+      select.appendChild(opt);
+    });
+    $("#team-picker-dialog")?.showModal?.();
+  }
+
+  $("#team-picker-cancel")?.addEventListener("click", () => $("#team-picker-dialog")?.close());
+  $("#team-picker-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#team-picker-error", "");
+    const roomId = $("#team-picker-select")?.value;
+    const agentId = state.teamPickerAgentId;
+    if (!roomId || !agentId) return;
+    await addAgentToRoom(roomId, agentId);
+    $("#team-picker-dialog")?.close();
+    showFlowToast("Agent assigned to team");
+    await refreshChatRails();
+    const room = (state.rooms || []).find((r) => r.room_id === roomId);
+    if (room) await selectPeople(room.room_id, room.title, room);
+    switchTab("chats");
+  });
 
   function showFlowToast(message, { tab } = {}) {
     const el = $("#flow-toast");
@@ -1558,7 +1980,7 @@
       setError("#agents-tab-error", data?.error || "Approve failed");
       return false;
     }
-    showFlowToast(`“${ritualId}” approved — add it to an agent or room skills.`, {
+    showFlowToast(`“${ritualId}” approved — add it to an agent or a team harness allowlist.`, {
       tab: "agents",
     });
     loadAgentsStudio();
@@ -1672,17 +2094,8 @@
       const addBtn = document.createElement("button");
       addBtn.type = "button";
       addBtn.className = a.editable ? "" : "tiny";
-      addBtn.textContent = "Add to room";
-      addBtn.addEventListener("click", async () => {
-        if (state.kind === "people" && state.roomId) {
-          await addAgentToRoom(state.roomId, a.id);
-          showFlowToast(`Added ${a.name} to the room`);
-          switchTab("chats");
-        } else {
-          showFlowToast("Open a room first, then add the agent.");
-          switchTab("chats");
-        }
-      });
+      addBtn.textContent = "Assign to team";
+      addBtn.addEventListener("click", () => openTeamPicker(a));
       actions.appendChild(addBtn);
       if (a.editable) {
         const editBtn = document.createElement("button");
@@ -1701,7 +2114,7 @@
     const addTile = document.createElement("button");
     addTile.type = "button";
     addTile.className = "studio-add-tile";
-    addTile.innerHTML = `<span class="plus">+</span><strong>Add agent</strong><span class="muted tiny-hint">Compose from lenses &amp; capabilities</span>`;
+    addTile.innerHTML = `<span class="plus">+</span><strong>Hire agent</strong><span class="muted tiny-hint">Compose from lenses &amp; capabilities</span>`;
     addTile.addEventListener("click", () => openAgentBuilder(null));
     agentsEl?.appendChild(addTile);
     syncStudioBulkButtons();
@@ -1742,8 +2155,10 @@
         btn.addEventListener("click", () => approveCapability(c.ritual_id));
         actions.push(btn);
       }
+      const badge = c.executable ? "executable" : "prompt-only";
+      const kindLabel = `${c.kind || "cap"} · ${badge}`;
       capsEl?.appendChild(
-        compactLibraryRow(c.name || c.id, c.kind || "cap", c.summary || c.invoke || "", actions)
+        compactLibraryRow(c.name || c.id, kindLabel, c.summary || c.invoke || "", actions)
       );
     });
   }
@@ -1970,13 +2385,45 @@
 
   $("#new-cap-btn")?.addEventListener("click", () => {
     setError("#cap-new-error", "");
-    $("#cap-name").value = "";
-    $("#cap-summary").value = "";
+    if ($("#cap-name")) $("#cap-name").value = "";
+    if ($("#cap-summary")) $("#cap-summary").value = "";
+    if ($("#cap-describe")) $("#cap-describe").value = "";
+    setCapCreateMode("describe");
     openStudioDialog("#cap-new-dialog");
   });
+  $("#cap-mode-describe")?.addEventListener("click", () => setCapCreateMode("describe"));
+  $("#cap-mode-manual")?.addEventListener("click", () => setCapCreateMode("manual"));
   $("#cap-new-cancel")?.addEventListener("click", () => $("#cap-new-dialog")?.close());
   $("#cap-new-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
+    setError("#cap-new-error", "");
+    if (state.capCreateMode === "describe") {
+      const description = ($("#cap-describe")?.value || "").trim();
+      if (description.length < 8) {
+        setError("#cap-new-error", "Describe what the capability should do (at least a sentence).");
+        return;
+      }
+      const { res, data } = await api("/api/registry/capabilities/draft-from-prompt", {
+        method: "POST",
+        body: JSON.stringify({ description }),
+      });
+      if (!res.ok) {
+        setError("#cap-new-error", data?.error || "Draft failed");
+        return;
+      }
+      $("#cap-new-dialog")?.close();
+      if (data?.needs_script || data?.in_scope === false) {
+        showFlowToast(
+          data?.reason || "Out of scope for allowlisted runners — Phase 2 custom scripts needed."
+        );
+      } else {
+        showFlowToast(
+          `Draft “${data?.capability?.name || "capability"}” created — approve before live use.`
+        );
+      }
+      loadAgentsStudio();
+      return;
+    }
     const { res, data } = await api("/api/registry/capabilities", {
       method: "POST",
       body: JSON.stringify({ name: $("#cap-name").value, summary: $("#cap-summary").value }),

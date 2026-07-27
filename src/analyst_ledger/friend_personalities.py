@@ -104,27 +104,123 @@ MENTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-
-def match_personality(text: str) -> Optional[FriendPersonality]:
-    match = MENTION_RE.search(text or "")
-    if not match:
-        return None
-    return _MENTION_LOOKUP.get(match.group(0).casefold())
+# Generic @token finder — used with a dynamic lookup so studio-composed agents
+# (and room-roster agents) can be called without rebuilding MENTION_RE.
+_AT_TOKEN_RE = re.compile(r"(?<!\w)@([A-Za-z0-9][\w-]{0,80})\b")
 
 
-def mentioned_personalities(text: str) -> List[FriendPersonality]:
+def _tokens_for_personality(personality: FriendPersonality) -> Tuple[str, ...]:
+    tokens = list(_all_mention_tokens(personality))
+    compact = "@" + re.sub(r"[^A-Za-z0-9_-]+", "", personality.name or "")
+    if compact != "@" and compact.casefold() not in {t.casefold() for t in tokens}:
+        tokens.append(compact)
+    # Users often type the roster id shown in the team chips (e.g. @agent_research_associate).
+    aid = str(personality.id or "").strip()
+    if aid:
+        id_token = aid if aid.startswith("@") else f"@{aid}"
+        if id_token.casefold() not in {t.casefold() for t in tokens}:
+            tokens.append(id_token)
+    return tuple(tokens)
+
+
+def build_mention_lookup(
+    extra_agent_ids: Optional[Sequence[str]] = None,
+) -> dict:
+    """Builtin mentions plus optional custom / room-roster agent ids."""
+    out = dict(_MENTION_LOOKUP)
+    for raw in extra_agent_ids or ():
+        key = str(raw or "").strip()
+        if not key:
+            continue
+        personality = PERSONALITIES_BY_ID.get(key) or personality_from_agent_id(key)
+        if personality is None:
+            continue
+        for token in _tokens_for_personality(personality):
+            out[token.casefold()] = personality
+    return out
+
+
+def match_personality(
+    text: str,
+    *,
+    extra_agent_ids: Optional[Sequence[str]] = None,
+) -> Optional[FriendPersonality]:
+    found = mentioned_personalities(text, extra_agent_ids=extra_agent_ids)
+    return found[0] if found else None
+
+
+def mentioned_personalities(
+    text: str,
+    *,
+    extra_agent_ids: Optional[Sequence[str]] = None,
+) -> List[FriendPersonality]:
+    """Return personalities @-mentioned in text (builtins + optional extras)."""
+    lookup = build_mention_lookup(extra_agent_ids)
     found: List[FriendPersonality] = []
     seen = set()
-    for match in MENTION_RE.finditer(text or ""):
-        personality = _MENTION_LOOKUP.get(match.group(0).casefold())
-        if personality and personality.id not in seen:
-            found.append(personality)
-            seen.add(personality.id)
+    raw = text or ""
+    # Scan with both the static builtin regex and generic @tokens so custom
+    # agents work without being baked into MENTION_RE at import time.
+    spans: List[Tuple[int, int, FriendPersonality]] = []
+    for match in MENTION_RE.finditer(raw):
+        personality = lookup.get(match.group(0).casefold()) or _MENTION_LOOKUP.get(
+            match.group(0).casefold()
+        )
+        if personality:
+            spans.append((match.start(), match.end(), personality))
+    for match in _AT_TOKEN_RE.finditer(raw):
+        token = match.group(0).casefold()
+        personality = lookup.get(token)
+        if personality is None:
+            continue
+        # Builtins stay on MENTION_RE (spaced-child guards like @Qwen Contrarian).
+        # Generic @tokens only unlock studio / roster extras.
+        if token in _MENTION_LOOKUP:
+            continue
+        spans.append((match.start(), match.end(), personality))
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+    last_end = -1
+    for start, end, personality in spans:
+        if start < last_end:
+            continue
+        if personality.id in seen:
+            continue
+        found.append(personality)
+        seen.add(personality.id)
+        last_end = end
     return found
 
 
-def strip_personality_mentions(text: str) -> str:
-    return MENTION_RE.sub("", text or "").strip()
+def at_mention_tokens(text: str) -> List[str]:
+    """Return raw @tokens in text (including @workflow), longest-first unique."""
+    seen = set()
+    out: List[str] = []
+    for match in _AT_TOKEN_RE.finditer(text or ""):
+        token = match.group(0)
+        key = token.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
+
+
+def strip_personality_mentions(
+    text: str,
+    *,
+    extra_agent_ids: Optional[Sequence[str]] = None,
+) -> str:
+    raw = text or ""
+    lookup = build_mention_lookup(extra_agent_ids)
+
+    def _repl(match: re.Match) -> str:
+        return "" if match.group(0).casefold() in lookup else match.group(0)
+
+    # Always strip static builtins; also strip any extras in the dynamic lookup.
+    cleaned = MENTION_RE.sub("", raw)
+    if extra_agent_ids:
+        cleaned = _AT_TOKEN_RE.sub(_repl, cleaned)
+    return cleaned.strip()
 
 
 def resolve_specialists(ids: Optional[Sequence[str]] = None) -> List[FriendPersonality]:

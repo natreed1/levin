@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=43" />
+  <link rel="stylesheet" href="/static/style.css?v=45" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -79,8 +79,8 @@
         <span id="who-label" class="muted"></span>
       </div>
       <nav class="rail-nav" aria-label="Primary">
-        <button type="button" class="nav-btn active" data-tab="chats">Rooms</button>
-        <button type="button" class="nav-btn" data-tab="agents">Agents</button>
+        <button type="button" class="nav-btn active" data-tab="chats">Teams</button>
+        <button type="button" class="nav-btn" data-tab="agents">Hire</button>
         <button type="button" class="nav-btn" data-tab="review">Review</button>
         <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
         <button type="button" class="nav-btn" data-tab="settings">Settings</button>
@@ -98,10 +98,10 @@
             <div class="rail-section rooms-section">
               <header class="section-head">
                 <div>
-                  <h2>Your rooms</h2>
-                  <p>People and work, together</p>
+                  <h2>Your teams</h2>
+                  <p>Sit in, invite friends, run harnesses</p>
                 </div>
-                <button type="button" id="new-room-btn" class="ghost tiny" title="Create room">+</button>
+                <button type="button" id="new-room-btn" class="ghost tiny" title="Create team">+</button>
               </header>
               <ul id="room-list" class="thread-list room-list"></ul>
             </div>
@@ -109,7 +109,7 @@
               <header class="section-head">
                 <div>
                   <h2>Agents</h2>
-                  <p>Drag into a room</p>
+                  <p>Drag onto a team</p>
                 </div>
               </header>
               <ul id="agent-palette" class="agent-palette"></ul>
@@ -118,25 +118,26 @@
           <div class="chat-stage" id="chat-stage">
             <header class="stage-header">
               <div>
-                <p class="eyebrow" id="stage-kind">Room</p>
-                <h1 id="stage-title">Select a room</h1>
+                <p class="eyebrow" id="stage-kind">Team</p>
+                <h1 id="stage-title">Select a team</h1>
                 <div class="room-context">
                   <label class="room-model-wrap hidden" id="room-model-wrap">
-                    <span class="sr-only">Model for this room</span>
-                    <select id="room-model-select" class="room-model-select" title="Agents in this room use the model you pick here"></select>
+                    <span class="sr-only">Model for this team</span>
+                    <select id="room-model-select" class="room-model-select" title="Agents on this team use the model you pick here"></select>
                   </label>
-                  <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this room"></span>
+                  <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this team"></span>
                   <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
                     Start local model
                   </button>
                   <div id="room-members" class="room-members"></div>
                 </div>
+                <div id="harness-flow-strip" class="harness-flow-strip hidden" aria-live="polite"></div>
               </div>
               <div class="header-actions">
-                <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, prompts, skills">Design</button>
-                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Agents converse on their own in this room">
+                <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, roles, loops, orchestrator">Harness</button>
+                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Let the team harness run (debate or workflow, per Harness mode)">
                   <input type="checkbox" id="autonomy-toggle" />
-                  <span>Autonomy</span>
+                  <span>Run harness</span>
                 </label>
                 <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
                 <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
@@ -148,12 +149,15 @@
               </div>
             </header>
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
-              <span id="specialist-run-text">Specialists running — safe to leave this room.</span>
+              <span id="specialist-run-text">Team harness running — safe to leave.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
             </div>
             <div id="messages" class="messages" aria-live="polite"></div>
             <form id="send-form" class="composer">
-              <input id="body" type="text" maxlength="2000" placeholder="Message… @Bullish uses the model in the menu above" autocomplete="off" disabled />
+              <div class="composer-wrap">
+                <ul id="mention-suggest" class="mention-suggest hidden" role="listbox"></ul>
+                <input id="body" type="text" maxlength="2000" placeholder="Message… @Bullish uses the model in the menu above" autocomplete="off" disabled />
+              </div>
               <button type="submit" disabled>Send</button>
             </form>
             <p id="chat-error" class="error" hidden></p>
@@ -163,7 +167,7 @@
         <dialog id="share-dialog">
           <form method="dialog" class="share-dialog-form">
             <h3>Invite friend</h3>
-            <p class="muted tiny-hint">Anyone with this link can join the room.</p>
+            <p class="muted tiny-hint">Anyone with this link can join the team chat.</p>
             <label for="share-url">Invite link</label>
             <div class="share-row">
               <input id="share-url" type="text" readonly />
@@ -176,9 +180,9 @@
         </dialog>
         <dialog id="new-room-dialog">
           <form id="new-room-form">
-            <h3>New room</h3>
-            <label>Room name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <p class="muted tiny-hint">After create you’ll set the room Design (objective, prompts, skills). Invite friends anytime from the header.</p>
+            <h3>New team</h3>
+            <label>Team name <input id="new-room-title" type="text" maxlength="80" required /></label>
+            <p class="muted tiny-hint">After create you’ll open Harness (objective, roles, loops). Invite friends anytime from the header.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -188,7 +192,7 @@
         </dialog>
         <dialog id="debate-dialog">
           <form id="debate-form" method="dialog">
-            <h3 id="debate-dialog-title">Specialist debate</h3>
+            <h3 id="debate-dialog-title">Agent debate</h3>
             <label>Topic / question
               <input id="debate-topic" type="text" maxlength="400" placeholder="e.g. Is NVDA’s data-center growth still under-appreciated?" required />
             </label>
@@ -205,7 +209,7 @@
               <input type="checkbox" id="debate-continuous" />
               Loop until I stop
             </label>
-            <p class="muted tiny-hint" id="debate-rounds-hint">Each round: non-synthesizers speak in turn, then synthesizer closes once at the end. Safe to leave the room — turns keep posting.</p>
+            <p class="muted tiny-hint" id="debate-rounds-hint">Each round: non-synthesizers speak in turn, then synthesizer closes once at the end. Safe to leave the team — turns keep posting.</p>
             <p class="muted tiny-hint hidden" id="debate-loop-hint">They keep debating in the background until you hit Stop (safety cap 20 rounds). You can switch chats or close the tab.</p>
             <div class="dialog-actions">
               <button type="button" id="debate-cancel" class="ghost">Cancel</button>
@@ -215,35 +219,91 @@
           </form>
         </dialog>
         <dialog id="room-design-dialog">
-          <form id="room-design-form" method="dialog" class="automate-dialog-form">
-            <h3>Design this room</h3>
-            <p class="muted tiny-hint">Objective and prompts guide agents when Autonomy is on. Skills are capabilities they can use.</p>
+          <form id="room-design-form" method="dialog" class="automate-dialog-form harness-dialog-form">
+            <h3>Team harness</h3>
+            <p class="muted tiny-hint">Design how this team works: objective, who does what, capability loops, and orchestrator mode.</p>
+
             <label>Objective
-              <textarea id="room-objective" rows="3" maxlength="800" placeholder="e.g. Keep NVDA filings and sentiment current"></textarea>
+              <textarea id="room-objective" rows="3" maxlength="800" placeholder="e.g. Ship the storefront UI and keep SEO research current"></textarea>
             </label>
             <label>Prompts (one per line)
-              <textarea id="room-prompts" rows="4" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
+              <textarea id="room-prompts" rows="3" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
             </label>
+
+            <label>Orchestrator mode
+              <select id="room-orchestrator">
+                <option value="chat">Chat — mentions only</option>
+                <option value="debate">Debate — agents converse (Present / Debate / Ideas)</option>
+                <option value="workflow">Workflow — run executable capability loops</option>
+              </select>
+            </label>
+
+            <fieldset class="cap-picker harness-roles-fieldset">
+              <legend>Roles (roster)</legend>
+              <p class="muted tiny-hint">Assign agents from Hire, then label their role on this team.</p>
+              <div id="harness-roles-list" class="harness-roles-list"></div>
+              <div class="harness-add-agent-row">
+                <select id="harness-add-agent-select"></select>
+                <button type="button" id="harness-add-agent-btn" class="ghost tiny">Add to team</button>
+              </div>
+            </fieldset>
+
             <fieldset class="cap-picker">
-              <legend>Skills (capabilities)</legend>
+              <legend>Team capability allowlist</legend>
+              <p class="muted tiny-hint">Executable capabilities the workflow orchestrator may invoke. Prompt-only caps guide debate only.</p>
               <div id="room-skills-list" class="cap-picker-list"></div>
             </fieldset>
+
+            <fieldset class="cap-picker harness-loops-fieldset">
+              <legend>Loops</legend>
+              <div id="harness-loops-list" class="harness-loops-list"></div>
+              <div class="harness-new-loop">
+                <label>New loop name
+                  <input id="harness-loop-name" type="text" maxlength="80" placeholder="e.g. filings_morning" />
+                </label>
+                <label>Steps (capability ids, comma-separated)
+                  <input id="harness-loop-steps" type="text" maxlength="400" placeholder="sec_filings_check, note_digest" />
+                </label>
+                <label>Schedule (optional cron)
+                  <input id="harness-loop-schedule" type="text" maxlength="80" placeholder="0 7 * * 1-5" />
+                </label>
+                <button type="button" id="harness-loop-create-btn" class="tiny">Create draft loop</button>
+              </div>
+            </fieldset>
+
+            <div id="harness-canvas-preview" class="harness-canvas-preview muted tiny-hint"></div>
+
             <div class="dialog-actions">
               <button type="button" id="room-design-cancel" class="ghost">Cancel</button>
-              <button type="submit">Save</button>
+              <button type="button" id="harness-run-loop-btn" class="ghost">Run workflow once</button>
+              <button type="submit">Save harness</button>
             </div>
             <p id="room-design-error" class="error" hidden></p>
+          </form>
+        </dialog>
+        <dialog id="team-picker-dialog">
+          <form id="team-picker-form" method="dialog">
+            <h3>Assign to team</h3>
+            <p class="muted tiny-hint" id="team-picker-agent-label"></p>
+            <label>Team
+              <select id="team-picker-select" required></select>
+            </label>
+            <div class="dialog-actions">
+              <button type="button" id="team-picker-cancel" class="ghost">Cancel</button>
+              <button type="submit">Assign</button>
+            </div>
+            <p id="team-picker-error" class="error" hidden></p>
           </form>
         </dialog>
       </section>
 
       <div id="flow-toast" class="flow-toast hidden" role="status"></div>
 
-      <!-- Studio dialogs live outside tab panels so showModal works when Rooms is hidden -->
+      <!-- Studio dialogs live outside tab panels so showModal works when Teams is hidden -->
       <dialog id="agent-builder-dialog">
         <form id="agent-builder-form" class="automate-dialog-form">
-          <h3 id="agent-builder-title">New agent</h3>
-          <p class="muted tiny-hint">Click lenses and capabilities to add them (or drag onto the canvas). Assign the agent to rooms from the studio or rail.</p>
+          <h3 id="agent-builder-title">Hire agent</h3>
+          <p class="muted tiny-hint">Click lenses and capabilities to add them (or drag onto the canvas). Assign the agent to a team from Hire or the palette.</p>
           <label>Name <input id="agent-builder-name" type="text" maxlength="80" required placeholder="e.g. Filings scout" /></label>
           <label>Extra prompt (optional)
             <textarea id="agent-builder-prompt" rows="3" maxlength="2000" placeholder="Standing instructions beyond the lenses…"></textarea>
@@ -263,7 +323,7 @@
           </div>
           <div class="dialog-actions">
             <button type="button" id="agent-builder-cancel" class="ghost">Cancel</button>
-            <button type="submit" id="agent-builder-save">Create agent</button>
+            <button type="submit" id="agent-builder-save">Hire agent</button>
           </div>
           <p id="agent-builder-error" class="error" hidden></p>
         </form>
@@ -283,29 +343,41 @@
       </dialog>
 
       <dialog id="cap-new-dialog">
-        <form id="cap-new-form">
+        <form id="cap-new-form" class="automate-dialog-form">
           <h3>New capability</h3>
-          <label>Name <input id="cap-name" type="text" maxlength="80" required /></label>
-          <label>Summary <textarea id="cap-summary" rows="3" required placeholder="What this verb does…"></textarea></label>
+          <div class="room-tabs auth-tabs cap-mode-tabs">
+            <button type="button" id="cap-mode-describe" class="active">Describe</button>
+            <button type="button" id="cap-mode-manual" class="ghost">Manual</button>
+          </div>
+          <div id="cap-describe-panel">
+            <label>What should this capability do?
+              <textarea id="cap-describe" rows="4" maxlength="2000" placeholder="e.g. Scan SEC filings for NVDA and summarize material changes"></textarea>
+            </label>
+            <p class="muted tiny-hint">Claude drafts a capability from allowlisted runners/actions. Needs Phase 2 scripts if nothing matches.</p>
+          </div>
+          <div id="cap-manual-panel" class="hidden">
+            <label>Name <input id="cap-name" type="text" maxlength="80" /></label>
+            <label>Summary <textarea id="cap-summary" rows="3" placeholder="What this verb does…"></textarea></label>
+          </div>
           <div class="dialog-actions">
             <button type="button" id="cap-new-cancel" class="ghost">Cancel</button>
-            <button type="submit">Create</button>
+            <button type="submit" id="cap-new-save">Create draft</button>
           </div>
           <p id="cap-new-error" class="error" hidden></p>
         </form>
       </dialog>
 
-      <!-- AGENTS STUDIO -->
+      <!-- HIRE STUDIO -->
       <section id="tab-agents" class="tab-panel hidden">
         <header class="page-header studio-hero-head">
           <div>
-            <p class="eyebrow">Studio</p>
+            <p class="eyebrow">Hire</p>
             <h1>Agents</h1>
-            <p class="sub muted studio-lead">Your agents run in rooms. Add one, then assign it and turn on Autonomy.</p>
+            <p class="sub muted studio-lead">Hire agents with capabilities, assign them to a team, then open Harness to run loops.</p>
           </div>
           <div class="header-actions">
             <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
-            <button type="button" id="new-agent-btn" class="studio-add-btn">Add agent</button>
+            <button type="button" id="new-agent-btn" class="studio-add-btn">Hire agent</button>
           </div>
         </header>
 
@@ -317,7 +389,7 @@
           <button type="button" id="delete-selected-agents-btn" class="ghost danger tiny" disabled>Delete</button>
         </div>
         <div id="studio-agents" class="studio-agent-grid"></div>
-        <p id="studio-agents-empty" class="studio-empty muted hidden">No custom agents yet — hit Add agent to compose one from lenses and capabilities.</p>
+        <p id="studio-agents-empty" class="studio-empty muted hidden">No custom agents yet — hit Hire agent to compose one from lenses and capabilities.</p>
 
         <div class="studio-libraries">
           <details class="studio-dropdown" id="studio-builtins-dropdown">
@@ -379,7 +451,7 @@
             <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
           </div>
         </header>
-        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (open Agents → Capabilities). Approve &amp; enable, then add them to an agent or a room’s skills. In a room, <code>/automate</code> opens Design.</p>
+        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (open Hire → Capabilities). Approve &amp; enable, then add them to an agent or a team’s Harness allowlist. In a team, <code>/automate</code> opens Harness.</p>
         <h2 class="section-title">Open proposals</h2>
         <div class="table-wrap">
           <table class="data-table" id="review-proposals-table">
@@ -668,7 +740,7 @@
               </div>
               <div class="settings-subcard stacked">
                 <strong>Your Flyleaf data</strong>
-                <p class="muted">Account details, rooms, and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account.</p>
+                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team harness runs use the <strong>team owner’s</strong> ledger and model links; invited friends contribute in chat.</p>
                 <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
                 <button type="button" id="privacy-tracking-btn" class="ghost">Review tracking data</button>
               </div>
@@ -767,6 +839,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=46"></script>
+  <script src="/static/app.js?v=48"></script>
 </body>
 </html>

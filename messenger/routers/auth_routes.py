@@ -20,7 +20,11 @@ from messenger.auth import (
     normalize_email,
     normalize_name,
     utc_expiry_iso,
+    utc_now_iso,
     verify_password,
+    dev_auto_login_enabled,
+    dev_user_email,
+    dev_user_name,
 )
 from messenger.db import MessageStore
 from messenger.deps import (
@@ -51,6 +55,48 @@ VERIFY_HOURS = 24.0
 RESET_HOURS = 1.0
 LOGIN_2FA_HOURS = 10.0 / 60.0  # 10 minutes
 LOGIN_2FA_PURPOSE = "login_2fa"
+
+
+def _wire_env_claude(user_id: str) -> None:
+    """Link Claude from ANTHROPIC_API_KEY when present (dev/operator env)."""
+    try:
+        from messenger.model_link import wire_env_claude_for_user
+
+        wire_env_claude_for_user(str(user_id))
+    except Exception:  # noqa: BLE001 — auth must never fail on model wiring
+        logger.debug("env Claude wire skipped for %s", user_id, exc_info=True)
+
+
+def _ensure_dev_user(store: MessageStore) -> dict[str, Any]:
+    """Create or reuse the local development account (always email-verified)."""
+    import secrets
+
+    email = dev_user_email()
+    name = dev_user_name()
+    existing = store.user_by_email(email)
+    if existing:
+        if not existing.get("email_verified"):
+            store.mark_email_verified(str(existing["user_id"]))
+            existing = store.user_by_email(email) or existing
+        return existing
+    password = (os.environ.get("MESSENGER_DEV_PASSWORD") or "").strip()
+    if len(password) < 8:
+        password = f"dev-{secrets.token_urlsafe(18)}"
+    user = store.create_user(
+        new_user_id(),
+        email,
+        hash_password(password),
+        name,
+        email_verified_at=utc_now_iso(),
+    )
+    user_data_dir(str(user["user_id"]))
+    refreshed = store.user_by_email(email)
+    return refreshed or {
+        **user,
+        "password_hash": "",
+        "email_verified": True,
+        "email_2fa_enabled": False,
+    }
 
 
 def _email_action_allowed(request: Request, action: str, email: str) -> bool:
@@ -219,6 +265,7 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
             email=user["email"],
             revoke_sid=(identity or {}).get("sid"),
         )
+        _wire_env_claude(user["user_id"])
         return resp
 
     token = _issue_token(store, user_id=user_id, purpose="verify", hours=VERIFY_HOURS)
@@ -326,6 +373,7 @@ async def login(request: Request, store: MessageStore = Depends(get_store)) -> J
         email=user["email"],
         revoke_sid=(identity or {}).get("sid"),
     )
+    _wire_env_claude(user["user_id"])
     return resp
 
 
@@ -398,6 +446,7 @@ async def verify_2fa(
         email=user["email"],
         revoke_sid=(identity or {}).get("sid"),
     )
+    _wire_env_claude(user["user_id"])
     return resp
 
 
@@ -503,6 +552,7 @@ def me(
                 "email_2fa_enabled": bool(full.get("email_2fa_enabled")),
                 "created_at": full.get("created_at"),
                 "session_count": store.count_sessions_for_user(user["user_id"]),
+                "dev_auto_login": False,
             }
         )
     if identity:
@@ -516,9 +566,67 @@ def me(
                 "name": identity["name"],
                 "room_id": room_id,
                 "room_title": (room or {}).get("title") or "Private room",
+                "dev_auto_login": dev_auto_login_enabled(),
             }
         )
-    return JSONResponse({"ok": False, "authenticated": False}, status_code=401)
+    return JSONResponse(
+        {
+            "ok": False,
+            "authenticated": False,
+            "dev_auto_login": dev_auto_login_enabled(),
+            "dev_user": {
+                "email": dev_user_email(),
+                "display_name": dev_user_name(),
+            }
+            if dev_auto_login_enabled()
+            else None,
+        },
+        status_code=401,
+    )
+
+
+@router.post("/dev-login")
+async def dev_login(
+    request: Request, store: MessageStore = Depends(get_store)
+) -> JSONResponse:
+    """Passwordless local sign-in. Hard-disabled on Fly and unless env-enabled."""
+    if not dev_auto_login_enabled():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "dev_login_disabled",
+                "message": "Local auto-login is off. Set MESSENGER_DEV_AUTO_LOGIN=1 (never on Fly).",
+            },
+            status_code=403,
+        )
+    user = _ensure_dev_user(store)
+    identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+    room_id = (identity or {}).get("room_id") or "legacy"
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "dev_login": True,
+            "user_id": user["user_id"],
+            "email": user["email"],
+            "display_name": user["display_name"],
+            "name": user["display_name"],
+            "room_id": room_id,
+            "email_verified": True,
+            "email_2fa_enabled": bool(user.get("email_2fa_enabled")),
+        }
+    )
+    set_session_cookie(
+        resp,
+        store=store,
+        name=user["display_name"],
+        room_id=room_id,
+        can_create=True,
+        user_id=user["user_id"],
+        email=user["email"],
+        revoke_sid=(identity or {}).get("sid"),
+    )
+    _wire_env_claude(user["user_id"])
+    return resp
 
 
 @router.patch("/profile")

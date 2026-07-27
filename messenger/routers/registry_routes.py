@@ -73,11 +73,11 @@ async def post_lens(
 @router.get("/capabilities")
 def get_caps(user: dict[str, Any] = Depends(current_user)) -> JSONResponse:
     from analyst_ledger.registry import list_capabilities_public
+    from messenger.team_harness import enrich_capability_public
 
     with user_context(user["user_id"]) as ledger:
-        return JSONResponse(
-            {"ok": True, "capabilities": list_capabilities_public(ledger=ledger)}
-        )
+        rows = [enrich_capability_public(c) for c in list_capabilities_public(ledger=ledger)]
+        return JSONResponse({"ok": True, "capabilities": rows})
 
 
 @router.post("/capabilities")
@@ -86,6 +86,7 @@ async def post_cap(
     user: dict[str, Any] = Depends(current_user),
 ) -> JSONResponse:
     from analyst_ledger.registry import create_user_capability
+    from messenger.team_harness import enrich_capability_public
 
     try:
         body = await request.json()
@@ -100,7 +101,33 @@ async def post_cap(
             )
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    return JSONResponse({"ok": True, "capability": cap.to_public()})
+    return JSONResponse({"ok": True, "capability": enrich_capability_public(cap.to_public())})
+
+
+@router.post("/capabilities/draft-from-prompt")
+async def draft_cap_from_prompt(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    """Describe a need → Claude (or stub heuristics) drafts an allowlisted capability."""
+    from messenger.team_harness import draft_capability_from_description
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    description = str(body.get("description") or body.get("prompt") or "").strip()
+    stub = bool(body.get("stub", False))
+    try:
+        with user_context(user["user_id"]) as ledger:
+            result = draft_capability_from_description(
+                description, ledger=ledger, stub=stub
+            )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse(result)
 
 
 @router.get("/agents")

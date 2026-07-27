@@ -46,7 +46,13 @@ def test_friend_personalities_derived_from_registry():
     assert PERSONALITIES_BY_ID["qwen-bull"].name == get_agent("qwen-bull").name
     assert PERSONALITIES_BY_ID["qwen"].prompt == get_agent("qwen").prompt
     ids = {row["id"] for row in specialists_public()}
-    assert ids == {"qwen", "qwen-bull", "qwen-contrarian", "qwen-synthesizer"}
+    assert ids == {
+        "qwen",
+        "qwen-bull",
+        "qwen-contrarian",
+        "qwen-synthesizer",
+        "orchestrator",
+    }
 
 
 def test_create_automation_persists_registry_capability(tmp_path: Path, monkeypatch):

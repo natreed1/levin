@@ -21,6 +21,21 @@ export PYTHONPATH="$PWD/src:$PWD"
 
 python -m messenger
 # → http://127.0.0.1:8790/
+# Local launcher enables passwordless Dev auto-login by default.
+```
+
+### Dev auto-login (local only)
+
+`python -m messenger` on loopback sets `MESSENGER_DEV_AUTO_LOGIN=1` unless you
+override it. The UI signs in as **Dev** (`dev@example.com`) with no password.
+Hard-disabled whenever `FLY_APP_NAME` is set (Fly production).
+
+```bash
+# Opt out (require normal login)
+MESSENGER_DEV_AUTO_LOGIN=0 python -m messenger
+
+# Reuse your existing account instead of Dev
+MESSENGER_DEV_EMAIL='tester@example.com' MESSENGER_DEV_NAME='Tester' python -m messenger
 ```
 
 Create an account in the UI (Create account), or hit the API:
@@ -63,12 +78,15 @@ reset, or OTP codes in production responses.
 
 | Tab | What it is |
 |-----|------------|
-| **Chats → People** | Person-to-person rooms (WebSocket). Owner-scoped; share invite links. `@Qwen` / `@workflow` handled in-process. |
-| **Chats → Agents** | Per-user workflow threads in that user's ledger (Master + automation threads). |
-| **Automations** | Mine / approve / run ritual specs for the signed-in user (cloud scheduler fires approved+enabled specs). |
+| **Teams** | Project teams (rooms). Sit in chat with hired agents, invite friends, open **Harness** (objective, roles, capability loops, orchestrator). `/automate` opens Harness. |
+| **Hire** | Compose agents from lenses + capabilities. Describe a capability need (allowlisted runners/actions) or create manually; assign agents to teams. |
+| **Review** | Mine sessions into draft capabilities; approve & enable for Hire / Harness. |
 | **Tracking** | Start/end capture sessions, notes, timeline of sessions/events. |
+| **Settings** | Profile, security, preferences, models & integrations, privacy. |
 
-Keyboard on Chats: `j` / `k` moves between People and Agent threads.
+Keyboard on Teams: `j` / `k` moves between team and Master/agent threads.
+
+Happy path: **Hire** an agent → **assign to a Team** → open **Harness** (roles + loops + orchestrator) → **Run harness** / sit in chat / invite a friend.
 
 ## Deploy on Fly.io
 
@@ -103,9 +121,9 @@ fly secrets set -a levin MESSENGER_SCHEDULER_LIVE=1
 
 ## Model tab (per-user providers)
 
-Live specialists use **the room owner's** linked provider — not a shared Fly secret.
+Live specialists use **the team owner's** linked provider — not a shared Fly secret.
 
-In **Model**, each account can connect:
+In **Settings → Models**, each account can connect:
 - **Claude (Anthropic)** — paste `sk-ant-…`
 - **GPT (OpenAI)** — paste `sk-…`
 - **OpenRouter** — one key, many models
