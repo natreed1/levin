@@ -388,13 +388,13 @@ def _reply_qwen(
             labels = ", ".join(at_tokens[:4])
             body = (
                 f"{labels} isn't assigned to this team. "
-                "Open Harness → Roles and add them to the roster, then @mention again."
+                "Open Graph and add them to the roster, then @mention again."
             )
         else:
             labels = ", ".join(at_tokens[:4])
             body = (
                 f"Couldn't find an agent for {labels}. "
-                "Add them to this team's agents in Harness, then try again."
+                "Add them to this team's agents in Graph, then try again."
             )
         msg = store.add_message(author="Flyleaf", body=body[:2000], room_id=room_id)
         _broadcast(hub, loop, room_id, {"type": "message", "message": msg})

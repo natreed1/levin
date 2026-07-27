@@ -184,3 +184,294 @@ def test_workflow_harness_posts_to_team_chat(
     )
     # May be busy from prior harness-run; either starts or reports busy/already
     assert auto.status_code in {200, 400}, auto.text
+
+
+def test_graph_config_layers_and_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="graph@example.com")
+    room = client.post("/api/rooms", json={"title": "Graph Desk", "name": "Graph"})
+    assert room.status_code == 200, room.text
+    room_id = room.json()["room_id"]
+    patched = client.patch(
+        f"/api/rooms/{room_id}/config",
+        json={
+            "objective": "Research then draft",
+            "orchestrator": "workflow",
+            "agents": ["qwen-bull", "qwen-bear"],
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Research",
+                        "prompt": "Gather filings",
+                        "goal": "Sources listed",
+                        "members": [{"agent_id": "qwen-bull", "instructions": "Prefer 10-Ks"}],
+                    },
+                    {
+                        "id": "L2",
+                        "title": "Draft",
+                        "prompt": "Write memo",
+                        "goal": "Memo ready",
+                        "members": ["qwen-bear"],
+                    },
+                ],
+                "guards": [
+                    {
+                        "id": "G1",
+                        "from_layer_id": "L1",
+                        "to_layer_id": "L2",
+                        "prompt": "Is coverage deep enough to draft?",
+                    }
+                ],
+            },
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    graph = patched.json()["config"]["graph"]
+    assert len(graph["layers"]) == 2
+    assert graph["layers"][0]["members"][0]["instructions"] == "Prefer 10-Ks"
+    assert graph["guards"][0]["prompt"] == "Is coverage deep enough to draft?"
+
+
+def test_graph_run_walks_layers_into_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="graphrun@example.com")
+    room = client.post("/api/rooms", json={"title": "Graph Run", "name": "GR"})
+    assert room.status_code == 200, room.text
+    room_id = room.json()["room_id"]
+    patched = client.patch(
+        f"/api/rooms/{room_id}/config",
+        json={
+            "objective": "Scope then research",
+            "orchestrator": "workflow",
+            "agents": ["qwen-bull"],
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Define scope",
+                        "prompt": "Write a rules document",
+                        "goal": "Scope defined",
+                        "members": [{"agent_id": "qwen-bull", "instructions": "Be brief"}],
+                    },
+                    {
+                        "id": "L2",
+                        "title": "Collect sources",
+                        "prompt": "List sources",
+                        "goal": "Sources ready",
+                        "members": ["qwen-bull"],
+                    },
+                ],
+                "guards": [
+                    {
+                        "id": "G1",
+                        "from_layer_id": "L1",
+                        "to_layer_id": "L2",
+                        "prompt": "Has a scope document been created?",
+                    }
+                ],
+            },
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    run = client.post(
+        f"/api/rooms/{room_id}/harness-run",
+        json={"stub": True},
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["job"]["action"] == "graph"
+
+    deadline = time.time() + 6
+    bodies = []
+    while time.time() < deadline:
+        msgs = client.get(f"/api/messages?room_id={room_id}")
+        assert msgs.status_code == 200, msgs.text
+        bodies = [m.get("body") or "" for m in msgs.json().get("messages") or []]
+        if any("Graph finished" in b for b in bodies):
+            break
+        time.sleep(0.15)
+    joined = "\n".join(bodies)
+    assert "Graph started" in joined or "Layer 1" in joined, bodies
+    assert "Define scope" in joined or "Layer 1" in joined, bodies
+    assert "Guard" in joined or "Guard passed" in joined or "Graph finished" in joined, bodies
+    assert any("Graph finished" in b for b in bodies), bodies
+
+
+def test_graph_run_accepts_focus_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = _client(tmp_path, monkeypatch)
+    _signup_and_login(client, email="graphfocus@example.com")
+    room = client.post("/api/rooms", json={"title": "Focus Run", "name": "FR"})
+    assert room.status_code == 200, room.text
+    room_id = room.json()["room_id"]
+    patched = client.patch(
+        f"/api/rooms/{room_id}/config",
+        json={
+            "objective": "Generic research Graph",
+            "orchestrator": "workflow",
+            "agents": ["qwen-bull"],
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Research",
+                        "prompt": "Investigate the topic",
+                        "goal": "Notes ready",
+                        "members": ["qwen-bull"],
+                    }
+                ],
+                "guards": [],
+            },
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    run = client.post(
+        f"/api/rooms/{room_id}/harness-run",
+        json={"stub": True, "focus": "NVDA data-center demand"},
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["job"]["topic"] == "NVDA data-center demand"
+
+    deadline = time.time() + 6
+    bodies = []
+    while time.time() < deadline:
+        msgs = client.get(f"/api/messages?room_id={room_id}")
+        assert msgs.status_code == 200, msgs.text
+        bodies = [m.get("body") or "" for m in msgs.json().get("messages") or []]
+        if any("Graph finished" in b for b in bodies):
+            break
+        time.sleep(0.15)
+    joined = "\n".join(bodies)
+    assert "Focus: NVDA data-center demand" in joined, bodies
+    assert any("Graph finished" in b for b in bodies), bodies
+
+
+def test_graph_guard_rejection_continues_layer(monkeypatch: pytest.MonkeyPatch):
+    """Rejected guards re-run the same step instead of pausing the Graph."""
+    from messenger import team_harness as th
+    from messenger.specialist_room import SpecialistJob
+
+    posts: list[str] = []
+
+    def fake_post(store, hub, room_id, name, body, loop=None, **_kwargs):
+        posts.append(str(body))
+
+    calls = {"n": 0}
+
+    def fake_guard(prompt, *, prior, layer_goal, stub):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False, "NO — coverage is thin."
+        return True, "YES — enough to advance."
+
+    monkeypatch.setattr(th, "_post", fake_post)
+    monkeypatch.setattr(th, "_guard_allows", fake_guard)
+    monkeypatch.setattr(
+        th,
+        "_recent_work_brief",
+        lambda *_a, **_k: "",
+        raising=False,
+    )
+
+    # Patch imports used inside _run_graph_layers
+    import messenger.specialist_room as sr
+
+    monkeypatch.setattr(sr, "_recent_work_brief", lambda *_a, **_k: "")
+    monkeypatch.setattr(sr, "_room_guidance", lambda *_a, **_k: "")
+    monkeypatch.setattr(
+        sr,
+        "_speak",
+        lambda personality, **_k: f"{personality.name} stub turn",
+    )
+
+    class FakePersonality:
+        def __init__(self, pid: str, name: str):
+            self.id = pid
+            self.name = name
+
+    monkeypatch.setattr(
+        "analyst_ledger.friend_personalities.resolve_specialists",
+        lambda ids: [FakePersonality(i, i) for i in ids],
+    )
+
+    class FakeEndpointCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize.use_llm_endpoint",
+        lambda *_a, **_k: FakeEndpointCtx(),
+    )
+    monkeypatch.setattr(
+        "messenger.tenancy.user_context",
+        lambda *_a, **_k: FakeEndpointCtx(),
+    )
+
+    job = SpecialistJob(
+        job_id="job_test",
+        room_id="r1",
+        action="graph",
+        topic="focus topic",
+    )
+    room = {
+        "room_id": "r1",
+        "config": {
+            "objective": "Generic research",
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Research",
+                        "prompt": "Dig in",
+                        "goal": "Notes",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                    {
+                        "id": "L2",
+                        "title": "Draft",
+                        "prompt": "Write",
+                        "goal": "Memo",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                ],
+                "guards": [
+                    {
+                        "id": "G1",
+                        "from_layer_id": "L1",
+                        "to_layer_id": "L2",
+                        "prompt": "Deep enough?",
+                    }
+                ],
+            },
+        },
+    }
+
+    th._run_graph_layers(
+        store=None,
+        hub=None,
+        room=room,
+        room_id="r1",
+        config=room["config"],
+        job=job,
+        stub=True,
+        loop=None,
+        owner_user_id="u1",
+        run_focus="NVDA AI demand",
+    )
+
+    joined = "\n".join(posts)
+    assert "Focus: NVDA AI demand" in joined
+    assert "Guard not satisfied — continuing" in joined
+    assert "continue · try 2" in joined
+    assert "Graph paused" not in joined
+    assert "Graph finished" in joined
+    assert job.status == "completed"
+    assert calls["n"] == 2

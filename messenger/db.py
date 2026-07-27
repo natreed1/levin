@@ -138,6 +138,54 @@ class MessageStore:
                         "ALTER TABLE users ADD COLUMN email_2fa_enabled "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
+                if "username" not in user_cols:
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN username TEXT"
+                    )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
+                    ON users(username) WHERE username IS NOT NULL AND username != ''
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS friendships (
+                        requester_id TEXT NOT NULL,
+                        addressee_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (requester_id, addressee_id),
+                        CHECK (requester_id != addressee_id),
+                        CHECK (status IN ('pending', 'accepted', 'rejected'))
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_friendships_addressee "
+                    "ON friendships(addressee_id, status)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_friendships_requester "
+                    "ON friendships(requester_id, status)"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        notification_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        read_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_notifications_user "
+                    "ON notifications(user_id, created_at DESC)"
+                )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -212,6 +260,7 @@ class MessageStore:
         display_name: str,
         *,
         email_verified_at: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> dict[str, Any]:
         created_at = _utc_now()
         with self._lock:
@@ -221,8 +270,8 @@ class MessageStore:
                     """
                     INSERT INTO users
                         (user_id, email, password_hash, display_name, created_at,
-                         email_verified_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                         email_verified_at, username)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         user_id,
@@ -231,10 +280,14 @@ class MessageStore:
                         display_name,
                         created_at,
                         email_verified_at,
+                        username,
                     ),
                 )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
+                msg = str(exc).lower()
+                if "username" in msg:
+                    raise ValueError("username_taken") from exc
                 raise ValueError("email_taken") from exc
             finally:
                 conn.close()
@@ -242,6 +295,7 @@ class MessageStore:
             "user_id": user_id,
             "email": email,
             "display_name": display_name,
+            "username": username,
             "created_at": created_at,
             "email_verified_at": email_verified_at,
         }
@@ -252,15 +306,20 @@ class MessageStore:
         data = dict(row)
         data["email_verified"] = bool(data.get("email_verified_at"))
         data["email_2fa_enabled"] = bool(int(data.get("email_2fa_enabled") or 0))
+        data["username"] = (data.get("username") or None) or None
         return data
+
+    _USER_COLS = (
+        "user_id, email, password_hash, display_name, created_at, "
+        "email_verified_at, email_2fa_enabled, username"
+    )
 
     def user_by_email(self, email: str) -> dict[str, Any] | None:
         with self._lock:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at, email_2fa_enabled FROM users WHERE email = ?",
+                    f"SELECT {self._USER_COLS} FROM users WHERE email = ?",
                     (email,),
                 ).fetchone()
             finally:
@@ -272,13 +331,71 @@ class MessageStore:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT user_id, email, password_hash, display_name, created_at, "
-                    "email_verified_at, email_2fa_enabled FROM users WHERE user_id = ?",
+                    f"SELECT {self._USER_COLS} FROM users WHERE user_id = ?",
                     (user_id,),
                 ).fetchone()
             finally:
                 conn.close()
         return self._user_from_row(row)
+
+    def user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    f"SELECT {self._USER_COLS} FROM users WHERE username = ?",
+                    (username,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return self._user_from_row(row)
+
+    def search_users_by_username(
+        self, query: str, *, exclude_user_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        q = (query or "").strip().lower().lstrip("@")
+        if not q:
+            return []
+        lim = max(1, min(int(limit or 20), 40))
+        pattern = f"%{q}%"
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT {self._USER_COLS} FROM users
+                    WHERE username IS NOT NULL AND username != ''
+                      AND username LIKE ?
+                      AND user_id != ?
+                    ORDER BY
+                      CASE WHEN username = ? THEN 0
+                           WHEN username LIKE ? THEN 1
+                           ELSE 2 END,
+                      username ASC
+                    LIMIT ?
+                    """,
+                    (pattern, exclude_user_id, q, f"{q}%", lim),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "user_id": r["user_id"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+            }
+            for r in rows
+        ]
+
+    def public_user(self, user_id: str) -> dict[str, Any] | None:
+        user = self.user_by_id(user_id)
+        if not user:
+            return None
+        return {
+            "user_id": user["user_id"],
+            "username": user.get("username"),
+            "display_name": user["display_name"],
+        }
 
     def mark_email_verified(self, user_id: str) -> None:
         now = _utc_now()
@@ -315,6 +432,20 @@ class MessageStore:
                     (display_name, user_id),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def update_username(self, user_id: str, username: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE users SET username = ? WHERE user_id = ?",
+                    (username, user_id),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("username_taken") from exc
             finally:
                 conn.close()
 
@@ -862,3 +993,375 @@ class MessageStore:
             finally:
                 conn.close()
         return True
+
+    # --- friendships -----------------------------------------------------------
+
+    def friendship_between(
+        self, user_a: str, user_b: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT requester_id, addressee_id, status, created_at, updated_at
+                    FROM friendships
+                    WHERE (requester_id = ? AND addressee_id = ?)
+                       OR (requester_id = ? AND addressee_id = ?)
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_a, user_b, user_b, user_a),
+                ).fetchone()
+            finally:
+                conn.close()
+        return dict(row) if row else None
+
+    def create_friend_request(
+        self, requester_id: str, addressee_id: str
+    ) -> dict[str, Any]:
+        if requester_id == addressee_id:
+            raise ValueError("self_friend")
+        existing = self.friendship_between(requester_id, addressee_id)
+        if existing:
+            if existing["status"] == "accepted":
+                raise ValueError("already_friends")
+            if existing["status"] == "pending":
+                raise ValueError("request_pending")
+            # Rejected → allow a fresh request by replacing the row.
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "DELETE FROM friendships WHERE "
+                    "(requester_id = ? AND addressee_id = ?) OR "
+                    "(requester_id = ? AND addressee_id = ?)",
+                    (requester_id, addressee_id, addressee_id, requester_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO friendships
+                        (requester_id, addressee_id, status, created_at, updated_at)
+                    VALUES (?, ?, 'pending', ?, ?)
+                    """,
+                    (requester_id, addressee_id, now, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "requester_id": requester_id,
+            "addressee_id": addressee_id,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def respond_friend_request(
+        self, addressee_id: str, requester_id: str, *, accept: bool
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        status = "accepted" if accept else "rejected"
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT requester_id, addressee_id, status, created_at, updated_at
+                    FROM friendships
+                    WHERE requester_id = ? AND addressee_id = ? AND status = 'pending'
+                    """,
+                    (requester_id, addressee_id),
+                ).fetchone()
+                if not row:
+                    raise ValueError("request_not_found")
+                conn.execute(
+                    """
+                    UPDATE friendships SET status = ?, updated_at = ?
+                    WHERE requester_id = ? AND addressee_id = ?
+                    """,
+                    (status, now, requester_id, addressee_id),
+                )
+                if not accept:
+                    conn.execute(
+                        "DELETE FROM friendships WHERE requester_id = ? AND addressee_id = ?",
+                        (requester_id, addressee_id),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "requester_id": requester_id,
+            "addressee_id": addressee_id,
+            "status": status,
+            "updated_at": now,
+        }
+
+    def remove_friendship(self, user_id: str, other_id: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    DELETE FROM friendships
+                    WHERE (requester_id = ? AND addressee_id = ?)
+                       OR (requester_id = ? AND addressee_id = ?)
+                    """,
+                    (user_id, other_id, other_id, user_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def list_friends(self, user_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        CASE WHEN f.requester_id = ? THEN f.addressee_id
+                             ELSE f.requester_id END AS friend_id,
+                        f.created_at AS friends_since,
+                        u.username, u.display_name
+                    FROM friendships f
+                    INNER JOIN users u ON u.user_id = (
+                        CASE WHEN f.requester_id = ? THEN f.addressee_id
+                             ELSE f.requester_id END
+                    )
+                    WHERE f.status = 'accepted'
+                      AND (f.requester_id = ? OR f.addressee_id = ?)
+                    ORDER BY LOWER(COALESCE(u.username, u.display_name)) ASC
+                    """,
+                    (user_id, user_id, user_id, user_id),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "user_id": r["friend_id"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+                "friends_since": r["friends_since"],
+            }
+            for r in rows
+        ]
+
+    def list_pending_friend_requests(
+        self, user_id: str, *, incoming: bool = True
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                if incoming:
+                    rows = conn.execute(
+                        f"""
+                        SELECT f.requester_id AS other_id, f.created_at,
+                               u.username, u.display_name
+                        FROM friendships f
+                        INNER JOIN users u ON u.user_id = f.requester_id
+                        WHERE f.addressee_id = ? AND f.status = 'pending'
+                        ORDER BY f.created_at DESC
+                        """,
+                        (user_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"""
+                        SELECT f.addressee_id AS other_id, f.created_at,
+                               u.username, u.display_name
+                        FROM friendships f
+                        INNER JOIN users u ON u.user_id = f.addressee_id
+                        WHERE f.requester_id = ? AND f.status = 'pending'
+                        ORDER BY f.created_at DESC
+                        """,
+                        (user_id,),
+                    ).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "user_id": r["other_id"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+                "created_at": r["created_at"],
+                "direction": "incoming" if incoming else "outgoing",
+            }
+            for r in rows
+        ]
+
+    def are_friends(self, user_a: str, user_b: str) -> bool:
+        row = self.friendship_between(user_a, user_b)
+        return bool(row and row.get("status") == "accepted")
+
+    def list_room_members(self, room_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT m.user_id, m.joined_at, u.username, u.display_name
+                    FROM room_members m
+                    INNER JOIN users u ON u.user_id = m.user_id
+                    WHERE m.room_id = ?
+                    ORDER BY m.joined_at ASC
+                    """,
+                    (room_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "user_id": r["user_id"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+                "joined_at": r["joined_at"],
+            }
+            for r in rows
+        ]
+
+    # --- notifications ---------------------------------------------------------
+
+    def create_notification(
+        self,
+        user_id: str,
+        type_: str,
+        payload: Optional[dict[str, Any]] = None,
+        *,
+        notification_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        import secrets
+
+        nid = notification_id or ("n" + secrets.token_hex(12))
+        created_at = _utc_now()
+        payload_json = json.dumps(payload or {}, separators=(",", ":"))
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO notifications
+                        (notification_id, user_id, type, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (nid, user_id, type_, payload_json, created_at),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "notification_id": nid,
+            "user_id": user_id,
+            "type": type_,
+            "payload": payload or {},
+            "created_at": created_at,
+            "read_at": None,
+        }
+
+    def list_notifications(
+        self, user_id: str, *, limit: int = 50, unread_only: bool = False
+    ) -> list[dict[str, Any]]:
+        lim = max(1, min(int(limit or 50), 100))
+        with self._lock:
+            conn = self._connect()
+            try:
+                if unread_only:
+                    rows = conn.execute(
+                        """
+                        SELECT notification_id, user_id, type, payload_json,
+                               created_at, read_at
+                        FROM notifications
+                        WHERE user_id = ? AND read_at IS NULL
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (user_id, lim),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT notification_id, user_id, type, payload_json,
+                               created_at, read_at
+                        FROM notifications
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (user_id, lim),
+                    ).fetchall()
+            finally:
+                conn.close()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload: dict[str, Any] = {}
+            raw = row["payload_json"]
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except json.JSONDecodeError:
+                    payload = {}
+            out.append(
+                {
+                    "notification_id": row["notification_id"],
+                    "user_id": row["user_id"],
+                    "type": row["type"],
+                    "payload": payload,
+                    "created_at": row["created_at"],
+                    "read_at": row["read_at"],
+                    "unread": row["read_at"] is None,
+                }
+            )
+        return out
+
+    def count_unread_notifications(self, user_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM notifications "
+                    "WHERE user_id = ? AND read_at IS NULL",
+                    (user_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return int(row["n"] if row else 0)
+
+    def mark_notification_read(
+        self, user_id: str, notification_id: str
+    ) -> bool:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE notifications SET read_at = COALESCE(read_at, ?)
+                    WHERE notification_id = ? AND user_id = ?
+                    """,
+                    (now, notification_id, user_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def mark_all_notifications_read(self, user_id: str) -> int:
+        now = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE notifications SET read_at = ?
+                    WHERE user_id = ? AND read_at IS NULL
+                    """,
+                    (now, user_id),
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()

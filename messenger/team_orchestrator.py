@@ -369,7 +369,7 @@ def _compose_consensus(
         "",
     ]
     if synth_brief.strip():
-        parts.append(synth_brief.strip()[:1600])
+        parts.append(synth_brief.strip()[:3500])
         parts.append("")
     elif critiques:
         parts.append("### Positions")
@@ -380,7 +380,7 @@ def _compose_consensus(
                 "",
             )
             if line:
-                parts.append(f"- **{name}:** {line[:280]}")
+                parts.append(f"- **{name}:** {line[:400]}")
         parts.append("")
 
     ev = (evidence or "").strip()
@@ -391,7 +391,7 @@ def _compose_consensus(
             for ln in ev.splitlines()
             if ln.strip() and not ln.startswith("[Room knowledge")
         ]
-        snippet = " ".join(ev_lines[:4])[:500]
+        snippet = " ".join(ev_lines[:6])[:900]
         if snippet:
             parts.append("### Evidence (grounded)")
             parts.append(snippet)
@@ -404,7 +404,7 @@ def _compose_consensus(
     )
     if grade is not None:
         parts.append(f"_{orch_grader.format_grade_chip(grade)}_")
-    return "\n".join(parts).strip()[:2000]
+    return "\n".join(parts).strip()[:5000]
 
 
 def _resolve_endpoint(owner_user_id: Optional[str], store: Any, room_id: str) -> Any:
@@ -434,18 +434,19 @@ def _run_retrieve(
     stub: bool,
 ) -> str:
     notes: List[str] = []
+    runner_caps = [c for c in capability_ids if c != "web_research"]
     # Prefer approved automation runners when capability maps to a runner
-    if owner_user_id and capability_ids and not stub:
+    if owner_user_id and runner_caps and not stub:
         try:
             from messenger.tenancy import user_context
             from analyst_ledger.runners import RUNNERS, resolve_runner
 
             with user_context(owner_user_id) as ledger:
-                for cid in capability_ids[:2]:
+                for cid in runner_caps[:3]:
                     fn = None
                     if cid in RUNNERS:
                         fn = RUNNERS[cid]
-                    elif cid != "web_research":
+                    else:
                         try:
                             _name, fn = resolve_runner(cid)
                         except Exception:
@@ -461,7 +462,7 @@ def _run_retrieve(
                         )
                         note = str((result or {}).get("note") or "").strip()
                         if note:
-                            notes.append(f"[{cid}]\n{note[:1500]}")
+                            notes.append(f"[{cid}]\n{note[:2000]}")
                     except Exception as exc:  # noqa: BLE001
                         notes.append(f"[{cid}] unavailable: {exc}")
         except Exception as exc:  # noqa: BLE001
@@ -476,8 +477,15 @@ def _run_retrieve(
         )
         return "\n\n".join(notes)
 
-    # Web research via first research agent when no runner notes
-    if not notes and agents:
+    wants_web = "web_research" in capability_ids or "public_web_search" in capability_ids
+    substantive = any(
+        n
+        for n in notes
+        if not n.startswith("(")
+        and "unavailable" not in n.split("]", 1)[0].casefold()
+        and len(n.strip()) > 40
+    )
+    if (wants_web or not substantive) and agents:
         try:
             from analyst_ledger.friend_qwen import compose_research_reply
             from analyst_ledger.friend_personalities import personality_from_agent_id
@@ -488,7 +496,7 @@ def _run_retrieve(
                 notes.append(
                     compose_research_reply(
                         text, context_text=text, personality=personality
-                    )[:1800]
+                    )[:3000]
                 )
         except Exception as exc:  # noqa: BLE001
             notes.append(f"(research unavailable: {exc})")
@@ -544,7 +552,7 @@ def _chat_as(
                         ),
                     }
                 ],
-                max_tokens=650,
+                max_tokens=1200,
                 system=system,
                 temperature=0.35,
             ).strip()

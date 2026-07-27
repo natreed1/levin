@@ -462,6 +462,7 @@ def test_settings_api_auth_and_crud(tmp_path: Path, monkeypatch):
 
 def test_env_anthropic_seeds_profile(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MESSENGER_SESSION_SECRET", "test-secret-env")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     reg = ModelLinkRegistry(path=tmp_path / "model_links.json")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-env-key-12345678")
     monkeypatch.setenv("ANALYST_CLAUDE_MODEL", "claude-sonnet-5")
@@ -476,9 +477,56 @@ def test_env_anthropic_seeds_profile(tmp_path: Path, monkeypatch):
 
 
 def test_env_anthropic_endpoint_without_user_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fallback-key-12345678")
     from messenger.model_link import env_anthropic_endpoint
 
     ep = env_anthropic_endpoint()
     assert ep is not None
     assert ep["provider"] == "anthropic"
+
+
+def test_env_openrouter_seeds_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "test-secret-or")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    reg = ModelLinkRegistry(path=tmp_path / "model_links.json")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-env-key-12345678")
+    monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    ep = reg.endpoint_for_call("user_or")
+    assert ep is not None
+    assert ep["provider"] == "openrouter"
+    assert ep["kind"] == "openai_compatible"
+    assert ep["model"] == "anthropic/claude-sonnet-4"
+    assert "openrouter.ai" in (ep.get("base_url") or "")
+    prof = reg.active_profile("user_or")
+    assert prof is not None
+    assert prof.get("source", {}).get("method") == "env_openrouter"
+
+
+def test_env_openrouter_preferred_over_anthropic(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "test-secret-prefer")
+    reg = ModelLinkRegistry(path=tmp_path / "model_links.json")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-preferred-key-12345678")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-also-present-12345678")
+    ep = reg.endpoint_for_call("user_prefer")
+    assert ep is not None
+    assert ep["provider"] == "openrouter"
+
+
+def test_add_openrouter_frontier_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "test-secret-ui")
+    reg = ModelLinkRegistry(path=tmp_path / "model_links.json")
+    profile = reg.add_frontier(
+        "user_settings",
+        provider="openrouter",
+        api_key="sk-or-settings-key-12345678",
+        model="openai/gpt-4o",
+        activate=True,
+    )
+    assert profile["provider"] == "openrouter"
+    assert profile["kind"] == "openai_compatible"
+    assert profile["model"] == "openai/gpt-4o"
+    ep = reg.endpoint_for_call("user_settings")
+    assert ep is not None
+    assert ep["provider"] == "openrouter"
+    assert ep["api_key"].startswith("sk-or-")

@@ -4,18 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
-  <title>Workflow</title>
+  <title>Flyleaf</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=45" />
+  <link rel="stylesheet" href="/static/style.css?v=48" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
     <div class="auth-card">
-      <h1>Workflow</h1>
-      <p class="sub">Log in or create an account to continue</p>
+      <h1>Flyleaf</h1>
+      <p class="sub">Multi-agent teams — log in or create an account</p>
       <div class="room-tabs auth-tabs">
         <button type="button" id="tab-login" class="active">Log in</button>
         <button type="button" id="tab-signup" class="ghost">Create account</button>
@@ -50,9 +50,10 @@
       </form>
       <form id="signup-form" class="hidden">
         <label>Display name <input id="signup-name" type="text" maxlength="40" autocomplete="nickname" required /></label>
-        <label>Email <input id="signup-email" type="email" autocomplete="username" required /></label>
+        <label>Username <input id="signup-username" type="text" maxlength="24" autocomplete="username" pattern="[A-Za-z][A-Za-z0-9_]{2,23}" required placeholder="your_handle" /></label>
+        <label>Email <input id="signup-email" type="email" autocomplete="email" required /></label>
         <label>Password <input id="signup-password" type="password" autocomplete="new-password" minlength="8" required /></label>
-        <p class="sub">At least 8 characters. We’ll email a verification link when mail is configured (otherwise you’ll see an error if signup can’t complete).</p>
+        <p class="sub">Username is how friends find you (letters, numbers, underscores). Password at least 8 characters.</p>
         <p id="signup-error" class="error" hidden></p>
         <button type="submit">Create account</button>
       </form>
@@ -75,15 +76,20 @@
   <div id="shell" class="shell hidden">
     <aside class="rail">
       <div class="rail-brand">
-        <strong>Workflow</strong>
+        <strong>Flyleaf</strong>
         <span id="who-label" class="muted"></span>
       </div>
       <nav class="rail-nav" aria-label="Primary">
         <button type="button" class="nav-btn active" data-tab="chats">Teams</button>
+        <button type="button" class="nav-btn" data-tab="management">Management</button>
         <button type="button" class="nav-btn" data-tab="agents">Hire</button>
         <button type="button" class="nav-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="rail-foot">
+        <button type="button" class="nav-btn nav-btn-notify" data-tab="notifications" id="nav-notifications">
+          Notifications
+          <span id="notify-badge" class="notify-badge hidden" aria-hidden="true">0</span>
+        </button>
         <button type="button" id="logout-btn" class="ghost">Log out</button>
       </div>
     </aside>
@@ -97,7 +103,7 @@
               <header class="section-head">
                 <div>
                   <h2>Your teams</h2>
-                  <p>Sit in, invite friends, run harnesses</p>
+                  <p>Sit in, add friends, run graphs</p>
                 </div>
                 <button type="button" id="new-room-btn" class="ghost tiny" title="Create team">+</button>
               </header>
@@ -132,25 +138,27 @@
                 <div id="harness-flow-strip" class="harness-flow-strip hidden" aria-live="polite"></div>
               </div>
               <div class="header-actions">
-                <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, roles, loops, orchestrator">Harness</button>
-                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Run capability loops when Harness mode is Workflow">
+                <button type="button" id="room-design-btn" class="ghost hidden" title="Graph map: steps, analysts, guards">Graph</button>
+                <button type="button" id="room-run-graph-btn" class="hidden" title="Run Graph (or type /graph &lt;topic&gt; to attach a focus)">Run Graph</button>
+                <button type="button" id="room-settings-btn" class="ghost hidden" title="GitHub repo, API keys, integrations">Room settings</button>
+                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Keep the Graph looping until you stop">
                   <input type="checkbox" id="autonomy-toggle" />
-                  <span>Run harness</span>
+                  <span>Keep running</span>
                 </label>
-                <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
+                <button type="button" id="invite-friend-btn" class="ghost hidden">Add friends</button>
                 <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
                 <button type="button" id="delete-room" class="ghost danger hidden">Delete</button>
               </div>
             </header>
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
-              <span id="specialist-run-text">Team harness running — safe to leave.</span>
+              <span id="specialist-run-text">Team Graph running — safe to leave.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
             </div>
             <div id="messages" class="messages" aria-live="polite"></div>
             <form id="send-form" class="composer">
               <div class="composer-wrap">
                 <ul id="mention-suggest" class="mention-suggest hidden" role="listbox"></ul>
-                <input id="body" type="text" maxlength="2000" placeholder="Message… @Bullish uses the model in the menu above" autocomplete="off" disabled />
+                <input id="body" type="text" maxlength="2000" placeholder="Message… /graph &lt;topic&gt; to run" autocomplete="off" disabled />
               </div>
               <button type="submit" disabled>Send</button>
             </form>
@@ -159,13 +167,32 @@
         </div>
 
         <dialog id="share-dialog">
-          <form method="dialog" class="share-dialog-form">
-            <h3>Invite friend</h3>
-            <p class="muted tiny-hint">Anyone with this link can join the team chat.</p>
-            <label for="share-url">Invite link</label>
-            <div class="share-row">
-              <input id="share-url" type="text" readonly />
-              <button type="button" id="copy-share">Copy</button>
+          <form method="dialog" class="share-dialog-form friends-dialog-form" id="friends-dialog-form">
+            <h3>Friends</h3>
+            <div class="friends-dialog-scroll">
+              <p class="muted tiny-hint" id="friends-dialog-hint">Search usernames to send friend requests. Add friends to this team once they’re accepted.</p>
+              <p id="friends-username-needed" class="auth-banner hidden">Set your username in Settings → Profile so people can find you.</p>
+              <label for="friend-search">Find by username</label>
+              <div class="share-row">
+                <input id="friend-search" type="text" maxlength="24" placeholder="search @username" autocomplete="off" />
+                <button type="button" id="friend-search-btn">Search</button>
+              </div>
+              <ul id="friend-search-results" class="friend-results"></ul>
+              <div class="friends-dialog-section">
+                <h4>Your friends</h4>
+                <ul id="friends-dialog-list" class="friend-results"></ul>
+              </div>
+              <details class="invite-link-details">
+                <summary>Or share an invite link</summary>
+                <p class="muted tiny-hint">Anyone with this link can join the team chat.</p>
+                <label for="share-url">Invite link</label>
+                <div class="share-row">
+                  <input id="share-url" type="text" readonly />
+                  <button type="button" id="copy-share">Copy</button>
+                </div>
+              </details>
+              <p id="friends-dialog-message" class="auth-banner" hidden></p>
+              <p id="friends-dialog-error" class="error" hidden></p>
             </div>
             <div class="dialog-actions">
               <button type="submit" value="close">Done</button>
@@ -176,7 +203,7 @@
           <form id="new-room-form">
             <h3>New team</h3>
             <label>Team name <input id="new-room-title" type="text" maxlength="80" required /></label>
-            <p class="muted tiny-hint">After create you’ll open Harness (objective, roles, loops). Invite friends anytime from the header.</p>
+            <p class="muted tiny-hint">After create you’ll open Graph to map steps, analysts, and guards. Add friends anytime from the header.</p>
             <div class="dialog-actions">
               <button type="button" id="new-room-cancel" class="ghost">Cancel</button>
               <button type="submit">Create</button>
@@ -213,66 +240,120 @@
           </form>
         </dialog>
         <dialog id="room-design-dialog">
-          <form id="room-design-form" method="dialog" class="automate-dialog-form harness-dialog-form">
-            <h3>Team harness</h3>
-            <p class="muted tiny-hint">Design how this team works: objective, who does what, capability loops, and orchestrator mode.</p>
+          <form id="room-design-form" method="dialog" class="automate-dialog-form harness-dialog-form graph-dialog-form">
+            <div class="graph-dialog-body">
+              <header class="graph-dialog-chrome">
+                <h3>Team Graph</h3>
+                <label class="graph-objective-field">Objective
+                  <input id="room-objective" type="text" maxlength="800" placeholder="What should this team accomplish?" />
+                </label>
+                <label class="hidden" aria-hidden="true">Prompts (one per line)
+                  <textarea id="room-prompts" rows="2" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
+                </label>
+              </header>
 
-            <label>Objective
-              <textarea id="room-objective" rows="3" maxlength="800" placeholder="e.g. Ship the storefront UI and keep SEO research current"></textarea>
-            </label>
-            <label>Prompts (one per line)
-              <textarea id="room-prompts" rows="3" placeholder="Prefer primary sources&#10;Call out uncertainty"></textarea>
-            </label>
+              <div class="graph-shell">
+                <aside class="graph-roster" aria-label="Team analysts">
+                  <div class="graph-roster-head">
+                    <strong>Analysts</strong>
+                    <span class="muted tiny-hint">Drag into a step</span>
+                  </div>
+                  <ul id="graph-roster-list" class="graph-roster-list"></ul>
+                  <div class="harness-add-agent-row graph-add-agent-row">
+                    <select id="harness-add-agent-select"></select>
+                    <button type="button" id="harness-add-agent-btn" class="ghost tiny">Add</button>
+                  </div>
+                  <div id="harness-roles-list" class="harness-roles-list hidden" aria-hidden="true"></div>
+                </aside>
 
-            <label>Orchestrator mode
-              <select id="room-orchestrator">
-                <option value="chat">Chat — message the team; Orchestrator handles complex asks</option>
-                <option value="debate">Debate — legacy multi-agent loop (prefer chat + Orchestrator)</option>
-                <option value="workflow">Workflow — run executable capability loops</option>
-              </select>
-            </label>
-
-            <fieldset class="cap-picker harness-roles-fieldset">
-              <legend>Roles (roster)</legend>
-              <p class="muted tiny-hint">Assign agents from Hire, then label their role on this team.</p>
-              <div id="harness-roles-list" class="harness-roles-list"></div>
-              <div class="harness-add-agent-row">
-                <select id="harness-add-agent-select"></select>
-                <button type="button" id="harness-add-agent-btn" class="ghost tiny">Add to team</button>
+                <div class="graph-map-wrap">
+                  <div id="graph-map" class="graph-map" role="application" aria-label="Graph map">
+                    <button type="button" id="graph-empty-add" class="graph-empty-add">
+                      <span class="graph-empty-plus">+</span>
+                      <strong>Add first step</strong>
+                      <span class="muted tiny-hint">Click to place a layer</span>
+                    </button>
+                  </div>
+                  <button type="button" id="graph-add-layer-btn" class="ghost tiny graph-add-layer-btn">+ Add step</button>
+                </div>
               </div>
-            </fieldset>
 
-            <fieldset class="cap-picker">
-              <legend>Team capability allowlist</legend>
-              <p class="muted tiny-hint">Executable capabilities the workflow orchestrator may invoke. Prompt-only caps guide debate only.</p>
-              <div id="room-skills-list" class="cap-picker-list"></div>
-            </fieldset>
+              <div class="graph-dialog-meta">
+                <details class="graph-advanced">
+                  <summary>Advanced — orchestrator, capabilities, loops, room settings</summary>
 
-            <fieldset class="cap-picker harness-loops-fieldset">
-              <legend>Loops</legend>
-              <div id="harness-loops-list" class="harness-loops-list"></div>
-              <div class="harness-new-loop">
-                <label>New loop name
-                  <input id="harness-loop-name" type="text" maxlength="80" placeholder="e.g. filings_morning" />
-                </label>
-                <label>Steps (capability ids, comma-separated)
-                  <input id="harness-loop-steps" type="text" maxlength="400" placeholder="sec_filings_check, note_digest" />
-                </label>
-                <label>Schedule (optional cron)
-                  <input id="harness-loop-schedule" type="text" maxlength="80" placeholder="0 7 * * 1-5" />
-                </label>
-                <button type="button" id="harness-loop-create-btn" class="tiny">Create draft loop</button>
+                  <label>Orchestrator mode
+                    <select id="room-orchestrator">
+                      <option value="chat">Chat — message the team; Orchestrator handles complex asks</option>
+                      <option value="debate">Debate — legacy multi-agent loop (prefer chat + Orchestrator)</option>
+                      <option value="workflow">Workflow — run Graph steps / capability loops</option>
+                    </select>
+                  </label>
+
+                  <fieldset class="cap-picker">
+                    <legend>Team capability allowlist</legend>
+                    <p class="muted tiny-hint">Executable capabilities the workflow orchestrator may invoke. Prompt-only caps guide debate only.</p>
+                    <div id="room-skills-list" class="cap-picker-list"></div>
+                  </fieldset>
+
+                  <fieldset class="cap-picker harness-loops-fieldset">
+                    <legend>Loops</legend>
+                    <div id="harness-loops-list" class="harness-loops-list"></div>
+                    <div class="harness-new-loop">
+                      <label>New loop name
+                        <input id="harness-loop-name" type="text" maxlength="80" placeholder="e.g. filings_morning" />
+                      </label>
+                      <label>Steps (capability ids, comma-separated)
+                        <input id="harness-loop-steps" type="text" maxlength="400" placeholder="sec_filings_check, note_digest" />
+                      </label>
+                      <label>Schedule (optional cron)
+                        <input id="harness-loop-schedule" type="text" maxlength="80" placeholder="0 7 * * 1-5" />
+                      </label>
+                      <button type="button" id="harness-loop-create-btn" class="tiny">Create draft loop</button>
+                    </div>
+                  </fieldset>
+
+                  <fieldset class="cap-picker harness-workspace-fieldset">
+                    <legend>Room settings (integrations)</legend>
+                    <p class="muted tiny-hint">Master (and Graph) can request a repo URL or API keys here. Paste secrets in this form — never in chat.</p>
+                    <label>GitHub repo URL
+                      <input id="room-repo-url" type="url" maxlength="400" placeholder="https://github.com/org/repo" />
+                    </label>
+                    <label>Default branch / ref
+                      <input id="room-default-ref" type="text" maxlength="80" placeholder="main" />
+                    </label>
+                    <label>Workspace notes
+                      <textarea id="room-workspace-notes" rows="2" maxlength="800" placeholder="What this team needs to work…"></textarea>
+                    </label>
+                    <div id="room-workspace-needs" class="harness-needs-list"></div>
+                  </fieldset>
+                </details>
+
+                <div id="harness-canvas-preview" class="harness-canvas-preview muted tiny-hint"></div>
+                <p id="room-design-error" class="error" hidden></p>
               </div>
-            </fieldset>
-
-            <div id="harness-canvas-preview" class="harness-canvas-preview muted tiny-hint"></div>
-
-            <div class="dialog-actions">
-              <button type="button" id="room-design-cancel" class="ghost">Cancel</button>
-              <button type="button" id="harness-run-loop-btn" class="ghost">Run workflow once</button>
-              <button type="submit">Save harness</button>
             </div>
-            <p id="room-design-error" class="error" hidden></p>
+
+            <div class="dialog-actions graph-dialog-actions">
+              <button type="button" id="room-design-cancel" class="ghost">Close</button>
+              <button type="button" id="harness-run-loop-btn">Run Graph</button>
+              <button type="submit" class="ghost">Save Graph</button>
+            </div>
+          </form>
+        </dialog>
+
+        <dialog id="graph-member-dialog">
+          <form id="graph-member-form" method="dialog" class="graph-member-form">
+            <h3>Member instructions</h3>
+            <p class="muted tiny-hint" id="graph-member-label">Detailed instructions for this analyst on this step.</p>
+            <label>Instructions
+              <textarea id="graph-member-instructions" rows="6" maxlength="2000" placeholder="What should this analyst focus on, produce, or avoid in this step?"></textarea>
+            </label>
+            <div class="dialog-actions">
+              <button type="button" id="graph-member-remove" class="ghost danger">Remove from step</button>
+              <button type="button" id="graph-member-cancel" class="ghost">Cancel</button>
+              <button type="submit">Save</button>
+            </div>
           </form>
         </dialog>
         <dialog id="team-picker-dialog">
@@ -292,6 +373,33 @@
       </section>
 
       <div id="flow-toast" class="flow-toast hidden" role="status"></div>
+
+      <!-- MANAGEMENT (Master setup chat) -->
+      <section id="tab-management" class="tab-panel hidden">
+        <div class="management-layout">
+          <div class="chat-stage" id="mgmt-chat-stage">
+            <header class="stage-header">
+              <div>
+                <p class="eyebrow" id="mgmt-stage-kind">Master</p>
+                <h1 id="mgmt-stage-title">Master</h1>
+                <p class="muted tiny-hint management-lead">Create teams, hire agents, and draft workflows with your frontier model.</p>
+                <span id="mgmt-compute-badge" class="compute-badge hidden" title="Active model for Master"></span>
+                <button type="button" id="mgmt-start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
+                  Start local model
+                </button>
+              </div>
+            </header>
+            <div id="mgmt-messages" class="messages" aria-live="polite"></div>
+            <form id="mgmt-send-form" class="composer">
+              <div class="composer-wrap">
+                <input id="mgmt-body" type="text" maxlength="2000" placeholder="Ask Master to create a team, hire agents, or draft a workflow…" autocomplete="off" disabled />
+              </div>
+              <button type="submit" disabled>Send</button>
+            </form>
+            <p id="mgmt-chat-error" class="error" hidden></p>
+          </div>
+        </div>
+      </section>
 
       <!-- Studio dialogs live outside tab panels so showModal works when Teams is hidden -->
       <dialog id="agent-builder-dialog">
@@ -367,7 +475,7 @@
           <div>
             <p class="eyebrow">Hire</p>
             <h1>Agents</h1>
-            <p class="sub muted studio-lead">Hire agents with capabilities, assign them to a team, then open Harness to run loops.</p>
+            <p class="sub muted studio-lead">Hire agents with capabilities, assign them to a team, then open Graph to map steps and guards.</p>
           </div>
           <div class="header-actions">
             <button type="button" id="refresh-agents-tab-btn" class="ghost">Refresh</button>
@@ -457,6 +565,10 @@
                 <label>Display name
                   <input id="settings-display-name" type="text" maxlength="40" autocomplete="nickname" required />
                 </label>
+                <label>Username
+                  <input id="settings-username" type="text" maxlength="24" autocomplete="username" pattern="[A-Za-z][A-Za-z0-9_]{2,23}" placeholder="your_handle" required />
+                </label>
+                <p class="muted tiny-hint">Friends find you by @username (3–24 chars: letter first, then letters, numbers, underscores).</p>
                 <label>Email
                   <input id="settings-email" type="email" readonly />
                 </label>
@@ -470,6 +582,17 @@
                 <p id="profile-settings-message" class="auth-banner" hidden></p>
                 <p id="profile-settings-error" class="error" hidden></p>
               </form>
+              <div class="settings-subcard friends-profile-card stacked">
+                <div class="friends-profile-head">
+                  <div>
+                    <strong>Friends</strong>
+                    <p class="muted tiny-hint">People you’ve connected with on Flyleaf.</p>
+                  </div>
+                  <button type="button" id="profile-add-friend-btn" class="ghost tiny" title="Add friends" aria-label="Add friends">+</button>
+                </div>
+                <ul id="profile-friends-list" class="friend-results profile-friends-list"></ul>
+                <p id="profile-friends-empty" class="muted tiny-hint">No friends yet. Tap + to search usernames and send requests.</p>
+              </div>
             </section>
 
             <section id="settings-panel-security" class="settings-panel hidden">
@@ -634,7 +757,7 @@
               </div>
               <div class="settings-subcard stacked">
                 <strong>Your Flyleaf data</strong>
-                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team harness runs use the <strong>team owner’s</strong> ledger and model links; invited friends contribute in chat.</p>
+                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team Graph runs use the <strong>team owner’s</strong> ledger and model links; invited friends contribute in chat.</p>
                 <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
               </div>
             </section>
@@ -729,9 +852,44 @@
           </div>
         </div>
       </section>
+
+      <section id="tab-notifications" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Inbox</p>
+            <h1>Notifications</h1>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="notifications-mark-all" class="ghost">Mark all read</button>
+            <button type="button" id="notifications-refresh" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <div class="notifications-layout">
+          <section class="notifications-incoming settings-subcard">
+            <div class="settings-panel-head">
+              <div>
+                <h2>Friend requests</h2>
+                <p>Accept or decline people who want to connect.</p>
+              </div>
+            </div>
+            <ul id="notifications-requests" class="friend-results"></ul>
+            <p id="notifications-requests-empty" class="muted tiny-hint">No pending requests.</p>
+          </section>
+          <section class="notifications-feed settings-subcard">
+            <div class="settings-panel-head">
+              <div>
+                <h2>Activity</h2>
+                <p>Friend requests, accepts, and team invites.</p>
+              </div>
+            </div>
+            <ul id="notifications-list" class="notifications-list"></ul>
+            <p id="notifications-empty" class="muted tiny-hint">You’re all caught up.</p>
+          </section>
+        </div>
+      </section>
     </main>
   </div>
 
-  <script src="/static/app.js?v=49"></script>
+  <script src="/static/app.js?v=53"></script>
 </body>
 </html>

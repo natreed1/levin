@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import time
 from typing import Any, Dict, Optional
@@ -15,10 +16,13 @@ COOKIE_NAME = "messenger_session"
 MAX_NAME_LEN = 40
 MAX_TITLE_LEN = 80
 MAX_EMAIL_LEN = 254
+MAX_USERNAME_LEN = 24
+MIN_USERNAME_LEN = 3
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 _PBKDF2_ITERATIONS = 260_000
 # Reject HTML / attribute breakout characters in user-facing labels.
 _FORBIDDEN_LABEL_CHARS = frozenset("<>\"'`")
+_USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,23}$")
 
 
 def invite_token() -> str:
@@ -73,6 +77,16 @@ def normalize_email(email: str) -> Optional[str]:
         return None
     local, _, domain = cleaned.partition("@")
     if not local or not domain or "." not in domain:
+        return None
+    return cleaned
+
+
+def normalize_username(username: str) -> Optional[str]:
+    """Public handle: lowercase letters, digits, underscore; 3–24 chars."""
+    cleaned = (username or "").strip().lower().lstrip("@")
+    if not cleaned or len(cleaned) < MIN_USERNAME_LEN or len(cleaned) > MAX_USERNAME_LEN:
+        return None
+    if not _USERNAME_RE.fullmatch(cleaned):
         return None
     return cleaned
 

@@ -70,7 +70,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_base_url": False,
         "default_base_url": "https://openrouter.ai/api/v1",
         "is_local": False,
-        "hint": "One key for many models. Paste your OpenRouter key.",
+        "hint": "One key for many models. Paste your OpenRouter key (sk-or-…). Billing is on your OpenRouter account.",
     },
     "ollama": {
         "label": "Local open source",
@@ -124,6 +124,50 @@ def env_anthropic_endpoint() -> Optional[dict[str, str]]:
         "is_local": "0",
         "destination": "anthropic",
     }
+
+
+def env_openrouter_api_key() -> str:
+    return (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+
+
+def env_openrouter_model() -> str:
+    return (
+        (os.environ.get("OPENROUTER_MODEL") or "").strip()
+        or str(PROVIDERS["openrouter"]["default_model"])
+    )
+
+
+def env_openrouter_base_url() -> str:
+    return (
+        (os.environ.get("OPENROUTER_BASE_URL") or "").strip()
+        or str(PROVIDERS["openrouter"]["default_base_url"] or "")
+    )
+
+
+def env_openrouter_endpoint() -> Optional[dict[str, str]]:
+    """Operator/dev OpenRouter from env when no per-user profile key is linked."""
+    key = env_openrouter_api_key()
+    if not key:
+        return None
+    return {
+        "provider": "openrouter",
+        "kind": "openai_compatible",
+        "base_url": env_openrouter_base_url(),
+        "api_key": key,
+        "model": env_openrouter_model(),
+        "is_local": "0",
+        "destination": "openai",
+    }
+
+
+def env_frontier_api_key_present() -> bool:
+    """True when local/testing env can seed a frontier profile."""
+    return bool(env_openrouter_api_key() or env_anthropic_api_key())
+
+
+def env_frontier_endpoint() -> Optional[dict[str, str]]:
+    """Prefer OpenRouter for local/testing; fall back to Anthropic."""
+    return env_openrouter_endpoint() or env_anthropic_endpoint()
 
 
 def providers_public(*, category: Optional[str] = None) -> list[dict[str, Any]]:
@@ -357,9 +401,14 @@ class ModelLinkRegistry:
         return None
 
     def ensure_env_frontier_profile(self, user_id: str) -> Optional[dict[str, Any]]:
-        """Seed Claude from ANTHROPIC_API_KEY when the user has no linked profile."""
-        key = env_anthropic_api_key()
-        if not key:
+        """Seed OpenRouter (preferred) or Claude from env when no profile is linked.
+
+        Local/testing default is ``OPENROUTER_API_KEY``. ``ANTHROPIC_API_KEY``
+        remains a fallback when OpenRouter is unset.
+        """
+        openrouter_key = env_openrouter_api_key()
+        anthropic_key = env_anthropic_api_key()
+        if not openrouter_key and not anthropic_key:
             return None
         uid = str(user_id or "").strip()
         if not uid:
@@ -379,31 +428,54 @@ class ModelLinkRegistry:
             # Mid-setup drafts (local model without a route) must not be overridden.
             if profiles:
                 return None
-            meta = PROVIDERS["anthropic"]
-            profile = {
-                "id": _new_id(),
-                "category": "frontier",
-                "provider": "anthropic",
-                "kind": meta["kind"],
-                "label": "Claude (from env)",
-                "model": env_anthropic_model(),
-                "base_url": "",
-                "api_key_enc": encrypt_secret(key),
-                "runtime": "",
-                "source": {"method": "env_anthropic"},
-                "pipeline_route": None,
-                "setup_complete": True,
-                "enabled": True,
-                "auto_connect": False,
-                "created_at": _now(),
-                "last_ok_at": None,
-            }
+            if openrouter_key:
+                meta = PROVIDERS["openrouter"]
+                profile = {
+                    "id": _new_id(),
+                    "category": "frontier",
+                    "provider": "openrouter",
+                    "kind": meta["kind"],
+                    "label": "OpenRouter (from env)",
+                    "model": env_openrouter_model(),
+                    "base_url": env_openrouter_base_url(),
+                    "api_key_enc": encrypt_secret(openrouter_key),
+                    "runtime": "",
+                    "source": {"method": "env_openrouter"},
+                    "pipeline_route": None,
+                    "setup_complete": True,
+                    "enabled": True,
+                    "auto_connect": False,
+                    "created_at": _now(),
+                    "last_ok_at": None,
+                }
+                log_msg = "wired OpenRouter from OPENROUTER_API_KEY for user %s"
+            else:
+                meta = PROVIDERS["anthropic"]
+                profile = {
+                    "id": _new_id(),
+                    "category": "frontier",
+                    "provider": "anthropic",
+                    "kind": meta["kind"],
+                    "label": "Claude (from env)",
+                    "model": env_anthropic_model(),
+                    "base_url": "",
+                    "api_key_enc": encrypt_secret(anthropic_key),
+                    "runtime": "",
+                    "source": {"method": "env_anthropic"},
+                    "pipeline_route": None,
+                    "setup_complete": True,
+                    "enabled": True,
+                    "auto_connect": False,
+                    "created_at": _now(),
+                    "last_ok_at": None,
+                }
+                log_msg = "wired Claude from ANTHROPIC_API_KEY for user %s"
             profiles.append(profile)
             blob["profiles"] = profiles
             if not blob.get("active_profile_id"):
                 blob["active_profile_id"] = profile["id"]
             self._put_user_unlocked(uid, blob)
-            logger.info("wired Claude from ANTHROPIC_API_KEY for user %s", uid)
+            logger.info(log_msg, uid)
             return profile
 
     def add_frontier(
@@ -819,8 +891,9 @@ class ModelLinkRegistry:
         """Shape expected by analyst_ledger.synthesize.use_llm_endpoint.
 
         When ``profile_id`` is set (e.g. per-room model toggle), use that profile
-        instead of the account active model. Falls back to ANTHROPIC_API_KEY in
-        the process env when no per-user key is linked.
+        instead of the account active model. Falls back to OPENROUTER_API_KEY
+        (preferred) or ANTHROPIC_API_KEY in the process env when no per-user key
+        is linked.
         """
         profile: Optional[dict[str, Any]] = None
         if profile_id:
@@ -854,7 +927,7 @@ class ModelLinkRegistry:
         # Env fallback only when the account has no profiles at all (never mid-setup).
         blob = self._get_user_unlocked(user_id)
         if not (blob.get("profiles") or []):
-            return env_anthropic_endpoint()
+            return env_frontier_endpoint()
         return None
 
     def probe_profile(
@@ -870,7 +943,7 @@ class ModelLinkRegistry:
                 "ok": True,
                 "linked": False,
                 "reachable": False,
-                "message": "No model linked. Add Claude, GPT, or a local model under Settings.",
+                "message": "No model linked. Add OpenRouter, Claude, GPT, or a local model under Settings.",
                 "providers": providers_public(),
                 "profiles": self.list_profiles(user_id)["profiles"],
             }
@@ -1050,9 +1123,14 @@ def registry() -> ModelLinkRegistry:
     return _REGISTRY
 
 
-def wire_env_claude_for_user(user_id: str) -> Optional[dict[str, Any]]:
-    """Persist env Claude as the user's active profile when none is linked."""
+def wire_env_frontier_for_user(user_id: str) -> Optional[dict[str, Any]]:
+    """Persist env OpenRouter/Claude as the user's active profile when none is linked."""
     profile = registry().ensure_env_frontier_profile(user_id)
     if profile is None:
         return None
     return registry().public_profile(profile)
+
+
+def wire_env_claude_for_user(user_id: str) -> Optional[dict[str, Any]]:
+    """Alias for :func:`wire_env_frontier_for_user` (legacy name)."""
+    return wire_env_frontier_for_user(user_id)

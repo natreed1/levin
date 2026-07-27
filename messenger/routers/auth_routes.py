@@ -19,6 +19,7 @@ from messenger.auth import (
     new_user_id,
     normalize_email,
     normalize_name,
+    normalize_username,
     utc_expiry_iso,
     utc_now_iso,
     verify_password,
@@ -57,14 +58,19 @@ LOGIN_2FA_HOURS = 10.0 / 60.0  # 10 minutes
 LOGIN_2FA_PURPOSE = "login_2fa"
 
 
-def _wire_env_claude(user_id: str) -> None:
-    """Link Claude from ANTHROPIC_API_KEY when present (dev/operator env)."""
+def _wire_env_frontier(user_id: str) -> None:
+    """Link OpenRouter/Claude from env when present (dev/operator local testing)."""
     try:
-        from messenger.model_link import wire_env_claude_for_user
+        from messenger.model_link import wire_env_frontier_for_user
 
-        wire_env_claude_for_user(str(user_id))
+        wire_env_frontier_for_user(str(user_id))
     except Exception:  # noqa: BLE001 — auth must never fail on model wiring
-        logger.debug("env Claude wire skipped for %s", user_id, exc_info=True)
+        logger.debug("env frontier wire skipped for %s", user_id, exc_info=True)
+
+
+def _wire_env_claude(user_id: str) -> None:
+    """Alias for :func:`_wire_env_frontier` (legacy name)."""
+    _wire_env_frontier(user_id)
 
 
 def _ensure_dev_user(store: MessageStore) -> dict[str, Any]:
@@ -192,11 +198,37 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
         return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
     email = normalize_email(str(body.get("email") or ""))
     name = normalize_name(str(body.get("display_name") or body.get("name") or ""))
+    username_raw = body.get("username")
+    username = normalize_username(str(username_raw or "")) if username_raw is not None and str(username_raw).strip() else None
+    if username_raw is not None and str(username_raw).strip() and not username:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "bad_username",
+                "message": "Username must be 3–24 characters: start with a letter, then letters, numbers, or underscores.",
+            },
+            status_code=400,
+        )
     password = str(body.get("password") or "")
     if not email:
         return JSONResponse({"ok": False, "error": "bad_email"}, status_code=400)
     if not name:
         return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
+    if not username:
+        # Derive a claimable handle from the display name when signup omits one.
+        base = normalize_username(
+            "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name.lower())
+        )
+        if not base:
+            base = "user"
+        candidate = base
+        n = 0
+        while store.user_by_username(candidate):
+            n += 1
+            suffix = str(n)
+            trimmed = base[: max(1, 24 - len(suffix))]
+            candidate = f"{trimmed}{suffix}"
+        username = candidate
     try:
         password_hash = hash_password(password)
     except ValueError as exc:
@@ -221,6 +253,15 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
         )
     if store.user_by_email(email):
         return JSONResponse({"ok": False, "error": "email_taken"}, status_code=409)
+    if store.user_by_username(username):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "username_taken",
+                "message": "That username is already taken.",
+            },
+            status_code=409,
+        )
     user_id = new_user_id()
     try:
         from datetime import datetime, timezone
@@ -231,9 +272,24 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
             else None
         )
         user = store.create_user(
-            user_id, email, password_hash, name, email_verified_at=verified_at
+            user_id,
+            email,
+            password_hash,
+            name,
+            email_verified_at=verified_at,
+            username=username,
         )
-    except ValueError:
+    except ValueError as exc:
+        code = str(exc)
+        if code == "username_taken":
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "username_taken",
+                    "message": "That username is already taken.",
+                },
+                status_code=409,
+            )
         return JSONResponse({"ok": False, "error": "email_taken"}, status_code=409)
     user_data_dir(user_id)
 
@@ -246,6 +302,7 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
                 "user_id": user["user_id"],
                 "email": user["email"],
                 "display_name": user["display_name"],
+                "username": user.get("username") or username,
                 "name": user["display_name"],
                 "email_verified": True,
                 "verification_sent": False,
@@ -284,6 +341,7 @@ async def signup(request: Request, store: MessageStore = Depends(get_store)) -> 
         "user_id": user["user_id"],
         "email": user["email"],
         "display_name": user["display_name"],
+        "username": user.get("username") or username,
         "name": user["display_name"],
         "email_verified": False,
         "verification_sent": mail_error is None,
@@ -545,6 +603,7 @@ def me(
                 "user_id": user["user_id"],
                 "email": user["email"],
                 "display_name": user["display_name"],
+                "username": full.get("username"),
                 "name": user["name"],
                 "room_id": room_id,
                 "room_title": (room or {}).get("title") or "Private room",
@@ -552,6 +611,9 @@ def me(
                 "email_2fa_enabled": bool(full.get("email_2fa_enabled")),
                 "created_at": full.get("created_at"),
                 "session_count": store.count_sessions_for_user(user["user_id"]),
+                "unread_notifications": store.count_unread_notifications(
+                    user["user_id"]
+                ),
                 "dev_auto_login": False,
             }
         )
@@ -650,12 +712,49 @@ async def update_profile(
             status_code=400,
         )
 
+    username = None
+    if "username" in body:
+        username = normalize_username(str(body.get("username") or ""))
+        if not username:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "bad_username",
+                    "message": "Username must be 3–24 characters: start with a letter, then letters, numbers, or underscores.",
+                },
+                status_code=400,
+            )
+        existing = store.user_by_username(username)
+        if existing and existing["user_id"] != user["user_id"]:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "username_taken",
+                    "message": "That username is already taken.",
+                },
+                status_code=409,
+            )
+
     store.update_display_name(user["user_id"], display_name)
+    if username is not None:
+        try:
+            store.update_username(user["user_id"], username)
+        except ValueError:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "username_taken",
+                    "message": "That username is already taken.",
+                },
+                status_code=409,
+            )
     store.delete_sessions_for_user(user["user_id"])
+    refreshed = store.user_by_id(user["user_id"]) or {}
     resp = JSONResponse(
         {
             "ok": True,
             "display_name": display_name,
+            "username": refreshed.get("username"),
             "message": "Profile updated. Other sessions were signed out.",
         }
     )

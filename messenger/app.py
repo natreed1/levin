@@ -33,6 +33,7 @@ from messenger.routers import (
     auth_router,
     automations_router,
     capabilities_router,
+    friends_router,
     registry_router,
     review_router,
     tracking_router,
@@ -262,14 +263,14 @@ def create_app() -> FastAPI:
         if classify_enabled:
             app.state.classify_sweep.start()
         try:
-            from messenger.model_link import env_anthropic_api_key, registry
+            from messenger.model_link import env_frontier_api_key_present, registry
 
-            if env_anthropic_api_key():
+            if env_frontier_api_key_present():
                 for uid in store.list_user_ids():
                     registry().ensure_env_frontier_profile(str(uid))
         except Exception:  # noqa: BLE001
             logging.getLogger("messenger.app").debug(
-                "startup env Claude wire skipped", exc_info=True
+                "startup env frontier wire skipped", exc_info=True
             )
         yield
         app.state.scheduler.stop()
@@ -298,6 +299,7 @@ def create_app() -> FastAPI:
     app.include_router(automations_router)
     app.include_router(agent_chats_router)
     app.include_router(review_router)
+    app.include_router(friends_router)
 
     # --- Browser extension ingest (same response shape as local dashboard) -------
     from fastapi import Depends as FastAPIDepends
@@ -734,8 +736,12 @@ def create_app() -> FastAPI:
                     "email": user["email"],
                     "name": identity["name"],
                     "display_name": user["display_name"],
+                    "username": user.get("username"),
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "unread_notifications": store.count_unread_notifications(
+                        user["user_id"]
+                    ),
                     "dev_auto_login": False,
                 }
             )
@@ -775,11 +781,22 @@ def create_app() -> FastAPI:
     ) -> JSONResponse:
         rooms = store.list_rooms_for_user(user["user_id"])
         from messenger.model_link import registry as model_registry
+        from messenger.master_setup import public_workspace
 
         models = model_registry()
         for room in rooms:
             owner_id = str(room.get("owner_user_id") or user["user_id"])
-            config = room.get("config") or {}
+            config = dict(room.get("config") or {})
+            # Never expose encrypted secret blobs to the client
+            if "workspace_secrets" in config:
+                config = {
+                    **{k: v for k, v in config.items() if k != "workspace_secrets"},
+                    "workspace": public_workspace(config),
+                }
+                room["config"] = config
+            elif isinstance(config.get("workspace"), dict):
+                config["workspace"] = public_workspace(config)
+                room["config"] = config
             override_id = config.get("model_profile_id")
             active = (
                 models.get_profile(owner_id, str(override_id))
@@ -1175,6 +1192,10 @@ def create_app() -> FastAPI:
                     if aid:
                         roles[aid] = label
             config["roles"] = roles
+        if "graph" in body:
+            from messenger.team_harness import normalize_graph
+
+            config["graph"] = normalize_graph(body.get("graph"))
         if "agents" in body:
             raw = body.get("agents")
             if isinstance(raw, list):
@@ -1184,8 +1205,45 @@ def create_app() -> FastAPI:
                 # Drop roles for removed agents
                 roles_map = dict(config.get("roles") or {})
                 config["roles"] = {k: v for k, v in roles_map.items() if k in set(agents)}
+        # Room workspace: repo URL + integration needs / encrypted secrets
+        if any(
+            k in body
+            for k in ("workspace", "repo_url", "workspace_secrets", "default_ref")
+        ):
+            from messenger.master_setup import apply_workspace_patch, public_workspace
+
+            ws_body = body.get("workspace") if isinstance(body.get("workspace"), dict) else {}
+            secrets_body = body.get("workspace_secrets")
+            if not isinstance(secrets_body, dict):
+                secrets_body = ws_body.get("secrets") if isinstance(ws_body.get("secrets"), dict) else None
+            config = apply_workspace_patch(
+                config,
+                repo_url=(
+                    body.get("repo_url")
+                    if "repo_url" in body
+                    else ws_body.get("repo_url")
+                    if "repo_url" in ws_body or "workspace" in body
+                    else None
+                ),
+                default_ref=(
+                    body.get("default_ref")
+                    if "default_ref" in body
+                    else ws_body.get("default_ref")
+                    if "default_ref" in ws_body
+                    else None
+                ),
+                notes=ws_body.get("notes") if "notes" in ws_body else None,
+                needs=ws_body.get("needs") if isinstance(ws_body.get("needs"), list) else None,
+                secrets=secrets_body,
+            )
         updated = store.update_room_config(room_id, config)
-        return JSONResponse({"ok": True, "room": updated, "config": config})
+        from messenger.master_setup import public_workspace
+
+        public_cfg = {
+            **{k: v for k, v in config.items() if k != "workspace_secrets"},
+            "workspace": public_workspace(config),
+        }
+        return JSONResponse({"ok": True, "room": updated, "config": public_cfg})
 
     @app.post("/api/rooms/{room_id}/harness-run")
     async def room_harness_run(
@@ -1206,6 +1264,9 @@ def create_app() -> FastAPI:
         from messenger.team_harness import start_workflow_job
 
         owner_id = room.get("owner_user_id") or user["user_id"]
+        run_focus = str(
+            body.get("focus") or body.get("prompt") or body.get("topic") or ""
+        ).strip()[:800]
         try:
             job = start_workflow_job(
                 store=store,
@@ -1214,6 +1275,7 @@ def create_app() -> FastAPI:
                 owner_user_id=owner_id,
                 stub=bool(body.get("stub", False)),
                 continuous=bool(body.get("continuous", False)),
+                run_focus=run_focus,
                 loop=getattr(app.state, "loop", None),
             )
         except ValueError as exc:
@@ -1225,7 +1287,7 @@ def create_app() -> FastAPI:
             {
                 "ok": True,
                 "job": job.public(),
-                "message": "Team harness running — safe to leave.",
+                "message": "Team Graph running — safe to leave.",
             }
         )
 
@@ -1263,14 +1325,17 @@ def create_app() -> FastAPI:
 
         agents = config.get("agents") or config.get("specialists") or []
         skills = config.get("skills") or []
+        from messenger.team_harness import normalize_graph
+
+        graph_layers = (normalize_graph(config.get("graph")).get("layers") or [])
         orch = str(config.get("orchestrator") or "debate").strip().lower()
         if orch == "workflow":
-            if not skills and not agents:
+            if not graph_layers and not skills and not agents:
                 return JSONResponse(
                     {
                         "ok": False,
-                        "error": "add_capabilities_first",
-                        "message": "Add capabilities in Harness (allowlist or loop) before running workflow.",
+                        "error": "add_graph_or_capabilities_first",
+                        "message": "Add Graph steps (or a capability allowlist/loop) before running.",
                     },
                     status_code=400,
                 )
@@ -1316,7 +1381,7 @@ def create_app() -> FastAPI:
                 announce = (
                     f"Harness running (workflow)"
                     f"{' — ' + objective if objective else ''}."
-                    " Toggle Run harness off to stop."
+                    " Toggle Run Graph off to stop."
                 )
             else:
                 job = start_specialist_job(
@@ -1334,7 +1399,7 @@ def create_app() -> FastAPI:
                 announce = (
                     f"Harness running (debate)"
                     f"{' guided by: ' + objective if objective else ''}."
-                    " Toggle Run harness off to stop."
+                    " Toggle Run Graph off to stop."
                 )
         except ValueError as exc:
             config["autonomy"] = {"enabled": False, "started_at": None}

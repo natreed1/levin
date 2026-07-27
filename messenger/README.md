@@ -89,15 +89,16 @@ reset, or OTP codes in production responses.
 
 | Tab | What it is |
 |-----|------------|
-| **Teams** | Project teams (rooms). Sit in chat with hired agents, invite friends, open **Harness** (objective, roles, capability loops, orchestrator). `/automate` opens Harness. |
+| **Teams** | Project teams (rooms). Sit in chat with hired agents, invite friends, open **Graph** (layered steps, analyst assignments, orchestrator guards, capability loops, room integration settings). `/automate` opens Graph. |
+| **Management** | **Master** setup chat — ask Master to create teams, hire agents, and draft workflows via your frontier model. |
 | **Hire** | Compose agents from lenses + capabilities. Describe a capability need (allowlisted runners/actions) or create manually; assign agents to teams. |
 | **Settings** | Profile, security, preferences, models & integrations, privacy. |
 
 *(Review and Tracking tabs are temporarily retired from the shell.)*
 
-Keyboard on Teams: `j` / `k` moves between team and Master/agent threads.
+Keyboard on Teams: `j` / `k` moves between teams. Master lives on **Management**.
 
-Happy path: **Hire** an agent → **assign to a Team** → open **Harness** (roles + loops + orchestrator) → **Run harness** / sit in chat / invite a friend.
+Happy path: **Management** → Master (“create a coding review team…”) *or* **Hire** an agent → **assign to a Team** → open **Graph** (map steps + guards + Room settings for repo/API keys) → **Run Graph** / sit in chat / invite a friend.
 
 ## Deploy on Fly.io
 

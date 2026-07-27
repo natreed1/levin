@@ -92,7 +92,12 @@
   function showShell() {
     hide($("#auth-screen"));
     show($("#shell"));
-    $("#who-label").textContent = state.me?.display_name || state.me?.name || "";
+    const me = state.me || {};
+    const who = me.username
+      ? `${me.display_name || me.name || ""} · @${me.username}`
+      : me.display_name || me.name || "";
+    $("#who-label").textContent = who;
+    setNotifyBadge(me.unread_notifications || 0);
   }
 
   function setAuthBanner(msg, ok) {
@@ -268,6 +273,7 @@
       method: "POST",
       body: JSON.stringify({
         display_name: $("#signup-name").value,
+        username: $("#signup-username").value,
         email,
         password: $("#signup-password").value,
       }),
@@ -431,7 +437,74 @@
       loadAccountSettings();
       loadSettings();
     }
-    if (tab === "chats") refreshChatRails();
+    if (tab === "notifications") {
+      loadNotificationsTab();
+    }
+    if (tab === "management") {
+      openManagement();
+      return;
+    }
+    if (tab === "chats") {
+      restoreTeamsChat();
+    }
+  }
+
+  function chatUi(surface) {
+    const mgmt = surface === "management" || (!surface && state.tab === "management");
+    return {
+      messages: mgmt ? "#mgmt-messages" : "#messages",
+      body: mgmt ? "#mgmt-body" : "#body",
+      sendForm: mgmt ? "#mgmt-send-form" : "#send-form",
+      chatError: mgmt ? "#mgmt-chat-error" : "#chat-error",
+      stageKind: mgmt ? "#mgmt-stage-kind" : "#stage-kind",
+      stageTitle: mgmt ? "#mgmt-stage-title" : "#stage-title",
+      computeBadge: mgmt ? "#mgmt-compute-badge" : "#compute-badge",
+      startLocalBtn: mgmt ? "#mgmt-start-local-model-btn" : "#start-local-model-btn",
+    };
+  }
+
+  function masterThread() {
+    return (state.threads || []).find((t) => t.master) || null;
+  }
+
+  async function refreshMasterThreads() {
+    const { data } = await api("/api/agent-chats");
+    state.threads = data?.threads || [];
+    return masterThread();
+  }
+
+  async function openManagement() {
+    await refreshChatRails();
+    await selectMaster();
+  }
+
+  async function restoreTeamsChat() {
+    await refreshChatRails();
+    if (state.kind === "agents") {
+      const saved = state.roomId;
+      const next =
+        (saved && state.rooms.find((r) => r.room_id === saved)) ||
+        state.rooms[0] ||
+        null;
+      if (next) {
+        await selectPeople(next.room_id, next.title, next);
+        return;
+      }
+      state.kind = null;
+      state.threadId = null;
+      $("#stage-kind").textContent = "Team";
+      $("#stage-title").textContent = "Select a team";
+      enableComposer(false, "Create or open a team to chat", "teams");
+      renderRails();
+      return;
+    }
+    if (state.kind === "people" && state.roomId) {
+      openWs();
+    }
+  }
+
+  async function selectMaster() {
+    await selectAgent(null, null, true);
   }
 
   // --- Chats -----------------------------------------------------------------
@@ -465,20 +538,12 @@
   }
 
   function allRoomEntries() {
-    return [
-      ...state.rooms.map((room) => ({
-        id: room.room_id,
-        title: room.title,
-        surface: "people",
-        room,
-      })),
-      ...state.threads.map((thread) => ({
-        id: thread.session_id,
-        title: thread.title,
-        surface: "agent",
-        thread,
-      })),
-    ];
+    return state.rooms.map((room) => ({
+      id: room.room_id,
+      title: room.title,
+      surface: "people",
+      room,
+    }));
   }
 
   function renderRails() {
@@ -497,30 +562,21 @@
       const li = document.createElement("li");
       const btn = document.createElement("button");
       btn.type = "button";
-      const agents = entry.room ? roomAgents(entry.room) : [];
-      const compute = entry.room?.compute || (entry.thread ? state.compute : null);
+      const agents = roomAgents(entry.room);
+      const compute = entry.room?.compute || null;
       const meta = compute
         ? `${compute.local ? "Local" : "API"} · ${compute.label || compute.model}`
-        : (entry.thread?.master ? "Private room" : "Ongoing room");
+        : "Team";
       btn.innerHTML = `
         <span class="room-name"><span class="room-icon">#</span><span class="room-title">${escapeHtml(entry.title || entry.id)}</span></span>
         <span class="meta">${escapeHtml(meta)}</span>
         ${agents.length ? `<span class="room-agents" aria-label="${agents.length} agents">${agents.map(() => '<i class="room-agent-dot"></i>').join("")}</span>` : ""}
       `;
-      if (
-        (entry.surface === "people" && state.kind === "people" && state.roomId === entry.id) ||
-        (entry.surface === "agent" && state.kind === "agents" && state.threadId === entry.id)
-      ) {
+      if (state.kind === "people" && state.roomId === entry.id) {
         btn.classList.add("active");
       }
-      if (entry.surface === "people") {
-        btn.addEventListener("click", () => selectPeople(entry.id, entry.title, entry.room));
-        makeRoomDropTarget(btn, entry.id);
-      } else {
-        btn.addEventListener("click", () => {
-          selectAgent(entry.id, entry.title, !!entry.thread?.master);
-        });
-      }
+      btn.addEventListener("click", () => selectPeople(entry.id, entry.title, entry.room));
+      makeRoomDropTarget(btn, entry.id);
       li.appendChild(btn);
       list.appendChild(li);
     });
@@ -596,8 +652,8 @@
       enableComposer(
         true,
         hasAgents
-          ? "Message the team… /automate opens Harness"
-          : "Message… @Analyst · /automate opens Harness"
+          ? "Message the team… /graph <topic> runs Graph"
+          : "Message… @Analyst · /graph <topic> runs Graph"
       );
     }
   }
@@ -627,10 +683,18 @@
   function syncAutonomyToggle(room) {
     const wrap = $("#autonomy-toggle-wrap");
     const toggle = $("#autonomy-toggle");
+    const runBtn = $("#room-run-graph-btn");
     if (!wrap || !toggle) return;
     const orch = String(room?.config?.orchestrator || "chat").toLowerCase();
     const enabled = !!(room?.config?.autonomy?.enabled);
-    // Only show for Workflow mode — Debate/Present UI was removed.
+    const graph = normalizeGraph(room?.config?.graph);
+    const hasGraph = (graph.layers || []).length > 0;
+    // One-shot Run Graph when the team has saved steps
+    if (runBtn) {
+      if (hasGraph && state.me?.authenticated && state.kind === "people") show(runBtn);
+      else hide(runBtn);
+    }
+    // Keep-running loop only for Workflow mode
     if (orch === "workflow") {
       show(wrap);
       toggle.checked = enabled;
@@ -790,8 +854,8 @@
     const topicBit = job.topic ? ` “${job.topic}”` : "";
     if (text) {
       text.textContent = job.continuous
-        ? `Looping${topicBit || " harness"} (${loopBit}) — safe to leave; turns keep posting.`
-        : `Running ${job.action || "harness"}${topicBit} (${loopBit}) — safe to leave this team.`;
+        ? `Looping${topicBit || " Graph"} (${loopBit}) — safe to leave; turns keep posting.`
+        : `Running ${job.action || "Graph"}${topicBit} (${loopBit}) — safe to leave this team.`;
     }
     show(banner);
     if (stopBtn) show(stopBtn);
@@ -902,17 +966,20 @@
     if (state.me?.authenticated) {
       show($("#invite-friend-btn"));
       show($("#room-design-btn"));
+      show($("#room-settings-btn"));
       syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
       hide($("#room-design-btn"));
+      hide($("#room-settings-btn"));
+      hide($("#room-run-graph-btn"));
       hide($("#autonomy-toggle-wrap"));
     }
     enableComposer(
       true,
       hasAgents
-        ? "Message the team… /automate opens Harness · agents use the model above"
-        : "Message… open Harness, or @Bullish for a lens"
+        ? "Message the team… /graph <topic> · /automate opens editor"
+        : "Message… open Graph, or @Bullish for a lens"
     );
     if (state.shareRoomId !== roomId && typeof closeShareDialog === "function") {
       closeShareDialog();
@@ -939,56 +1006,63 @@
   async function selectAgent(threadId, title, isMaster) {
     closeWs();
     state.kind = "agents";
-    state.roomId = null;
+    const ui = chatUi("management");
     hide($("#clear-chat"));
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-settings-btn"));
+    hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
     closeShareDialog();
     if (state.compute) {
       const source = state.compute.is_local ? "Local compute" : "API compute";
-      $("#compute-badge").textContent =
+      $(ui.computeBadge).textContent =
         `${source} · ${state.compute.label || state.compute.model}`;
-      show($("#compute-badge"));
+      show($(ui.computeBadge));
     } else {
-      hide($("#compute-badge"));
+      hide($(ui.computeBadge));
     }
     hide($("#room-model-wrap"));
-    if (state.me?.authenticated) show($("#start-local-model-btn"));
-    else hide($("#start-local-model-btn"));
+    if (state.me?.authenticated) show($(ui.startLocalBtn));
+    else hide($(ui.startLocalBtn));
     $("#room-members").innerHTML = "";
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = title || "Room";
-    enableComposer(true, "Message this team… /automate opens Harness");
+    $(ui.stageKind).textContent = isMaster ? "Master" : "Room";
+    $(ui.stageTitle).textContent = title || (isMaster ? "Master" : "Room");
+    enableComposer(
+      true,
+      isMaster
+        ? "Ask Master to create a team, hire agents, or draft a workflow…"
+        : "Message this team… /graph <topic> runs Graph",
+      "management"
+    );
     await refreshModelStatus();
 
     if (!threadId) {
-      // Ensure master exists
-      const { data } = await api("/api/agent-chats");
-      const master = (data?.threads || []).find((t) => t.master);
+      const master = await refreshMasterThreads();
       threadId = master?.session_id;
-      title = master?.title || "Master workflows";
-      state.threads = data?.threads || [];
-      $("#stage-title").textContent = title;
+      title = master?.title || "Master";
+      $(ui.stageTitle).textContent = title;
     }
     state.threadId = threadId;
     renderRails();
-    $("#messages").innerHTML = "";
+    $(ui.messages).innerHTML = "";
     if (!threadId) return;
     const { data } = await api(`/api/agent-chats/messages?thread_id=${encodeURIComponent(threadId)}`);
-    (data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+    (data?.messages || []).forEach((ev) => appendAgentMessage(ev, "management"));
   }
 
-  function enableComposer(on, placeholder) {
-    const input = $("#body");
-    const btn = $("#send-form button");
+  function enableComposer(on, placeholder, surface) {
+    const ui = chatUi(surface);
+    const input = $(ui.body);
+    const btn = $(`${ui.sendForm} button`);
+    if (!input || !btn) return;
     input.disabled = !on;
     btn.disabled = !on;
     if (placeholder) input.placeholder = placeholder;
-    if (!on) hideMentionSuggest();
+    if (!on && (!surface || surface === "teams")) hideMentionSuggest();
   }
 
   function mentionCandidates() {
@@ -1148,7 +1222,8 @@
     $("#messages").scrollTop = $("#messages").scrollHeight;
   }
 
-  function appendAgentMessage(ev) {
+  function appendAgentMessage(ev, surface) {
+    const ui = chatUi(surface || (state.tab === "management" ? "management" : "teams"));
     const payload = ev.payload || {};
     const role = payload.role || "assistant";
     const div = document.createElement("div");
@@ -1168,8 +1243,10 @@
       chip.textContent = kind;
       div.querySelector(".meta").appendChild(chip);
     }
-    $("#messages").appendChild(div);
-    $("#messages").scrollTop = $("#messages").scrollHeight;
+    const messages = $(ui.messages);
+    if (!messages) return;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
   }
 
   function escapeHtml(s) {
@@ -1180,50 +1257,71 @@
       .replace(/"/g, "&quot;");
   }
 
-  $("#send-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setError("#chat-error", "");
-    const body = $("#body").value.trim();
+  async function submitChatMessage(bodyInput, errorSel, surface) {
+    setError(errorSel, "");
+    const body = bodyInput.value.trim();
     if (!body) return;
-    if (/^\/automate(?:\s|$)/i.test(body)) {
-      $("#body").value = "";
+    if (surface === "teams" && /^\/automate(?:\s|$)/i.test(body)) {
+      bodyInput.value = "";
       openRoomDesign();
       return;
     }
-    if (state.kind === "people") {
+    if (surface === "teams" && /^\/graph(?:\s|$)/i.test(body)) {
+      const focus = body.replace(/^\/graph\s*/i, "").trim();
+      bodyInput.value = "";
+      if (!focus) {
+        showFlowToast("Usage: /graph <topic> — e.g. /graph Research NVDA AI demand");
+        return;
+      }
+      await runRoomGraph({ fromDialog: false, focus });
+      return;
+    }
+    if (state.kind === "people" && surface === "teams") {
       if (state.ws && state.ws.readyState === 1) {
         state.ws.send(JSON.stringify({ type: "message", body }));
-        $("#body").value = "";
+        bodyInput.value = "";
       } else {
         const { res, data } = await api("/api/messages", {
           method: "POST",
           body: JSON.stringify({ body }),
         });
         if (!res.ok) {
-          setError("#chat-error", data?.error || "Send failed");
+          setError(errorSel, data?.error || "Send failed");
           return;
         }
-        $("#body").value = "";
+        bodyInput.value = "";
         if (data?.message) appendPeopleMessage(data.message, data.me);
       }
       return;
     }
-    if (state.kind === "agents" && state.threadId) {
-      $("#body").value = "";
-      appendAgentMessage({
-        ts: new Date().toISOString(),
-        payload: { role: "user", content: body },
-      });
+    if (state.kind === "agents" && state.threadId && surface === "management") {
+      bodyInput.value = "";
+      appendAgentMessage(
+        {
+          ts: new Date().toISOString(),
+          payload: { role: "user", content: body },
+        },
+        "management"
+      );
       const { res, data } = await api("/api/agent-chats/message", {
         method: "POST",
         body: JSON.stringify({ thread_id: state.threadId, content: body }),
       });
       if (!res.ok) {
-        setError("#chat-error", data?.error || data?.message || "Send failed");
+        setError(errorSel, data?.error || data?.message || "Send failed");
         return;
       }
       if (data?.job?.job_id) pollJob(data.job.job_id);
     }
+  }
+
+  $("#send-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitChatMessage($("#body"), "#chat-error", "teams");
+  });
+  $("#mgmt-send-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitChatMessage($("#mgmt-body"), "#mgmt-chat-error", "management");
   });
 
   async function pollJob(jobId) {
@@ -1233,13 +1331,13 @@
       const job = data?.job;
       if (!job) continue;
       if (job.status === "completed" || job.status === "failed") {
-        // Reload thread messages
-        if (state.threadId) {
+        if (state.threadId && state.tab === "management") {
           const msgs = await api(
             `/api/agent-chats/messages?thread_id=${encodeURIComponent(state.threadId)}`
           );
-          $("#messages").innerHTML = "";
-          (msgs.data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+          const ui = chatUi("management");
+          $(ui.messages).innerHTML = "";
+          (msgs.data?.messages || []).forEach((ev) => appendAgentMessage(ev, "management"));
         }
         return;
       }
@@ -1323,6 +1421,8 @@
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-settings-btn"));
+    hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
@@ -1336,20 +1436,12 @@
       await selectPeople(next.room_id, next.title, next);
       return;
     }
-    if (state.threads[0]) {
-      await selectAgent(
-        state.threads[0].session_id,
-        state.threads[0].title,
-        !!state.threads[0].master
-      );
-      return;
-    }
     state.kind = null;
     state.roomId = null;
     state.threadId = null;
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = "No room selected";
-    enableComposer(false, "Create or open a room to chat");
+    $("#stage-kind").textContent = "Team";
+    $("#stage-title").textContent = "Select a team";
+    enableComposer(false, "Create or open a team to chat", "teams");
     renderRails();
   }
 
@@ -1464,13 +1556,334 @@
     state.shareUrl = shareUrl || null;
     state.shareRoomId = roomId || null;
     $("#share-url").value = shareUrl || "";
+    const hasRoom = !!roomId;
+    const hint = $("#friends-dialog-hint");
+    if (hint) {
+      hint.textContent = hasRoom
+        ? "Search usernames to send friend requests. Add friends to this team once they’re accepted."
+        : "Search usernames to send friend requests.";
+    }
+    const inviteDetails = document.querySelector("#share-dialog .invite-link-details");
+    if (inviteDetails) inviteDetails.classList.toggle("hidden", !hasRoom);
     const dialog = $("#share-dialog");
     if (dialog && !dialog.open) dialog.showModal();
+    refreshFriendsDialog();
+  }
+
+  async function openFriendsFromProfile() {
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    const search = $("#friend-search");
+    if (search) search.value = "";
+    const results = $("#friend-search-results");
+    if (results) results.innerHTML = "";
+    openShareDialog("", null);
   }
 
   function closeShareDialog() {
     const dialog = $("#share-dialog");
     if (dialog?.open) dialog.close();
+  }
+
+  function friendLabel(user) {
+    const handle = user?.username ? `@${user.username}` : "";
+    const name = user?.display_name || "";
+    if (handle && name) return `${name} (${handle})`;
+    return handle || name || "Unknown";
+  }
+
+  function setNotifyBadge(count) {
+    const badge = $("#notify-badge");
+    if (!badge) return;
+    const n = Number(count || 0);
+    badge.textContent = n > 99 ? "99+" : String(n);
+    badge.classList.toggle("hidden", n <= 0);
+  }
+
+  async function refreshNotifyBadge() {
+    const { res, data } = await api("/api/notifications");
+    if (!res.ok) return;
+    setNotifyBadge(data.unread || 0);
+    return data;
+  }
+
+  function renderFriendRows(container, users, { emptyText, action } = {}) {
+    if (!container) return;
+    container.innerHTML = "";
+    if (!users?.length) {
+      if (emptyText) {
+        const li = document.createElement("li");
+        li.className = "muted tiny-hint friend-empty-row";
+        li.textContent = emptyText;
+        container.appendChild(li);
+      }
+      return;
+    }
+    users.forEach((user) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = user.display_name || user.username || "User";
+      meta.appendChild(strong);
+      if (user.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${user.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      if (typeof action === "function") {
+        const actions = document.createElement("div");
+        actions.className = "friend-row-actions";
+        action(user, actions, li);
+        if (actions.childNodes.length) li.appendChild(actions);
+      }
+      container.appendChild(li);
+    });
+  }
+
+  async function refreshFriendsDialog() {
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    const needed = $("#friends-username-needed");
+    const hasUsername = !!(state.me?.username);
+    if (needed) needed.classList.toggle("hidden", hasUsername);
+    const { res, data } = await api("/api/friends");
+    if (!res.ok) return;
+    state.friends = data.friends || [];
+    if (data.username) state.me = { ...(state.me || {}), username: data.username };
+    renderFriendRows($("#friends-dialog-list"), state.friends, {
+      emptyText: "No friends yet — search a username above.",
+      action: (user, actions) => {
+        if (!state.shareRoomId || state.kind !== "people") return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ghost tiny";
+        btn.textContent = "Add to team";
+        btn.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const result = await api(
+            `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members`,
+            { method: "POST", body: JSON.stringify({ user_id: user.user_id }) }
+          );
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not add to team"
+            );
+            return;
+          }
+          settingsMessage(
+            "#friends-dialog-message",
+            result.data.message || "Added to team."
+          );
+        });
+        actions.appendChild(btn);
+      },
+    });
+  }
+
+  async function searchFriends() {
+    setError("#friends-dialog-error", "");
+    const q = ($("#friend-search")?.value || "").trim();
+    const list = $("#friend-search-results");
+    if (!q) {
+      if (list) list.innerHTML = "";
+      return;
+    }
+    const { res, data } = await api(`/api/users/search?q=${encodeURIComponent(q)}`);
+    if (!res.ok) {
+      setError("#friends-dialog-error", data?.message || data?.error || "Search failed");
+      return;
+    }
+    renderFriendRows(list, data.users || [], {
+      emptyText: "No usernames matched.",
+      action: (user, actions) => {
+        const rel = user.relationship;
+        if (rel === "friends") {
+          const tag = document.createElement("span");
+          tag.className = "muted tiny-hint";
+          tag.textContent = "Friends";
+          actions.appendChild(tag);
+          return;
+        }
+        if (rel === "outgoing") {
+          const tag = document.createElement("span");
+          tag.className = "muted tiny-hint";
+          tag.textContent = "Requested";
+          actions.appendChild(tag);
+          return;
+        }
+        if (rel === "incoming") {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            await api(`/api/friends/${encodeURIComponent(user.user_id)}/accept`, {
+              method: "POST",
+              body: "{}",
+            });
+            await searchFriends();
+            await refreshFriendsDialog();
+            await refreshNotifyBadge();
+          });
+          actions.appendChild(accept);
+          return;
+        }
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tiny";
+        btn.textContent = "Add friend";
+        btn.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const result = await api("/api/friends/request", {
+            method: "POST",
+            body: JSON.stringify({ user_id: user.user_id, username: user.username }),
+          });
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not send request"
+            );
+            if (result.data?.error === "username_required") {
+              const needed = $("#friends-username-needed");
+              if (needed) needed.classList.remove("hidden");
+            }
+            return;
+          }
+          settingsMessage(
+            "#friends-dialog-message",
+            result.data.message || "Friend request sent."
+          );
+          await searchFriends();
+          await refreshFriendsDialog();
+        });
+        actions.appendChild(btn);
+      },
+    });
+  }
+
+  function notificationCopy(note) {
+    const p = note.payload || {};
+    const who = p.from_username
+      ? `@${p.from_username}`
+      : p.from_display_name || "Someone";
+    if (note.type === "friend_request") return `${who} sent you a friend request.`;
+    if (note.type === "friend_accepted") return `${who} accepted your friend request.`;
+    if (note.type === "room_invite") {
+      const title = p.room_title || "a team";
+      return `${who} added you to ${title}.`;
+    }
+    return `${who} · ${note.type}`;
+  }
+
+  async function loadNotificationsTab() {
+    const notesData = await refreshNotifyBadge();
+    const { res, data } = await api("/api/friends");
+    const incoming = res.ok ? data.incoming || [] : [];
+    const reqList = $("#notifications-requests");
+    const reqEmpty = $("#notifications-requests-empty");
+    renderFriendRows(reqList, incoming, {
+      action: (user, actions) => {
+        const accept = document.createElement("button");
+        accept.type = "button";
+        accept.className = "tiny";
+        accept.textContent = "Accept";
+        accept.addEventListener("click", async () => {
+          await api(`/api/friends/${encodeURIComponent(user.user_id)}/accept`, {
+            method: "POST",
+            body: "{}",
+          });
+          await loadNotificationsTab();
+          await loadProfileFriends();
+        });
+        const decline = document.createElement("button");
+        decline.type = "button";
+        decline.className = "ghost tiny";
+        decline.textContent = "Decline";
+        decline.addEventListener("click", async () => {
+          await api(`/api/friends/${encodeURIComponent(user.user_id)}/reject`, {
+            method: "POST",
+            body: "{}",
+          });
+          await loadNotificationsTab();
+        });
+        actions.appendChild(accept);
+        actions.appendChild(decline);
+      },
+    });
+    if (reqEmpty) reqEmpty.classList.toggle("hidden", incoming.length > 0);
+
+    const list = $("#notifications-list");
+    const empty = $("#notifications-empty");
+    const notes = notesData?.notifications || [];
+    if (list) {
+      list.innerHTML = "";
+      notes.forEach((note) => {
+        const li = document.createElement("li");
+        li.className = `notification-row${note.unread ? " unread" : ""}`;
+        const body = document.createElement("div");
+        body.className = "notification-body";
+        const text = document.createElement("strong");
+        text.textContent = notificationCopy(note);
+        body.appendChild(text);
+        if (note.created_at) {
+          const when = document.createElement("span");
+          when.className = "muted tiny-hint";
+          when.textContent = new Date(note.created_at).toLocaleString();
+          body.appendChild(when);
+        }
+        li.appendChild(body);
+        if (note.unread) {
+          const mark = document.createElement("button");
+          mark.type = "button";
+          mark.className = "ghost tiny";
+          mark.textContent = "Mark read";
+          mark.addEventListener("click", async () => {
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            await loadNotificationsTab();
+          });
+          li.appendChild(mark);
+        }
+        if (note.type === "friend_request" && note.payload?.from_user_id) {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            await api(
+              `/api/friends/${encodeURIComponent(note.payload.from_user_id)}/accept`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            await loadNotificationsTab();
+            await loadProfileFriends();
+          });
+          li.appendChild(accept);
+        }
+        list.appendChild(li);
+      });
+    }
+    if (empty) empty.classList.toggle("hidden", notes.length > 0);
+  }
+
+  async function loadProfileFriends() {
+    const { res, data } = await api("/api/friends");
+    if (!res.ok) return;
+    const friends = data.friends || [];
+    state.friends = friends;
+    renderFriendRows($("#profile-friends-list"), friends);
+    const empty = $("#profile-friends-empty");
+    if (empty) empty.classList.toggle("hidden", friends.length > 0);
   }
 
   $("#copy-share").addEventListener("click", async () => {
@@ -1479,18 +1892,37 @@
     } catch {}
   });
 
+  $("#friend-search-btn")?.addEventListener("click", () => searchFriends());
+  $("#friend-search")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      searchFriends();
+    }
+  });
+
+  $("#notifications-refresh")?.addEventListener("click", () => loadNotificationsTab());
+  $("#notifications-mark-all")?.addEventListener("click", async () => {
+    await api("/api/notifications/read-all", { method: "POST", body: "{}" });
+    await loadNotificationsTab();
+  });
+
   $("#invite-friend-btn").addEventListener("click", async () => {
     if (!state.roomId) return;
     setError("#chat-error", "");
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    let shareUrl = "";
     const { res, data } = await api(
       `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
       { method: "POST", body: "{}" }
     );
-    if (!res.ok) {
-      setError("#chat-error", data?.error || "Could not create invite");
-      return;
-    }
-    openShareDialog(data.share_url, state.roomId);
+    if (res.ok) shareUrl = data.share_url || "";
+    openShareDialog(shareUrl, state.roomId);
+  });
+
+  $("#profile-add-friend-btn")?.addEventListener("click", () => openFriendsFromProfile());
+  $("#share-dialog")?.addEventListener("close", () => {
+    if (state.tab === "settings") loadProfileFriends();
   });
 
   ["dragover", "dragleave", "drop"].forEach((eventName) => {
@@ -1513,37 +1945,463 @@
     });
   });
 
-  // Keyboard: j/k moves through the single room list.
+  // Keyboard: j/k moves through teams on Teams; Management is a single Master thread.
   document.addEventListener("keydown", (e) => {
     if (state.tab !== "chats") return;
     if (e.target.matches("input, textarea")) return;
     if (e.key === "j" || e.key === "k") {
-      const items = [
-        ...state.rooms.map((r) => ({ kind: "people", id: r.room_id, title: r.title })),
-        ...state.threads.map((t) => ({
-          kind: "agents",
-          id: t.session_id,
-          title: t.title,
-          master: t.master,
-        })),
-      ];
+      const items = state.rooms.map((r) => ({
+        kind: "people",
+        id: r.room_id,
+        title: r.title,
+      }));
       if (!items.length) return;
       const cur = items.findIndex(
-        (it) =>
-          (state.kind === "people" && it.kind === "people" && it.id === state.roomId) ||
-          (state.kind === "agents" && it.kind === "agents" && it.id === state.threadId)
+        (it) => state.kind === "people" && it.id === state.roomId
       );
       const next = e.key === "j"
         ? Math.min(items.length - 1, cur + 1)
         : Math.max(0, cur < 0 ? 0 : cur - 1);
       const it = items[next];
-      if (it.kind === "people") selectPeople(it.id, it.title);
-      else selectAgent(it.id, it.title, !!it.master);
+      selectPeople(it.id, it.title);
       e.preventDefault();
     }
   });
 
 
+
+  state.graphDraft = { layers: [], guards: [] };
+  state.graphAgentsById = {};
+  state.graphMemberEdit = null;
+  state.graphFocusLayerId = null;
+  let graphSeq = 0;
+
+  function nextGraphId(prefix) {
+    graphSeq += 1;
+    return `${prefix}${Date.now().toString(36)}${graphSeq}`;
+  }
+
+  function emptyGraph() {
+    return { layers: [], guards: [] };
+  }
+
+  function normalizeGraph(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const layers = [];
+    (Array.isArray(src.layers) ? src.layers : []).slice(0, 24).forEach((layer, idx) => {
+      if (!layer || typeof layer !== "object") return;
+      const id = String(layer.id || `layer_${idx + 1}`).slice(0, 64);
+      const members = [];
+      const seen = new Set();
+      (Array.isArray(layer.members) ? layer.members : []).slice(0, 24).forEach((m) => {
+        let agentId = "";
+        let instructions = "";
+        if (typeof m === "string") {
+          agentId = m.trim();
+        } else if (m && typeof m === "object") {
+          agentId = String(m.agent_id || m.id || "").trim();
+          instructions = String(m.instructions || "").slice(0, 2000);
+        }
+        if (!agentId || seen.has(agentId)) return;
+        seen.add(agentId);
+        members.push({ agent_id: agentId, instructions });
+      });
+      layers.push({
+        id,
+        title: String(layer.title || `Step ${idx + 1}`).slice(0, 80),
+        prompt: String(layer.prompt || "").slice(0, 2000),
+        goal: String(layer.goal || "").slice(0, 800),
+        members,
+      });
+    });
+    const layerIds = new Set(layers.map((l) => l.id));
+    const guards = [];
+    (Array.isArray(src.guards) ? src.guards : []).slice(0, 24).forEach((g, idx) => {
+      if (!g || typeof g !== "object") return;
+      const fromId = String(g.from_layer_id || "").trim();
+      const toId = String(g.to_layer_id || "").trim();
+      if (!layerIds.has(fromId) || !layerIds.has(toId)) return;
+      guards.push({
+        id: String(g.id || `guard_${idx + 1}`).slice(0, 64),
+        from_layer_id: fromId,
+        to_layer_id: toId,
+        prompt: String(g.prompt || "").slice(0, 2000),
+      });
+    });
+    // Ensure consecutive layers have a guard between them
+    for (let i = 0; i < layers.length - 1; i += 1) {
+      const fromId = layers[i].id;
+      const toId = layers[i + 1].id;
+      if (!guards.some((g) => g.from_layer_id === fromId && g.to_layer_id === toId)) {
+        guards.splice(i, 0, {
+          id: nextGraphId("g"),
+          from_layer_id: fromId,
+          to_layer_id: toId,
+          prompt: "",
+        });
+      }
+    }
+    return { layers, guards };
+  }
+
+  function syncGuardsToLayers() {
+    const layers = state.graphDraft.layers || [];
+    const prev = {};
+    (state.graphDraft.guards || []).forEach((g) => {
+      prev[`${g.from_layer_id}->${g.to_layer_id}`] = g.prompt || "";
+    });
+    const guards = [];
+    for (let i = 0; i < layers.length - 1; i += 1) {
+      const fromId = layers[i].id;
+      const toId = layers[i + 1].id;
+      const key = `${fromId}->${toId}`;
+      guards.push({
+        id: nextGraphId("g"),
+        from_layer_id: fromId,
+        to_layer_id: toId,
+        prompt: prev[key] || "",
+      });
+    }
+    state.graphDraft.guards = guards;
+  }
+
+  function findGraphLayer(layerId) {
+    return (state.graphDraft.layers || []).find((l) => l.id === layerId) || null;
+  }
+
+  function findGraphGuard(fromId, toId) {
+    return (state.graphDraft.guards || []).find(
+      (g) => g.from_layer_id === fromId && g.to_layer_id === toId
+    );
+  }
+
+  function agentDisplayName(agentId) {
+    return state.graphAgentsById[agentId]?.name || agentId;
+  }
+
+  function renderGraphRoster() {
+    const list = $("#graph-roster-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const agents = $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId);
+    if (!agents.length) {
+      list.innerHTML = '<li class="muted tiny-hint">Add analysts to this team, then drag them into steps.</li>';
+      return;
+    }
+    agents.forEach((id) => {
+      const li = document.createElement("li");
+      li.className = "graph-roster-card";
+      li.draggable = true;
+      li.dataset.agentId = id;
+      li.title = "Drag onto a step";
+      li.innerHTML = `<strong>${escapeHtml(agentDisplayName(id))}</strong><span>${escapeHtml(id)}</span>`;
+      li.addEventListener("dragstart", (event) => {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("application/x-graph-agent", id);
+        event.dataTransfer.setData("text/plain", id);
+        li.classList.add("dragging");
+      });
+      li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      list.appendChild(li);
+    });
+  }
+
+  function addAgentToGraphLayer(layerId, agentId) {
+    const layer = findGraphLayer(layerId);
+    if (!layer || !agentId) return;
+    if (layer.members.some((m) => m.agent_id === agentId)) return;
+    layer.members.push({ agent_id: agentId, instructions: "" });
+    renderGraphMap();
+    updateHarnessCanvasPreview();
+  }
+
+  function openGraphMemberDialog(layerId, agentId) {
+    const layer = findGraphLayer(layerId);
+    const member = layer?.members?.find((m) => m.agent_id === agentId);
+    if (!member) return;
+    state.graphMemberEdit = { layerId, agentId };
+    const label = $("#graph-member-label");
+    if (label) {
+      label.textContent = `${agentDisplayName(agentId)} · ${layer.title || "step"}`;
+    }
+    if ($("#graph-member-instructions")) {
+      $("#graph-member-instructions").value = member.instructions || "";
+    }
+    $("#graph-member-dialog")?.showModal?.();
+  }
+
+  function renderGraphMap() {
+    const map = $("#graph-map");
+    if (!map) return;
+    const layers = state.graphDraft.layers || [];
+    map.innerHTML = "";
+    if (!layers.length) {
+      state.graphFocusLayerId = null;
+      const empty = document.createElement("button");
+      empty.type = "button";
+      empty.id = "graph-empty-add";
+      empty.className = "graph-empty-add";
+      empty.innerHTML =
+        '<span class="graph-empty-plus">+</span><strong>Add first step</strong>' +
+        '<span class="muted tiny-hint">Click the map to place a layer with a prompt and goal</span>';
+      empty.addEventListener("click", () => addGraphLayer());
+      map.appendChild(empty);
+      map.classList.add("is-empty");
+      updateHarnessCanvasPreview();
+      return;
+    }
+    map.classList.remove("is-empty");
+    if (
+      state.graphFocusLayerId &&
+      !layers.some((l) => l.id === state.graphFocusLayerId)
+    ) {
+      state.graphFocusLayerId = null;
+    }
+    layers.forEach((layer, idx) => {
+      const focused = state.graphFocusLayerId === layer.id;
+      const card = document.createElement("article");
+      card.className = "graph-layer" + (focused ? " is-expanded" : " is-collapsed");
+      card.dataset.layerId = layer.id;
+
+      if (!focused) {
+        const head = document.createElement("div");
+        head.className = "graph-layer-head";
+        head.innerHTML = `<span class="graph-layer-index">Layer ${idx + 1}</span>`;
+        const summary = document.createElement("div");
+        summary.className = "graph-layer-summary";
+        const title = document.createElement("strong");
+        title.textContent = layer.title || `Step ${idx + 1}`;
+        summary.appendChild(title);
+        if (layer.goal) {
+          const goal = document.createElement("span");
+          goal.className = "graph-layer-goal";
+          goal.textContent = layer.goal;
+          summary.appendChild(goal);
+        } else if (layer.prompt) {
+          const goal = document.createElement("span");
+          goal.className = "graph-layer-goal";
+          goal.textContent = layer.prompt.slice(0, 100);
+          summary.appendChild(goal);
+        }
+        const chips = document.createElement("div");
+        chips.className = "graph-layer-chips";
+        if (layer.members.length) {
+          layer.members.forEach((m) => {
+            const chip = document.createElement("span");
+            chip.className = "graph-layer-chip";
+            chip.textContent = agentDisplayName(m.agent_id);
+            chips.appendChild(chip);
+          });
+        } else {
+          const chip = document.createElement("span");
+          chip.className = "graph-layer-chip";
+          chip.textContent = "No analysts";
+          chips.appendChild(chip);
+        }
+        summary.appendChild(chips);
+        head.appendChild(summary);
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "ghost tiny";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          state.graphFocusLayerId = layer.id;
+          renderGraphMap();
+        });
+        head.appendChild(editBtn);
+        card.appendChild(head);
+        card.addEventListener("click", () => {
+          state.graphFocusLayerId = layer.id;
+          renderGraphMap();
+        });
+        map.appendChild(card);
+      } else {
+        const head = document.createElement("div");
+        head.className = "graph-layer-head";
+        head.innerHTML = `<span class="graph-layer-index">Layer ${idx + 1}</span>`;
+        const title = document.createElement("input");
+        title.type = "text";
+        title.maxLength = 80;
+        title.className = "graph-layer-title";
+        title.placeholder = `Step ${idx + 1}`;
+        title.value = layer.title || "";
+        title.addEventListener("input", () => {
+          layer.title = title.value;
+          updateHarnessCanvasPreview();
+        });
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost tiny danger";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", () => removeGraphLayer(layer.id));
+        head.appendChild(title);
+        head.appendChild(remove);
+        card.appendChild(head);
+
+        const promptLabel = document.createElement("label");
+        promptLabel.className = "graph-field";
+        promptLabel.innerHTML = "<span>Prompt</span>";
+        const prompt = document.createElement("textarea");
+        prompt.rows = 2;
+        prompt.maxLength = 2000;
+        prompt.placeholder = "What should this step accomplish?";
+        prompt.value = layer.prompt || "";
+        prompt.addEventListener("input", () => {
+          layer.prompt = prompt.value;
+        });
+        promptLabel.appendChild(prompt);
+        card.appendChild(promptLabel);
+
+        const goalLabel = document.createElement("label");
+        goalLabel.className = "graph-field";
+        goalLabel.innerHTML = "<span>Goal</span>";
+        const goal = document.createElement("input");
+        goal.type = "text";
+        goal.maxLength = 800;
+        goal.placeholder = "Done when…";
+        goal.value = layer.goal || "";
+        goal.addEventListener("input", () => {
+          layer.goal = goal.value;
+        });
+        goalLabel.appendChild(goal);
+        card.appendChild(goalLabel);
+
+        const membersWrap = document.createElement("div");
+        membersWrap.className = "graph-members";
+        membersWrap.dataset.layerId = layer.id;
+        const membersHead = document.createElement("div");
+        membersHead.className = "graph-members-head";
+        membersHead.innerHTML =
+          "<strong>Analysts on this step</strong><span class=\"muted tiny-hint\">Drop here · click for instructions</span>";
+        membersWrap.appendChild(membersHead);
+        const membersList = document.createElement("div");
+        membersList.className = "graph-members-list";
+        if (!layer.members.length) {
+          membersList.innerHTML =
+            '<p class="muted tiny-hint graph-drop-hint">Drop an analyst from the roster</p>';
+        } else {
+          layer.members.forEach((m) => {
+            const box = document.createElement("button");
+            box.type = "button";
+            box.className =
+              "graph-member-box" + (m.instructions ? " has-instructions" : "");
+            box.innerHTML =
+              `<strong>${escapeHtml(agentDisplayName(m.agent_id))}</strong>` +
+              `<span>${m.instructions ? "Has instructions" : "Click to instruct"}</span>`;
+            box.addEventListener("click", () =>
+              openGraphMemberDialog(layer.id, m.agent_id)
+            );
+            membersList.appendChild(box);
+          });
+        }
+        membersWrap.appendChild(membersList);
+        ["dragover", "dragleave", "drop"].forEach((eventName) => {
+          membersWrap.addEventListener(eventName, (event) => {
+            const types = event.dataTransfer?.types || [];
+            const ok =
+              Array.from(types).includes("application/x-graph-agent") ||
+              Array.from(types).includes("application/x-workflow-agent") ||
+              Array.from(types).includes("text/plain");
+            if (!ok && eventName === "dragover") return;
+            if (eventName === "dragover") {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              membersWrap.classList.add("drop-ready");
+              return;
+            }
+            membersWrap.classList.remove("drop-ready");
+            if (eventName !== "drop") return;
+            event.preventDefault();
+            const agentId =
+              event.dataTransfer.getData("application/x-graph-agent") ||
+              event.dataTransfer.getData("application/x-workflow-agent") ||
+              event.dataTransfer.getData("text/plain");
+            if (agentId) addAgentToGraphLayer(layer.id, agentId.trim());
+          });
+        });
+        card.appendChild(membersWrap);
+
+        const actions = document.createElement("div");
+        actions.className = "graph-layer-actions";
+        const done = document.createElement("button");
+        done.type = "button";
+        done.textContent = "Done";
+        done.title = "Collapse this step back onto the graph";
+        done.addEventListener("click", () => {
+          state.graphFocusLayerId = null;
+          renderGraphMap();
+        });
+        actions.appendChild(done);
+        card.appendChild(actions);
+        map.appendChild(card);
+      }
+
+      if (idx < layers.length - 1) {
+        const next = layers[idx + 1];
+        const guard = findGraphGuard(layer.id, next.id) || {
+          id: nextGraphId("g"),
+          from_layer_id: layer.id,
+          to_layer_id: next.id,
+          prompt: "",
+        };
+        const arrow = document.createElement("div");
+        arrow.className = "graph-guard";
+        const collapsedGuard = !focused && state.graphFocusLayerId !== next.id;
+        if (collapsedGuard) {
+          arrow.innerHTML =
+            '<div class="graph-guard-arrow" aria-hidden="true">↓</div>' +
+            '<div class="graph-guard-body">' +
+            '<span class="graph-guard-label">Guard</span>' +
+            `<p class="muted tiny-hint">${escapeHtml(
+              (guard.prompt || "No guard yet").slice(0, 90)
+            )}</p></div>`;
+        } else {
+          arrow.innerHTML =
+            '<div class="graph-guard-arrow" aria-hidden="true">↓</div>' +
+            '<div class="graph-guard-body">' +
+            '<span class="graph-guard-label">Guard · orchestrator judgment</span>' +
+            "</div>";
+          const body = arrow.querySelector(".graph-guard-body");
+          const gPrompt = document.createElement("textarea");
+          gPrompt.rows = 2;
+          gPrompt.maxLength = 2000;
+          gPrompt.placeholder =
+            "Ask the orchestrator when it is ready to advance — e.g. “Has research been thorough enough to start drafting?”";
+          gPrompt.value = guard.prompt || "";
+          gPrompt.addEventListener("input", () => {
+            const g = findGraphGuard(layer.id, next.id);
+            if (g) g.prompt = gPrompt.value;
+          });
+          body.appendChild(gPrompt);
+        }
+        map.appendChild(arrow);
+      }
+    });
+    updateHarnessCanvasPreview();
+  }
+
+  function addGraphLayer() {
+    const n = (state.graphDraft.layers || []).length + 1;
+    const layer = {
+      id: nextGraphId("L"),
+      title: `Step ${n}`,
+      prompt: "",
+      goal: "",
+      members: [],
+    };
+    state.graphDraft.layers.push(layer);
+    state.graphFocusLayerId = layer.id;
+    syncGuardsToLayers();
+    renderGraphMap();
+  }
+
+  function removeGraphLayer(layerId) {
+    state.graphDraft.layers = (state.graphDraft.layers || []).filter((l) => l.id !== layerId);
+    if (state.graphFocusLayerId === layerId) state.graphFocusLayerId = null;
+    syncGuardsToLayers();
+    renderGraphMap();
+  }
 
   function updateHarnessFlowStrip(room) {
     const strip = $("#harness-flow-strip");
@@ -1554,19 +2412,39 @@
       return;
     }
     const config = room.config || {};
-    const agents = roomAgents(room);
-    const roles = config.roles || {};
-    const skills = config.skills || [];
-    const orch = config.orchestrator || "chat";
+    const graph = normalizeGraph(config.graph);
     const chips = [];
-    agents.forEach((id) => {
-      const role = roles[id] ? ` · ${roles[id]}` : "";
-      chips.push(`<span class="harness-flow-chip">${escapeHtml(id)}${escapeHtml(role)}</span>`);
-    });
-    if (skills.length) {
-      chips.push(`<span class="harness-flow-chip">→ ${escapeHtml(skills.join(" → "))}</span>`);
+    if (graph.layers.length) {
+      graph.layers.forEach((layer, idx) => {
+        const label = layer.title || `Step ${idx + 1}`;
+        const who = layer.members.map((m) => m.agent_id).join(", ");
+        chips.push(
+          `<span class="harness-flow-chip">${escapeHtml(label)}${who ? ` · ${escapeHtml(who)}` : ""}</span>`
+        );
+        if (idx < graph.layers.length - 1) {
+          const g = graph.guards.find(
+            (x) => x.from_layer_id === layer.id && x.to_layer_id === graph.layers[idx + 1].id
+          );
+          chips.push(
+            `<span class="harness-flow-chip graph-guard-chip">↓ ${escapeHtml(
+              (g?.prompt || "guard").slice(0, 40)
+            )}</span>`
+          );
+        }
+      });
+    } else {
+      const agents = roomAgents(room);
+      const roles = config.roles || {};
+      agents.forEach((id) => {
+        const role = roles[id] ? ` · ${roles[id]}` : "";
+        chips.push(`<span class="harness-flow-chip">${escapeHtml(id)}${escapeHtml(role)}</span>`);
+      });
+      const skills = config.skills || [];
+      if (skills.length) {
+        chips.push(`<span class="harness-flow-chip">→ ${escapeHtml(skills.join(" → "))}</span>`);
+      }
     }
-    chips.push(`<span class="harness-flow-chip">${escapeHtml(orch)}</span>`);
+    chips.push(`<span class="harness-flow-chip">${escapeHtml(config.orchestrator || "chat")}</span>`);
     strip.innerHTML = chips.join("") || "";
     if (chips.length) show(strip);
     else hide(strip);
@@ -1575,7 +2453,7 @@
   async function openRoomDesign() {
     setError("#room-design-error", "");
     if (state.kind !== "people" || !state.roomId) {
-      showFlowToast("Open a team first to design its harness.");
+      showFlowToast("Open a team first to design its Graph.");
       switchTab("chats");
       return;
     }
@@ -1585,13 +2463,74 @@
     $("#room-prompts").value = (config.prompts || []).join("\n");
     const orch = $("#room-orchestrator");
     if (orch) orch.value = config.orchestrator || "chat";
+    const ws = config.workspace || {};
+    if ($("#room-repo-url")) $("#room-repo-url").value = ws.repo_url || "";
+    if ($("#room-default-ref")) $("#room-default-ref").value = ws.default_ref || "main";
+    if ($("#room-workspace-notes")) $("#room-workspace-notes").value = ws.notes || "";
+    fillWorkspaceNeeds(ws.needs || []);
+    state.graphDraft = normalizeGraph(config.graph);
+    // Open in overview mode — click a step to edit, Done to collapse back
+    state.graphFocusLayerId = null;
     await Promise.all([
       fillHarnessRoles(room),
       fillRoomSkillsPicker(config.skills || []),
       fillHarnessLoops(),
     ]);
+    renderGraphRoster();
+    renderGraphMap();
     updateHarnessCanvasPreview();
     $("#room-design-dialog")?.showModal?.();
+  }
+
+  async function openRoomSettings() {
+    await openRoomDesign();
+    const details = $("#room-design-form")?.querySelector(".graph-advanced");
+    if (details && !details.open) details.open = true;
+    const fieldset = $(".harness-workspace-fieldset");
+    fieldset?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    $("#room-repo-url")?.focus?.();
+  }
+
+  function fillWorkspaceNeeds(needs) {
+    const list = $("#room-workspace-needs");
+    if (!list) return;
+    list.innerHTML = "";
+    const rows = Array.isArray(needs) ? needs : [];
+    if (!rows.length) {
+      list.innerHTML =
+        '<p class="muted tiny-hint">No integration slots yet — Master can add them when it sets up this team.</p>';
+      return;
+    }
+    rows.forEach((need) => {
+      const wrap = document.createElement("div");
+      wrap.className = "harness-need-row";
+      const kind = need.kind || "other_secret";
+      const id = need.id || kind;
+      const label = need.label || kind;
+      const filled = !!need.filled;
+      const isRepo = kind === "github_repo";
+      const status = filled
+        ? `<span class="muted tiny-hint">Filled${need.suffix ? ` ${escapeHtml(need.suffix)}` : ""}</span>`
+        : '<span class="tiny-hint" style="color:var(--warn,#b45309)">Needed</span>';
+      wrap.innerHTML = `
+        <div class="harness-need-head">
+          <strong>${escapeHtml(label)}</strong>
+          ${status}
+        </div>
+        ${need.hint ? `<p class="muted tiny-hint">${escapeHtml(need.hint)}</p>` : ""}
+      `;
+      if (!isRepo) {
+        const input = document.createElement("input");
+        input.type = "password";
+        input.autocomplete = "off";
+        input.maxLength = 400;
+        input.placeholder = filled ? "•••••••• (leave blank to keep)" : "Paste secret here";
+        input.dataset.needId = id;
+        input.className = "harness-need-secret";
+        wrap.appendChild(input);
+      }
+      list.appendChild(wrap);
+    });
   }
 
   async function fillHarnessRoles(room) {
@@ -1607,6 +2546,7 @@
     (data?.agents || []).forEach((a) => {
       byId[a.id] = a;
     });
+    state.graphAgentsById = byId;
     agents.forEach((id) => {
       const row = document.createElement("div");
       row.className = "harness-role-row";
@@ -1626,6 +2566,7 @@
       remove.textContent = "Remove";
       remove.addEventListener("click", () => {
         row.remove();
+        renderGraphRoster();
         updateHarnessCanvasPreview();
       });
       row.appendChild(name);
@@ -1647,6 +2588,7 @@
           select.appendChild(opt);
         });
     }
+    renderGraphRoster();
   }
 
   async function fillRoomSkillsPicker(selected) {
@@ -1705,19 +2647,51 @@
   function updateHarnessCanvasPreview() {
     const el = $("#harness-canvas-preview");
     if (!el) return;
-    const roles = $$("#harness-roles-list .harness-role-input").map((input) => {
-      const label = input.value.trim();
-      const name =
-        input.closest(".harness-role-row")?.querySelector("span")?.textContent ||
-        input.dataset.agentId;
-      return label ? `${name} (${label})` : name;
-    });
-    const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
+    const layers = state.graphDraft?.layers || [];
     const orch = $("#room-orchestrator")?.value || "chat";
-    const left = roles.length ? roles.join(" · ") : "(no agents)";
-    const right = skills.length ? skills.join(" → ") : "(no capabilities)";
-    el.textContent = `${left}  →  ${right}  ·  ${orch}`;
+    if (!layers.length) {
+      el.textContent = `Empty Graph · ${orch} — click the map to add a step`;
+      return;
+    }
+    const parts = layers.map((layer, idx) => {
+      const who = layer.members.map((m) => agentDisplayName(m.agent_id)).join(", ") || "no analysts";
+      return `${layer.title || `Step ${idx + 1}`} [${who}]`;
+    });
+    el.textContent = `${parts.join("  ↓  ")}  ·  ${orch}`;
   }
+
+  $("#graph-add-layer-btn")?.addEventListener("click", () => addGraphLayer());
+  $("#graph-map")?.addEventListener("click", (event) => {
+    if (event.target === $("#graph-map") && !(state.graphDraft.layers || []).length) {
+      addGraphLayer();
+    }
+  });
+
+  $("#graph-member-cancel")?.addEventListener("click", () => $("#graph-member-dialog")?.close());
+  $("#graph-member-remove")?.addEventListener("click", () => {
+    const edit = state.graphMemberEdit;
+    if (!edit) return;
+    const layer = findGraphLayer(edit.layerId);
+    if (layer) {
+      layer.members = layer.members.filter((m) => m.agent_id !== edit.agentId);
+    }
+    state.graphMemberEdit = null;
+    $("#graph-member-dialog")?.close();
+    renderGraphMap();
+  });
+  $("#graph-member-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const edit = state.graphMemberEdit;
+    if (!edit) return;
+    const layer = findGraphLayer(edit.layerId);
+    const member = layer?.members?.find((m) => m.agent_id === edit.agentId);
+    if (member) {
+      member.instructions = ($("#graph-member-instructions")?.value || "").slice(0, 2000);
+    }
+    state.graphMemberEdit = null;
+    $("#graph-member-dialog")?.close();
+    renderGraphMap();
+  });
 
   $("#harness-add-agent-btn")?.addEventListener("click", async () => {
     const id = $("#harness-add-agent-select")?.value;
@@ -1766,59 +2740,129 @@
   $("#harness-run-loop-btn")?.addEventListener("click", async () => {
     setError("#room-design-error", "");
     if (!state.roomId) return;
-    // Persist orchestrator as workflow for this run context if needed
-    const { res, data } = await api(
-      `/api/rooms/${encodeURIComponent(state.roomId)}/harness-run`,
-      { method: "POST", body: JSON.stringify({ stub: false }) }
-    );
-    if (!res.ok) {
-      setError("#room-design-error", data?.message || data?.error || "Harness run failed");
-      return;
-    }
-    $("#room-design-dialog")?.close();
-    showFlowToast(data?.message || "Workflow started");
-    if (data?.job) setSpecialistRunUi(data.job);
-    const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
-    $("#messages").innerHTML = "";
-    (msgs.data?.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
+    const saved = await saveRoomGraphConfig({ closeDialog: false, toast: false });
+    if (!saved) return;
+    await runRoomGraph({ fromDialog: true });
   });
 
   $("#room-orchestrator")?.addEventListener("change", updateHarnessCanvasPreview);
 
   $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
-  $("#room-design-cancel")?.addEventListener("click", () => $("#room-design-dialog")?.close());
-  $("#room-design-form")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
+  $("#room-settings-btn")?.addEventListener("click", () => openRoomSettings());
+  $("#room-run-graph-btn")?.addEventListener("click", () => runRoomGraph({ fromDialog: false }));
+  $("#room-design-cancel")?.addEventListener("click", () => {
+    state.graphFocusLayerId = null;
+    $("#room-design-dialog")?.close();
+  });
+
+  async function saveRoomGraphConfig({ closeDialog = true, toast = true } = {}) {
     setError("#room-design-error", "");
-    if (!state.roomId) return;
+    if (!state.roomId) return false;
+    syncGuardsToLayers();
+    state.graphFocusLayerId = null;
     const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
     const agents = $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId);
     const roles = {};
     $$("#harness-roles-list .harness-role-input").forEach((el) => {
       roles[el.dataset.agentId] = el.value.trim();
     });
+    (state.graphDraft.layers || []).forEach((layer) => {
+      (layer.members || []).forEach((m) => {
+        if (m.agent_id && !agents.includes(m.agent_id)) agents.push(m.agent_id);
+      });
+    });
+    const room = currentRoom() || {};
+    const prevNeeds = (room.config?.workspace?.needs || []).map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      label: n.label,
+      hint: n.hint,
+    }));
+    const secrets = {};
+    $$("#room-workspace-needs .harness-need-secret").forEach((el) => {
+      const val = (el.value || "").trim();
+      if (val && el.dataset.needId) secrets[el.dataset.needId] = val;
+    });
+    const graph = normalizeGraph(state.graphDraft);
+    let orch = $("#room-orchestrator")?.value || "chat";
+    // Graph steps imply workflow mode so Run Graph / Keep running stay available
+    if ((graph.layers || []).length && orch === "chat") {
+      orch = "workflow";
+      if ($("#room-orchestrator")) $("#room-orchestrator").value = "workflow";
+    }
+    const body = {
+      objective: $("#room-objective").value,
+      prompts: $("#room-prompts").value,
+      skills,
+      agents,
+      roles,
+      graph,
+      orchestrator: orch,
+      workspace: {
+        repo_url: $("#room-repo-url")?.value || "",
+        default_ref: $("#room-default-ref")?.value || "main",
+        notes: $("#room-workspace-notes")?.value || "",
+        needs: prevNeeds,
+      },
+    };
+    if (Object.keys(secrets).length) body.workspace_secrets = secrets;
     const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/config`, {
       method: "PATCH",
-      body: JSON.stringify({
-        objective: $("#room-objective").value,
-        prompts: $("#room-prompts").value,
-        skills,
-        agents,
-        roles,
-        orchestrator: $("#room-orchestrator")?.value || "chat",
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       setError("#room-design-error", data?.error || "Could not save");
+      return false;
+    }
+    if (closeDialog) $("#room-design-dialog")?.close();
+    else renderGraphMap();
+    if (toast) {
+      showFlowToast(
+        (graph.layers || []).length
+          ? "Graph saved — run with /graph <topic> or the Run Graph button."
+          : "Graph saved."
+      );
+    }
+    await refreshChatRails();
+    if (state.roomId) {
+      const next = (state.rooms || []).find((r) => r.room_id === state.roomId);
+      if (next) await selectPeople(next.room_id, next.title, next);
+    }
+    return true;
+  }
+
+  async function runRoomGraph({ fromDialog = false, focus = "" } = {}) {
+    if (!state.roomId) return;
+    const errSel = fromDialog ? "#room-design-error" : null;
+    if (errSel) setError(errSel, "");
+    const payload = { stub: false };
+    const focusText = String(focus || "").trim();
+    if (focusText) payload.focus = focusText.slice(0, 800);
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/harness-run`,
+      { method: "POST", body: JSON.stringify(payload) }
+    );
+    if (!res.ok) {
+      const msg = data?.message || data?.error || "Graph run failed";
+      if (errSel) setError(errSel, msg);
+      else showFlowToast(msg);
       return;
     }
     $("#room-design-dialog")?.close();
-    showFlowToast("Harness saved — turn on Run harness to let the team work.");
-    await refreshChatRails();
-    if (state.roomId) {
-      const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
-      if (room) await selectPeople(room.room_id, room.title, room);
-    }
+    showFlowToast(
+      focusText
+        ? `Graph started — focus: ${focusText.slice(0, 80)}${focusText.length > 80 ? "…" : ""}`
+        : data?.message || "Graph started"
+    );
+    if (data?.job) setSpecialistRunUi(data.job);
+    const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
+    $("#messages").innerHTML = "";
+    (msgs.data?.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
+  }
+
+  $("#room-design-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await saveRoomGraphConfig({ closeDialog: true, toast: true });
   });
 
   $("#autonomy-toggle")?.addEventListener("change", async () => {
@@ -1830,10 +2874,10 @@
     });
     if (!res.ok) {
       $("#autonomy-toggle").checked = !enabled;
-      setError("#chat-error", data?.message || data?.error || "Harness failed");
+      setError("#chat-error", data?.message || data?.error || "Graph failed");
       return;
     }
-    showFlowToast(data?.message || (enabled ? "Harness on" : "Harness off"));
+    showFlowToast(data?.message || (enabled ? "Graph on" : "Graph off"));
     await refreshChatRails();
     if (state.roomId) {
       const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
@@ -1938,7 +2982,7 @@
       setError("#agents-tab-error", data?.error || "Approve failed");
       return false;
     }
-    showFlowToast(`“${ritualId}” approved — add it to an agent or a team harness allowlist.`, {
+    showFlowToast(`“${ritualId}” approved — add it to an agent or a team Graph allowlist.`, {
       tab: "agents",
     });
     loadAgentsStudio();
@@ -2422,8 +3466,14 @@
     if (!res.ok || !data?.authenticated) return;
     state.me = { ...(state.me || {}), ...data };
     $("#settings-display-name").value = data.display_name || "";
+    const usernameInput = $("#settings-username");
+    if (usernameInput) usernameInput.value = data.username || "";
     $("#settings-email").value = data.email || "";
-    $("#who-label").textContent = data.display_name || data.name || "";
+    const who = data.username
+      ? `${data.display_name || data.name || ""} · @${data.username}`
+      : data.display_name || data.name || "";
+    $("#who-label").textContent = who;
+    setNotifyBadge(data.unread_notifications || 0);
     const status = $("#settings-email-status");
     status.textContent = data.email_verified ? "Email verified" : "Email not verified";
     status.classList.toggle("unverified", !data.email_verified);
@@ -2443,6 +3493,7 @@
     }
     const toggleBtn = $("#toggle-2fa-btn");
     if (toggleBtn) toggleBtn.textContent = twoFaOn ? "Disable email 2FA" : "Enable email 2FA";
+    await loadProfileFriends();
   }
 
   $$(".settings-nav-btn").forEach((button) => {
@@ -2455,7 +3506,10 @@
     settingsMessage("#profile-settings-message", "");
     const { res, data } = await api("/api/auth/profile", {
       method: "PATCH",
-      body: JSON.stringify({ display_name: $("#settings-display-name").value }),
+      body: JSON.stringify({
+        display_name: $("#settings-display-name").value,
+        username: $("#settings-username")?.value || "",
+      }),
     });
     if (!res.ok) {
       setError(
@@ -2463,7 +3517,11 @@
         data?.message ||
           (data?.error === "bad_name"
             ? "Enter a display name (not just spaces)."
-            : data?.error) ||
+            : data?.error === "bad_username"
+              ? "Username must be 3–24 characters: letter first, then letters, numbers, or underscores."
+              : data?.error === "username_taken"
+                ? "That username is already taken."
+                : data?.error) ||
           "Could not update profile"
       );
       return;
@@ -3264,6 +4322,9 @@
   $("#start-local-model-btn")?.addEventListener("click", () => {
     startLocalModelFromBrowser();
   });
+  $("#mgmt-start-local-model-btn")?.addEventListener("click", () => {
+    startLocalModelFromBrowser();
+  });
   $("#room-model-select")?.addEventListener("change", async () => {
     if (!state.roomId || state.kind !== "people") return;
     const profileId = $("#room-model-select").value || null;
@@ -3422,11 +4483,12 @@
     showShell();
     switchTab("chats");
     await refreshChatRails();
-    // Auto-open current room if present
+    refreshNotifyBadge();
+    // Auto-open current room if present (Master lives under Management).
     if (me.room_id) {
       await selectPeople(me.room_id, me.room_title || "Room");
-    } else if (state.threads[0]) {
-      await selectAgent(state.threads[0].session_id, state.threads[0].title, !!state.threads[0].master);
+    } else if (state.rooms[0]) {
+      await selectPeople(state.rooms[0].room_id, state.rooms[0].title, state.rooms[0]);
     } else {
       await refreshModelStatus();
     }

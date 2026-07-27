@@ -20,15 +20,22 @@ def test_account_settings_sections_are_present():
         assert f'id="settings-panel-{section}"' in html
         assert f'data-settings-panel="{section}"' in html
     assert 'id="profile-settings-form"' in html
+    assert 'id="settings-username"' in html
+    assert 'id="profile-friends-list"' in html
+    assert 'id="profile-add-friend-btn"' in html
+    assert 'id="profile-friends-empty"' in html
     assert 'id="change-password-form"' in html
     assert 'id="email-2fa-form"' in html
     assert 'id="otp-form"' in html
     assert 'id="logout-other-sessions-btn"' in html
+    assert 'data-tab="notifications"' in html
+    assert 'id="tab-notifications"' in html
 
 
 def test_account_settings_actions_and_layout_are_wired():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert "openFriendsFromProfile" in js
     assert 'api("/api/auth/profile"' in js
     assert 'api("/api/auth/change-password"' in js
     assert 'api("/api/auth/logout-other-sessions"' in js

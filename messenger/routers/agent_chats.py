@@ -201,13 +201,21 @@ async def post_message(
                         pass
 
             if session.desk_tag == "chat:master":
+                store = request.app.state.store
+
+                def _master_job(job: Any, _uid: str = uid, _content: str = content, _stub: bool = stub, _store: Any = store) -> Any:
+                    with user_context(_uid) as led:
+                        return _run_with_user_model(
+                            _uid,
+                            lambda: MasterCoordinator(
+                                led, store=_store, user_id=_uid
+                            ).run(_content, job=job, stub=_stub),
+                        )
+
                 job = jobs.start(
                     f"user:{uid}:chat:master",
                     "master_chat",
-                    lambda job: _run_with_user_model(
-                        uid,
-                        lambda: MasterCoordinator(ledger).run(content, job=job),
-                    ),
+                    _master_job,
                 )
                 return JSONResponse({"ok": True, "job": job.public()})
             ritual_id = str(session.desk_tag or "").removeprefix("chat:")
