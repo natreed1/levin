@@ -420,13 +420,13 @@
   });
 
   function switchTab(tab) {
+    // Review / Tracking UI is temporarily retired from the main shell.
+    if (tab === "review" || tab === "tracking") tab = "chats";
     state.tab = tab;
     $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => hide(p));
     show($(`#tab-${tab}`));
     if (tab === "agents") loadAgentsStudio();
-    if (tab === "review") loadReview();
-    if (tab === "tracking") loadTracking();
     if (tab === "settings") {
       loadAccountSettings();
       loadSettings();
@@ -1750,7 +1750,7 @@
     if ($("#harness-loop-name")) $("#harness-loop-name").value = "";
     if ($("#harness-loop-steps")) $("#harness-loop-steps").value = "";
     if ($("#harness-loop-schedule")) $("#harness-loop-schedule").value = "";
-    showFlowToast(`Draft loop “${data?.ritual_id || name}” created — approve in Hire or Review.`);
+    showFlowToast(`Draft loop “${data?.ritual_id || name}” created — approve in Hire.`);
     await fillHarnessLoops();
   });
 
@@ -2388,441 +2388,6 @@
 
   $("#refresh-agents-tab-btn")?.addEventListener("click", loadAgentsStudio);
 
-  // --- Review ----------------------------------------------------------------
-
-  async function loadReview() {
-    setError("#review-error", "");
-    $("#review-status").textContent = "";
-    const { res, data } = await api("/api/review");
-    const tbody = $("#review-proposals-table tbody");
-    tbody.innerHTML = "";
-    if (!res.ok) {
-      setError("#review-error", data?.error || "Failed to load review");
-      return;
-    }
-    const rows = data?.proposals || [];
-    $("#review-empty").classList.toggle("hidden", rows.length > 0);
-    rows.forEach((p) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(p.ritual_id || p.name || "")}</td>
-        <td><span class="badge draft">${escapeHtml(p.proposed_by || "review")}</span></td>
-        <td>${escapeHtml(p.runner || "")}</td>
-        <td></td>`;
-      const td = tr.querySelector("td:last-child");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ghost tiny";
-      btn.textContent = "Approve & enable";
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        const ok = await approveCapability(p.ritual_id);
-        if (!ok) btn.disabled = false;
-        loadReview();
-      });
-      td.appendChild(btn);
-      tbody.appendChild(tr);
-    });
-    const memo = data?.memo_text;
-    $("#review-memo").textContent = memo || "(no reviews yet)";
-    $("#review-memo").classList.toggle("muted", !memo);
-  }
-
-  $("#run-review-btn").addEventListener("click", async () => {
-    setError("#review-error", "");
-    const days = parseInt($("#review-days").value, 10) || 14;
-    $("#review-status").textContent = "Reviewing ledger…";
-    $("#run-review-btn").disabled = true;
-    try {
-      const { res, data } = await api("/api/review/run", {
-        method: "POST",
-        body: JSON.stringify({ days }),
-      });
-      if (!res.ok) throw new Error(data?.error || "review failed");
-      const n = (data?.proposals_written || []).length;
-      const dest = data?.destination || "local";
-      const fallback = data?.fallback_from
-        ? ` (fell back from ${data.fallback_from})`
-        : "";
-      $("#review-status").textContent =
-        `Done via ${dest}` + fallback + (n ? ` — ${n} proposal(s).` : ".");
-      await loadReview();
-    } catch (e) {
-      const raw = String(e.message || e);
-      const friendly =
-        /authentication_error|API key|401/i.test(raw)
-          ? "Review model unavailable (check Claude under Models). Try again after linking a key, or the server will use a local stub."
-          : raw;
-      setError("#review-error", friendly);
-      $("#review-status").textContent = "";
-    } finally {
-      $("#run-review-btn").disabled = false;
-    }
-  });
-  $("#refresh-review-btn").addEventListener("click", loadReview);
-
-  // --- Tracking --------------------------------------------------------------
-
-  const SCOPE_LABELS = {
-    active_tab: "Active tab",
-    all_tabs: "All open tabs",
-    selected_tabs: "Selected tabs",
-    research_sites: "Research sites",
-    notes_only: "Notes only",
-  };
-
-  const CAPTURE_PAGE = "flyleaf-tracking";
-  const CAPTURE_EXT = "flyleaf-capture";
-  const BROWSER_SCOPES = new Set([
-    "active_tab",
-    "all_tabs",
-    "selected_tabs",
-    "research_sites",
-  ]);
-
-  let trackingVocab = { kinds: ["research", "build", "observation", "idea", "question"] };
-  let captureExt = { connected: false, version: null, lastAt: 0 };
-
-  function selectedCaptureScope() {
-    const el = document.querySelector('input[name="capture-scope"]:checked');
-    return (el && el.value) || "active_tab";
-  }
-
-  function postToCapture(type, payload) {
-    window.postMessage(
-      Object.assign({ source: CAPTURE_PAGE, type }, payload || {}),
-      window.location.origin
-    );
-  }
-
-  function setCaptureStatus(state, message) {
-    const el = $("#capture-status");
-    if (!el) return;
-    el.dataset.state = state;
-    el.textContent = message;
-    const openBtn = $("#open-capture-btn");
-    if (openBtn) openBtn.disabled = state === "missing";
-    const hint = $("#capture-hint");
-    if (!hint) return;
-    if (state === "connected") {
-      hint.textContent =
-        "Capture is linked to this Flyleaf account. Start tracking to log tab visits; Select tabs opens the picker.";
-    } else if (state === "missing") {
-      hint.textContent =
-        "Install / reload Analyst Ledger Capture, stay signed in here, then refresh. Notes and chat still track without it.";
-    } else {
-      hint.textContent =
-        "Browser tab capture needs the Capture extension. Notes and chat still work without it.";
-    }
-  }
-
-  function markCaptureConnected(version) {
-    captureExt = {
-      connected: true,
-      version: version || captureExt.version,
-      lastAt: Date.now(),
-    };
-    const ver = captureExt.version ? ` v${captureExt.version}` : "";
-    setCaptureStatus("connected", `Capture extension connected${ver}`);
-  }
-
-  function pingCaptureExtension() {
-    postToCapture("ping");
-    postToCapture("sync_origin");
-    window.setTimeout(() => {
-      if (Date.now() - (captureExt.lastAt || 0) > 1500) {
-        captureExt.connected = false;
-        setCaptureStatus(
-          "missing",
-          "Capture extension not detected — tab visits will not be recorded"
-        );
-      }
-    }, 900);
-  }
-
-  function openCapturePicker(opts) {
-    const capture_scope = (opts && opts.capture_scope) || selectedCaptureScope();
-    const session_id = (opts && opts.session_id) || null;
-    setError("#track-error", "");
-    postToCapture("open_picker", { capture_scope, session_id });
-    const wasConnected = captureExt.connected;
-    window.setTimeout(() => {
-      if (!captureExt.connected && !wasConnected) {
-        setError(
-          "#track-error",
-          "Capture extension not connected. Install Analyst Ledger Capture, reload it on chrome://extensions, then try again."
-        );
-      }
-    }, 900);
-  }
-
-  window.addEventListener("message", (event) => {
-    if (event.origin !== window.location.origin) return;
-    const data = event.data;
-    if (!data || data.source !== CAPTURE_EXT) return;
-    if (data.type === "ready" || data.type === "pong" || data.type === "synced") {
-      markCaptureConnected(data.version);
-      return;
-    }
-    if (data.type === "opened_picker") {
-      markCaptureConnected(data.version);
-      if (data.ok === false) {
-        setError("#track-error", "Could not open the Capture tab picker");
-      }
-      return;
-    }
-    if (data.type === "error" && data.message) {
-      setError("#track-error", data.message);
-    }
-  });
-
-  function labelChipsHtml(labels) {
-    const list = Array.isArray(labels) ? labels : [];
-    if (!list.length) return '<span class="muted">—</span>';
-    return (
-      '<span class="label-chips">' +
-      list
-        .map((lbl) => `<span class="badge kind">${escapeHtml(lbl)}</span>`)
-        .join("") +
-      "</span>"
-    );
-  }
-
-  function eventTargetId(ev) {
-    if (ev.type === "chat_message") return ev.event_id || "";
-    const payload = ev.payload || {};
-    return payload.target_event_id || "";
-  }
-
-  function renderEventRow(ev) {
-    const li = document.createElement("li");
-    li.className = "event-row";
-    const payload = ev.payload || {};
-    const scope =
-      ev.type === "session_start" && payload.capture_scope
-        ? ` · ${payload.capture_scope}`
-        : "";
-    const kind = ev.resolved_kind || "";
-    const labels = Array.isArray(payload.labels) ? payload.labels.join(" · ") : "";
-    const source = payload.source ? ` · ${payload.source}` : "";
-    const mainBits = [`${fmtTime(ev.ts)} · ${ev.type} · ${ev.surface || ""}${scope}`];
-    if (kind) mainBits.push(`kind:${kind}`);
-    else if (labels) mainBits.push(labels);
-    if (source && (ev.type === "label" || kind)) mainBits.push(source.trim());
-
-    const main = document.createElement("div");
-    main.className = "event-main";
-    main.textContent = mainBits.filter(Boolean).join(" · ");
-    if (ev.message_excerpt) {
-      const ex = document.createElement("span");
-      ex.className = "event-excerpt";
-      ex.textContent = ev.message_excerpt;
-      main.appendChild(ex);
-    }
-    li.appendChild(main);
-
-    if (kind) {
-      const chip = document.createElement("span");
-      chip.className = "badge kind" + (payload.source === "human" ? " human" : "");
-      chip.textContent = kind;
-      li.appendChild(chip);
-    }
-
-    const targetId = eventTargetId(ev);
-    const canFix =
-      targetId &&
-      ev.session_id &&
-      (ev.type === "chat_message" || ev.type === "label") &&
-      (kind || ev.type === "chat_message");
-    if (canFix) {
-      const fix = document.createElement("div");
-      fix.className = "fix-kind";
-      const sel = document.createElement("select");
-      sel.setAttribute("aria-label", "Fix kind");
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = "Fix kind…";
-      sel.appendChild(blank);
-      (trackingVocab.kinds || []).forEach((k) => {
-        const opt = document.createElement("option");
-        opt.value = k;
-        opt.textContent = k;
-        if (k === kind) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ghost tiny";
-      btn.textContent = "Save";
-      btn.addEventListener("click", async () => {
-        const next = sel.value;
-        if (!next) return;
-        setError("#track-error", "");
-        const { res, data } = await api("/api/tracking/labels/correct", {
-          method: "POST",
-          body: JSON.stringify({
-            session_id: ev.session_id,
-            event_id: targetId,
-            kind: next,
-            auto_kind: kind || undefined,
-          }),
-        });
-        if (!res.ok) {
-          setError("#track-error", data?.error || "Failed to correct kind");
-          return;
-        }
-        loadTracking();
-      });
-      fix.appendChild(sel);
-      fix.appendChild(btn);
-      li.appendChild(fix);
-    }
-    return li;
-  }
-
-  async function loadTracking() {
-    setError("#track-error", "");
-    pingCaptureExtension();
-    const vocab = await api("/api/tracking/labels/vocab");
-    if (vocab.res.ok && vocab.data?.kinds) {
-      trackingVocab = {
-        kinds: vocab.data.kinds,
-        topics: vocab.data.topics || [],
-        intents: vocab.data.intents || [],
-        states: vocab.data.states || [],
-      };
-    }
-    const summary = await api("/api/tracking/summary");
-    if (!summary.res.ok) {
-      setError("#track-error", summary.data?.error || "Failed to load tracking");
-      return;
-    }
-    const active = summary.data?.active_session;
-    const activeLabels = Array.isArray(active?.labels) && active.labels.length
-      ? ` · ${active.labels.join(", ")}`
-      : "";
-    $("#active-session").textContent = active
-      ? `${active.title} (${active.session_id})${activeLabels}`
-      : "None";
-    const scopeHint = $("#active-scope");
-    if (active && active.capture_scope) {
-      scopeHint.hidden = false;
-      scopeHint.textContent = `Scope: ${SCOPE_LABELS[active.capture_scope] || active.capture_scope}`;
-      const radio = document.querySelector(
-        `input[name="capture-scope"][value="${active.capture_scope}"]`
-      );
-      if (radio) radio.checked = true;
-    } else {
-      scopeHint.hidden = true;
-      scopeHint.textContent = "";
-    }
-    const trackingOn = !!(active && active.status === "open");
-    $("#start-session-btn").disabled = trackingOn;
-    $("#end-session-btn").disabled = !trackingOn;
-    $("#capture-scope-fieldset").disabled = trackingOn;
-
-    const list = $("#summary-list");
-    list.innerHTML = "";
-    const s = summary.data?.summary || {};
-    Object.entries(s).forEach(([k, v]) => {
-      const li = document.createElement("li");
-      li.textContent = `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`;
-      list.appendChild(li);
-    });
-
-    const sessions = await api("/api/tracking/sessions?limit=30");
-    const tbody = $("#sessions-table tbody");
-    tbody.innerHTML = "";
-    (sessions.data?.sessions || []).forEach((row) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(row.title)}</td>
-        <td>${labelChipsHtml(row.labels)}</td>
-        <td>${escapeHtml(row.surface)}</td>
-        <td>${escapeHtml(row.status)}</td>
-        <td>${escapeHtml(fmtTime(row.started_at))}</td>`;
-      tbody.appendChild(tr);
-    });
-
-    const events = await api("/api/tracking/events?limit=40");
-    const el = $("#events-list");
-    el.innerHTML = "";
-    (events.data?.events || []).forEach((ev) => {
-      el.appendChild(renderEventRow(ev));
-    });
-  }
-
-  $("#start-session-btn").addEventListener("click", async () => {
-    const title = ($("#session-title").value || "").trim() || "Research session";
-    const capture_scope = selectedCaptureScope();
-    const { res, data } = await api("/api/tracking/session/start", {
-      method: "POST",
-      body: JSON.stringify({ title, capture_scope }),
-    });
-    if (!res.ok) {
-      setError("#track-error", data?.error || "Failed to start session");
-      return;
-    }
-    const session = data?.session || {};
-    const session_id = session.session_id || null;
-    if (BROWSER_SCOPES.has(capture_scope)) {
-      // Bridge opens the tab picker; websites cannot open the Chrome toolbar popup.
-      postToCapture("session_started", { capture_scope, session_id });
-      if (!captureExt.connected) {
-        pingCaptureExtension();
-        setError(
-          "#track-error",
-          "Tracking started, but Capture is not connected — tab visits will not be recorded until you install/reload the extension."
-        );
-      }
-    }
-    loadTracking();
-  });
-  const openCaptureBtn = $("#open-capture-btn");
-  if (openCaptureBtn) {
-    openCaptureBtn.addEventListener("click", () => {
-      const activeText = $("#active-session")?.textContent || "";
-      const match = activeText.match(/\(sess_[^)]+\)/);
-      const session_id = match ? match[0].slice(1, -1) : null;
-      openCapturePicker({
-        capture_scope: selectedCaptureScope(),
-        session_id,
-      });
-    });
-  }
-  $("#end-session-btn").addEventListener("click", async () => {
-    await api("/api/tracking/session/end", {
-      method: "POST",
-      body: JSON.stringify({ tags: ["neutral"] }),
-    });
-    loadTracking();
-  });
-  $("#add-note-btn").addEventListener("click", async () => {
-    const text = $("#session-note").value.trim();
-    if (!text) return;
-    await api("/api/tracking/session/note", {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-    $("#session-note").value = "";
-    loadTracking();
-  });
-  const classifyBtn = $("#classify-pending-btn");
-  if (classifyBtn) {
-    classifyBtn.addEventListener("click", async () => {
-      setError("#track-error", "");
-      const { res, data } = await api("/api/tracking/classify-pending", {
-        method: "POST",
-        body: JSON.stringify({ limit: 20 }),
-      });
-      if (!res.ok) {
-        setError("#track-error", data?.error || "Classify failed");
-        return;
-      }
-      loadTracking();
-    });
-  }
-
   // --- Account settings ------------------------------------------------------
 
   function settingsMessage(selector, message) {
@@ -2976,11 +2541,18 @@
     if ((localStorage.getItem(THEME_KEY) || "system") === "system") applyTheme("system");
   });
 
-  $("#privacy-tracking-btn")?.addEventListener("click", () => switchTab("tracking"));
-
   // --- Settings → Models -----------------------------------------------------
 
   const FRONTIER_PRESETS = {
+    openrouter: {
+      hint: "One key for many models. Paste your OpenRouter key (sk-or-…). Billing is on your OpenRouter account.",
+      model: "anthropic/claude-sonnet-4",
+      models: [
+        "anthropic/claude-sonnet-4",
+        "openai/gpt-4o",
+        "google/gemini-2.5-flash",
+      ],
+    },
     anthropic: {
       hint: "Paste your Anthropic API key (sk-ant-…). Billing is on your Anthropic account.",
       model: "claude-sonnet-5",
@@ -3003,8 +2575,8 @@
   };
 
   function applyFrontierPreset() {
-    const id = $("#frontier-provider")?.value || "anthropic";
-    const preset = FRONTIER_PRESETS[id] || FRONTIER_PRESETS.anthropic;
+    const id = $("#frontier-provider")?.value || "openrouter";
+    const preset = FRONTIER_PRESETS[id] || FRONTIER_PRESETS.openrouter;
     const hint = $("#frontier-hint");
     if (hint) hint.textContent = preset.hint;
     const modelInput = $("#frontier-model");

@@ -81,8 +81,6 @@
       <nav class="rail-nav" aria-label="Primary">
         <button type="button" class="nav-btn active" data-tab="chats">Teams</button>
         <button type="button" class="nav-btn" data-tab="agents">Hire</button>
-        <button type="button" class="nav-btn" data-tab="review">Review</button>
-        <button type="button" class="nav-btn" data-tab="tracking">Tracking</button>
         <button type="button" class="nav-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="rail-foot">
@@ -428,107 +426,6 @@
       </section>
 
 
-      <!-- REVIEW -->
-      <section id="tab-review" class="tab-panel hidden">
-        <header class="page-header">
-          <div>
-            <p class="eyebrow">Proposals</p>
-            <h1>Review</h1>
-          </div>
-          <div class="header-actions">
-            <label class="inline-note">Days
-              <select id="review-days">
-                <option value="7">7</option>
-                <option value="14" selected>14</option>
-                <option value="21">21</option>
-              </select>
-            </label>
-            <button type="button" id="run-review-btn">Run review</button>
-            <button type="button" id="refresh-review-btn" class="ghost">Refresh</button>
-          </div>
-        </header>
-        <p class="sub muted">Mines sessions and chat gaps into draft capabilities (open Hire → Capabilities). Approve &amp; enable, then add them to an agent or a team’s Harness allowlist. In a team, <code>/automate</code> opens Harness.</p>
-        <h2 class="section-title">Open proposals</h2>
-        <div class="table-wrap">
-          <table class="data-table" id="review-proposals-table">
-            <thead>
-              <tr>
-                <th>Capability</th>
-                <th>Source</th>
-                <th>Runner</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <p id="review-empty" class="empty muted">No open proposals. Run a review after some chat or tracking activity.</p>
-        <h2 class="section-title">Latest memo</h2>
-        <pre id="review-memo" class="review-memo muted">(no reviews yet)</pre>
-        <p id="review-status" class="muted"></p>
-        <p id="review-error" class="error" hidden></p>
-      </section>
-
-      <!-- TRACKING -->
-      <section id="tab-tracking" class="tab-panel hidden">
-        <header class="page-header">
-          <div>
-            <p class="eyebrow">Data</p>
-            <h1>Tracking</h1>
-          </div>
-          <div class="header-actions">
-            <button type="button" id="classify-pending-btn" class="ghost tiny">Classify pending</button>
-          </div>
-        </header>
-        <div class="cards">
-          <div class="card">
-            <h3>Active session</h3>
-            <p id="active-session" class="muted">None</p>
-            <p id="active-scope" class="muted tiny-hint" hidden></p>
-            <p id="capture-status" class="capture-status muted tiny-hint" data-state="unknown">
-              Checking Capture extension…
-            </p>
-            <fieldset id="capture-scope-fieldset" class="scope-fieldset">
-              <legend>Capture scope</legend>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="active_tab" checked /> Active tab</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="all_tabs" /> All open tabs</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="selected_tabs" /> Selected tabs</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="research_sites" /> Research sites only</label>
-              <label class="scope-option"><input type="radio" name="capture-scope" value="notes_only" /> Notes only</label>
-            </fieldset>
-            <label class="inline-note">Title
-              <input id="session-title" type="text" placeholder="Research session" value="Research session" />
-            </label>
-            <div class="card-actions">
-              <button type="button" id="start-session-btn">Start tracking</button>
-              <button type="button" id="open-capture-btn" class="ghost">Select tabs</button>
-              <button type="button" id="end-session-btn" class="ghost">End</button>
-            </div>
-            <label class="inline-note">Note
-              <input id="session-note" type="text" placeholder="Optional note…" />
-            </label>
-            <button type="button" id="add-note-btn" class="ghost tiny">Add note</button>
-            <p id="capture-hint" class="muted tiny-hint">Browser tab capture needs the Capture extension. Notes and chat still work without it.</p>
-          </div>
-          <div class="card">
-            <h3>Summary</h3>
-            <ul id="summary-list" class="summary-list"></ul>
-          </div>
-        </div>
-        <h2 class="section-title">Recent sessions</h2>
-        <div class="table-wrap">
-          <table class="data-table" id="sessions-table">
-            <thead>
-              <tr><th>Title</th><th>Labels</th><th>Surface</th><th>Status</th><th>Started</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <h2 class="section-title">Recent events</h2>
-        <ul id="events-list" class="events-list"></ul>
-        <p id="track-error" class="error" hidden></p>
-      </section>
-
       <!-- SETTINGS → Models -->
       <section id="tab-settings" class="tab-panel hidden">
         <header class="page-header">
@@ -672,6 +569,7 @@
                   <h3>Add frontier model</h3>
                   <label>Provider
                     <select id="frontier-provider">
+                      <option value="openrouter">OpenRouter</option>
                       <option value="anthropic">Claude (Anthropic)</option>
                       <option value="openai">GPT (OpenAI)</option>
                     </select>
@@ -681,7 +579,7 @@
                     <input id="frontier-api-key" type="password" placeholder="sk-…" autocomplete="off" />
                   </label>
                   <label>Model
-                    <input id="frontier-model" type="text" list="frontier-model-suggestions" value="claude-sonnet-4-20250514" />
+                    <input id="frontier-model" type="text" list="frontier-model-suggestions" value="anthropic/claude-sonnet-4" />
                     <datalist id="frontier-model-suggestions"></datalist>
                   </label>
                   <div class="card-actions">
@@ -738,7 +636,6 @@
                 <strong>Your Flyleaf data</strong>
                 <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team harness runs use the <strong>team owner’s</strong> ledger and model links; invited friends contribute in chat.</p>
                 <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
-                <button type="button" id="privacy-tracking-btn" class="ghost">Review tracking data</button>
               </div>
             </section>
 
