@@ -606,6 +606,15 @@
     return state.rooms.find((r) => r.room_id === state.roomId) || null;
   }
 
+  /** Owner, or orphan room with no owner recorded (API will claim on manage). */
+  function canManageRoom(room) {
+    const me = state.me?.user_id;
+    if (!me || !room) return false;
+    const owner = room.owner_user_id;
+    if (!owner) return true;
+    return owner === me;
+  }
+
   function updateSpecialistActions(room) {
     // Present / Debate / Ideas trimmed — Orchestrator handles multi-agent from chat.
     // Keep stop/banner wiring for Orchestrator + Workflow harness runs.
@@ -661,7 +670,7 @@
       chip.appendChild(
         document.createTextNode(`${agent?.name || agentId}${mention}`)
       );
-      if (room?.owner_user_id === state.me?.user_id) {
+      if (canManageRoom(room)) {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.setAttribute("aria-label", `Remove ${agent?.name || agentId}`);
@@ -757,7 +766,7 @@
     if (current && select.value !== current) {
       select.value = "";
     }
-    select.disabled = room?.owner_user_id && room.owner_user_id !== state.me?.user_id;
+    select.disabled = !canManageRoom(room);
   }
 
   function setSpecialistRunUi(job) {
@@ -885,7 +894,7 @@
     $("#stage-kind").textContent = "Team";
     $("#stage-title").textContent = title || room.title || "Team";
     show($("#clear-chat"));
-    if (room?.owner_user_id && room.owner_user_id === state.me?.user_id) {
+    if (canManageRoom(room)) {
       show($("#delete-room"));
     } else {
       hide($("#delete-room"));
@@ -1348,7 +1357,7 @@
     const room = currentRoom();
     const roomId = state.roomId;
     if (!roomId || roomId === "legacy") return;
-    if (room?.owner_user_id && room.owner_user_id !== state.me?.user_id) {
+    if (!canManageRoom(room)) {
       setError("#chat-error", "Only the room owner can delete this room");
       return;
     }
@@ -3144,7 +3153,7 @@
       await api(`/api/settings/models/${profileId}/enable`, { method: "POST" });
       if (state.kind === "people" && state.roomId) {
         const room = currentRoom();
-        if (room?.owner_user_id === state.me?.user_id) {
+        if (canManageRoom(room)) {
           await api(`/api/rooms/${encodeURIComponent(state.roomId)}/model`, {
             method: "POST",
             body: JSON.stringify({ profile_id: profileId }),

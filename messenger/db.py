@@ -718,6 +718,41 @@ class MessageStore:
                 conn.close()
         return self.room(room_id) if cur.rowcount else None
 
+    def set_room_owner(self, room_id: str, user_id: str) -> dict[str, Any] | None:
+        """Assign ownership to an orphan room (no-op if already owned by someone else)."""
+        uid = str(user_id or "").strip()
+        if not uid or room_id == "legacy":
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT owner_user_id FROM rooms WHERE room_id = ?",
+                    (room_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                existing = str(row["owner_user_id"] or "").strip()
+                if existing and existing != uid:
+                    return None
+                if existing != uid:
+                    conn.execute(
+                        "UPDATE rooms SET owner_user_id = ? WHERE room_id = ?",
+                        (uid, room_id),
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO room_members
+                            (room_id, user_id, joined_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (room_id, uid, _utc_now()),
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+        return self.room(room_id)
+
     def update_room_token(self, room_id: str, token_hash: str) -> bool:
         with self._lock:
             conn = self._connect()

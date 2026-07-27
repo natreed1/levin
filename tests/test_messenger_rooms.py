@@ -150,3 +150,25 @@ def test_owner_can_delete_room_non_owner_cannot(tmp_path: Path, monkeypatch):
     listed = client.get("/api/rooms/list", params={"key": "server-secret"})
     assert listed.status_code == 200
     assert all(r["room_id"] != room_id for r in listed.json()["rooms"])
+
+
+def test_member_can_delete_orphan_room(tmp_path: Path, monkeypatch):
+    """Rooms with no owner_user_id (pre-ownership / logged-out create) are claimable."""
+    client = _client(tmp_path, monkeypatch)
+    user = _signup_and_login(client, email="orphan@example.com", name="OrphanOwner")
+    user_id = user["user_id"]
+
+    store = MessageStore(db_path=tmp_path / "messages.sqlite3")
+    room_id = "orphan-room"
+    store.create_room(
+        room_id,
+        "Orphan team",
+        hashlib.sha256(b"orphan-invite").hexdigest(),
+        owner_user_id=None,
+    )
+    store.add_room_member(room_id, user_id)
+
+    deleted = client.delete(f"/api/rooms/{room_id}")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"ok": True, "room_id": room_id}
+    assert store.room(room_id) is None

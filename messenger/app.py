@@ -827,11 +827,18 @@ def create_app() -> FastAPI:
             return None, JSONResponse(
                 {"ok": False, "error": "not_found"}, status_code=404
             )
-        if room.get("owner_user_id") != user_id:
-            return None, JSONResponse(
-                {"ok": False, "error": "owner_required"}, status_code=403
-            )
-        return room, None
+        owner = str(room.get("owner_user_id") or "").strip()
+        if owner == user_id:
+            return room, None
+        # Orphan rooms (created before ownership, or while logged out): first
+        # member who manages them claims ownership so Delete / Harness work.
+        if not owner and store.user_in_room(room_id, user_id):
+            claimed = store.set_room_owner(room_id, user_id)
+            if claimed and str(claimed.get("owner_user_id") or "") == user_id:
+                return claimed, None
+        return None, JSONResponse(
+            {"ok": False, "error": "owner_required"}, status_code=403
+        )
 
     @app.post("/api/rooms/{room_id}/invite")
     def room_invite(
