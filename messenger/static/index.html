@@ -135,15 +135,11 @@
               </div>
               <div class="header-actions">
                 <button type="button" id="room-design-btn" class="ghost hidden" title="Objective, roles, loops, orchestrator">Harness</button>
-                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Let the team harness run (debate or workflow, per Harness mode)">
+                <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Run capability loops when Harness mode is Workflow">
                   <input type="checkbox" id="autonomy-toggle" />
                   <span>Run harness</span>
                 </label>
                 <button type="button" id="invite-friend-btn" class="ghost hidden">Invite friend</button>
-                <button type="button" id="specialist-present-btn" class="ghost hidden">Present</button>
-                <button type="button" id="specialist-debate-btn" class="ghost hidden">Debate</button>
-                <button type="button" id="specialist-idea-btn" class="ghost hidden">Ideas</button>
-                <button type="button" id="specialist-stop-btn" class="ghost danger hidden">Stop</button>
                 <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
                 <button type="button" id="delete-room" class="ghost danger hidden">Delete</button>
               </div>
@@ -232,8 +228,8 @@
 
             <label>Orchestrator mode
               <select id="room-orchestrator">
-                <option value="chat">Chat — mentions only</option>
-                <option value="debate">Debate — agents converse (Present / Debate / Ideas)</option>
+                <option value="chat">Chat — message the team; Orchestrator handles complex asks</option>
+                <option value="debate">Debate — legacy multi-agent loop (prefer chat + Orchestrator)</option>
                 <option value="workflow">Workflow — run executable capability loops</option>
               </select>
             </label>
@@ -839,6 +835,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=48"></script>
+  <script src="/static/app.js?v=49"></script>
 </body>
 </html>

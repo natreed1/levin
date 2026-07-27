@@ -607,18 +607,27 @@
   }
 
   function updateSpecialistActions(room) {
-    const agentCount = roomAgents(room).length;
-    const hasAgents = agentCount > 0;
-    ["#specialist-present-btn", "#specialist-idea-btn"].forEach((sel) => {
-      const el = $(sel);
-      if (!el) return;
-      if (hasAgents) show(el);
-      else hide(el);
-    });
-    if (agentCount > 1) show($("#specialist-debate-btn"));
-    else hide($("#specialist-debate-btn"));
+    // Present / Debate / Ideas trimmed — Orchestrator handles multi-agent from chat.
+    // Keep stop/banner wiring for Orchestrator + Workflow harness runs.
+    const hasAgents = roomAgents(room).length > 0;
     if (!hasAgents) {
       setSpecialistRunUi(null);
+    }
+  }
+
+  function syncAutonomyToggle(room) {
+    const wrap = $("#autonomy-toggle-wrap");
+    const toggle = $("#autonomy-toggle");
+    if (!wrap || !toggle) return;
+    const orch = String(room?.config?.orchestrator || "chat").toLowerCase();
+    const enabled = !!(room?.config?.autonomy?.enabled);
+    // Only show for Workflow mode — Debate/Present UI was removed.
+    if (orch === "workflow") {
+      show(wrap);
+      toggle.checked = enabled;
+    } else {
+      hide(wrap);
+      toggle.checked = false;
     }
   }
 
@@ -757,7 +766,7 @@
     const text = $("#specialist-run-text");
     if (!job || job.status !== "running") {
       hide(banner);
-      hide(stopBtn);
+      if (stopBtn) hide(stopBtn);
       state.specialistJob = null;
       if (state.specialistPoll) {
         clearInterval(state.specialistPoll);
@@ -770,11 +779,13 @@
       ? `loop ${job.round_num || "…"}`
       : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
     const topicBit = job.topic ? ` “${job.topic}”` : "";
-    text.textContent = job.continuous
-      ? `Looping${topicBit || " harness"} (${loopBit}) — safe to leave; turns keep posting.`
-      : `Running ${job.action || "harness"}${topicBit} (${loopBit}) — safe to leave this team.`;
+    if (text) {
+      text.textContent = job.continuous
+        ? `Looping${topicBit || " harness"} (${loopBit}) — safe to leave; turns keep posting.`
+        : `Running ${job.action || "harness"}${topicBit} (${loopBit}) — safe to leave this team.`;
+    }
     show(banner);
-    show(stopBtn);
+    if (stopBtn) show(stopBtn);
     if (!state.specialistPoll && state.roomId) {
       state.specialistPoll = setInterval(() => {
         if (state.roomId) refreshSpecialistStatus(state.roomId);
@@ -882,7 +893,6 @@
     if (state.me?.authenticated) {
       show($("#invite-friend-btn"));
       show($("#room-design-btn"));
-      show($("#autonomy-toggle-wrap"));
       syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
@@ -1437,64 +1447,9 @@
     if (data?.job) setSpecialistRunUi(data.job);
   }
 
-  $("#specialist-present-btn").addEventListener("click", () => {
-    runSpecialistAction("present", "");
-  });
-  $("#specialist-debate-btn").addEventListener("click", () => {
-    state.debateAction = "debate";
-    $("#debate-dialog-title").textContent = "Agent debate";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    show($("#debate-rounds-wrap"));
-    show($("#debate-loop-wrap"));
-    show($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    $("#debate-rounds").disabled = false;
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#specialist-idea-btn").addEventListener("click", () => {
-    state.debateAction = "idea";
-    $("#debate-dialog-title").textContent = "Idea pass";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    hide($("#debate-rounds-wrap"));
-    hide($("#debate-loop-wrap"));
-    hide($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#debate-continuous").addEventListener("change", () => {
-    const on = $("#debate-continuous").checked;
-    $("#debate-rounds").disabled = on;
-    if (on) {
-      hide($("#debate-rounds-hint"));
-      show($("#debate-loop-hint"));
-    } else {
-      show($("#debate-rounds-hint"));
-      hide($("#debate-loop-hint"));
-    }
-  });
-  $("#debate-cancel").addEventListener("click", () => {
-    $("#debate-dialog").close();
-  });
-  $("#debate-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const topic = $("#debate-topic").value.trim();
-    if (!topic) {
-      setError("#debate-error", "Topic required");
-      return;
-    }
-    const action = state.debateAction || "debate";
-    const continuous =
-      action === "debate" && $("#debate-continuous").checked;
-    const rounds = action === "debate" ? ($("#debate-rounds").value || "2") : "1";
-    $("#debate-dialog").close();
-    await runSpecialistAction(action, topic, rounds, continuous);
-  });
-  $("#specialist-stop-btn").addEventListener("click", () => stopSpecialistRun());
-  $("#specialist-stop-banner-btn").addEventListener("click", () => stopSpecialistRun());
+  // Present / Debate / Ideas header buttons removed — use chat + Orchestrator.
+
+  $("#specialist-stop-banner-btn")?.addEventListener("click", () => stopSpecialistRun());
 
   function openShareDialog(shareUrl, roomId) {
     state.shareUrl = shareUrl || null;
@@ -1580,12 +1535,6 @@
   });
 
 
-  function syncAutonomyToggle(room) {
-    const box = $("#autonomy-toggle");
-    if (!box) return;
-    const enabled = !!(room?.config?.autonomy?.enabled);
-    box.checked = enabled;
-  }
 
   function updateHarnessFlowStrip(room) {
     const strip = $("#harness-flow-strip");
