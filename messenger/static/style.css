@@ -1517,13 +1517,23 @@ dialog:has(.friends-dialog-form)[open] {
 }
 .room-access-role {
   font: inherit;
-  font-size: 0.8rem;
-  padding: var(--space-1) var(--space-2);
-  border-radius: 6px;
-  border: 1px solid var(--border, #ccc);
-  background: var(--surface, #fff);
-  color: inherit;
+  font-size: 0.74rem;
+  font-weight: 500;
+  width: auto;
+  height: 1.75rem;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
   max-width: 7.5rem;
+  line-height: 1;
+  box-sizing: border-box;
+}
+.room-access-role:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .room-access-role:disabled {
   opacity: 0.75;
@@ -1531,7 +1541,7 @@ dialog:has(.friends-dialog-form)[open] {
 }
 .room-access-role-label {
   font-size: 0.8rem;
-  color: var(--muted, #666);
+  color: var(--muted);
 }
 .friend-row-actions .room-access-role {
   margin-right: var(--space-1);
