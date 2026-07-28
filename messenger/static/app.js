@@ -857,23 +857,9 @@
   function syncAutonomyToggle(room) {
     const wrap = $("#autonomy-toggle-wrap");
     const toggle = $("#autonomy-toggle");
-    const runBtn = $("#room-run-graph-btn");
     if (!wrap || !toggle) return;
     const orch = String(room?.config?.orchestrator || "chat").toLowerCase();
     const enabled = !!(room?.config?.autonomy?.enabled);
-    const graph = normalizeGraph(room?.config?.graph);
-    const hasGraph = (graph.layers || []).length > 0;
-    // One-shot Run Graph when the team has saved steps (editors+)
-    if (runBtn) {
-      if (
-        hasGraph &&
-        state.me?.authenticated &&
-        state.kind === "people" &&
-        canEditRoom(room)
-      ) {
-        show(runBtn);
-      } else hide(runBtn);
-    }
     // Keep-running loop only for Workflow mode (editors+)
     if (orch === "workflow" && canEditRoom(room)) {
       show(wrap);
@@ -1161,7 +1147,6 @@
       hide($("#invite-friend-btn"));
       hide($("#room-design-btn"));
       hide($("#room-settings-btn"));
-      hide($("#room-run-graph-btn"));
       hide($("#autonomy-toggle-wrap"));
       hide($("#room-overflow"));
     }
@@ -1213,7 +1198,6 @@
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
     hide($("#room-settings-btn"));
-    hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
     hide($("#room-overflow"));
     closeShareDialog();
@@ -1738,7 +1722,6 @@
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
     hide($("#room-settings-btn"));
-    hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
     hide($("#room-overflow"));
     updateSpecialistActions(null);
@@ -1927,7 +1910,7 @@
     const hint = $("#friends-dialog-hint");
     if (hint) {
       hint.textContent = hasRoom
-        ? "Editors can change the graph, agents, and room settings. Viewers can chat. Only you (owner) can add people or change access."
+        ? "Invite friends as Editor or Viewer. They’ll get a notification to accept before the team appears in their list."
         : "Search usernames to send friend requests.";
     }
     const accessSection = $("#room-access-section");
@@ -2082,7 +2065,37 @@
       li.appendChild(actions);
       list.appendChild(li);
     });
-    if (empty) empty.classList.toggle("hidden", members.length > 0);
+    const pending = data.pending_invites || [];
+    pending.forEach((invite) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const name = invite.display_name || invite.username || "User";
+      if (typeof avatarFallback === "function") {
+        li.appendChild(avatarFallback(name));
+      }
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      strong.title = name;
+      meta.appendChild(strong);
+      if (invite.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${invite.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      const tag = document.createElement("span");
+      tag.className = "room-access-role-label";
+      tag.textContent = `Invited · ${roomRoleLabel(invite.role)}`;
+      actions.appendChild(tag);
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+    if (empty) empty.classList.toggle("hidden", members.length + pending.length > 0);
   }
 
   async function openFriendsFromProfile() {
@@ -2203,7 +2216,7 @@
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "ghost tiny";
-        btn.textContent = "Share";
+        btn.textContent = "Invite";
         btn.addEventListener("click", async () => {
           setError("#friends-dialog-error", "");
           const role = roleSelect.value === "viewer" ? "viewer" : "editor";
@@ -2217,14 +2230,15 @@
           if (!result.res.ok) {
             setError(
               "#friends-dialog-error",
-              result.data?.message || result.data?.error || "Could not add to team"
+              result.data?.message || result.data?.error || "Could not send invite"
             );
             return;
           }
           settingsMessage(
             "#friends-dialog-message",
-            result.data.message || "Added to team."
+            result.data.message || "Invite sent — waiting for them to accept."
           );
+          showAppToast("Invite sent");
           await refreshRoomAccessList();
         });
         actions.appendChild(btn);
@@ -2335,7 +2349,12 @@
     if (note.type === "friend_accepted") return `${who} accepted your friend request.`;
     if (note.type === "room_invite") {
       const title = p.room_title || "a team";
-      return `${who} added you to ${title}.`;
+      const role = p.role === "viewer" ? "Viewer" : "Editor";
+      return `${who} invited you to join ${title} as ${role}.`;
+    }
+    if (note.type === "room_invite_accepted") {
+      const title = p.room_title || "your team";
+      return `${who} joined ${title}.`;
     }
     return `${who} · ${note.type}`;
   }
@@ -2430,10 +2449,60 @@
               `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
               { method: "POST", body: "{}" }
             );
+            showAppToast("Friend request accepted");
             await loadNotificationsTab();
             await loadProfileFriends();
           });
           li.appendChild(accept);
+        }
+        if (note.type === "room_invite" && note.payload?.invite_id) {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            const result = await api(
+              `/api/rooms/invites/${encodeURIComponent(note.payload.invite_id)}/accept`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            if (!result.res.ok) {
+              showAppToast(
+                result.data?.message || result.data?.error || "Could not join team"
+              );
+              await loadNotificationsTab();
+              return;
+            }
+            showAppToast(result.data?.message || "Joined team");
+            await refreshChatRails();
+            const roomId = result.data?.room?.room_id || note.payload.room_id;
+            const title = result.data?.room?.title || note.payload.room_title;
+            if (roomId) {
+              switchTab("chats");
+              await selectPeople(roomId, title || "Team");
+            }
+            await loadNotificationsTab();
+          });
+          const decline = document.createElement("button");
+          decline.type = "button";
+          decline.className = "ghost tiny";
+          decline.textContent = "Decline";
+          decline.addEventListener("click", async () => {
+            await api(
+              `/api/rooms/invites/${encodeURIComponent(note.payload.invite_id)}/reject`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            await loadNotificationsTab();
+          });
+          li.appendChild(accept);
+          li.appendChild(decline);
         }
         list.appendChild(li);
       });
@@ -3349,7 +3418,6 @@
 
   $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
   $("#room-settings-btn")?.addEventListener("click", () => openRoomSettings());
-  $("#room-run-graph-btn")?.addEventListener("click", () => runRoomGraph({ fromDialog: false }));
   $("#room-design-cancel")?.addEventListener("click", () => {
     state.graphFocusLayerId = null;
     $("#room-design-dialog")?.close();
@@ -3392,7 +3460,7 @@
     });
     const graph = normalizeGraph(state.graphDraft);
     let orch = $("#room-orchestrator")?.value || "chat";
-    // Graph steps imply workflow mode so Run Graph / Keep running stay available
+    // Graph steps imply workflow mode so Keep running stays available
     if ((graph.layers || []).length && orch === "chat") {
       orch = "workflow";
       if ($("#room-orchestrator")) $("#room-orchestrator").value = "workflow";
@@ -3426,7 +3494,7 @@
     if (toast) {
       showFlowToast(
         (graph.layers || []).length
-          ? "Graph saved — run with /graph <topic> or the Run Graph button."
+          ? "Graph saved — run with /graph <topic> or open Graph → Run Graph."
           : "Graph saved."
       );
     }

@@ -139,11 +139,32 @@ def test_search_users_and_add_friend_to_room(tmp_path: Path, monkeypatch):
         "/api/auth/login", json={"email": "owner@example.com", "password": "password12"}
     ).status_code == 200
     pal_id = client.get("/api/friends").json()["friends"][0]["user_id"]
-    added = client.post(
+    invited = client.post(
         f"/api/rooms/{room_id}/members", json={"user_id": pal_id}
     )
-    assert added.status_code == 200, added.text
-    assert added.json()["member"]["role"] == "editor"
+    assert invited.status_code == 200, invited.text
+    body = invited.json()
+    assert body.get("pending") is True
+    invite_id = body["invite"]["invite_id"]
+    members = client.get(f"/api/rooms/{room_id}/members").json()
+    assert not any(m["username"] == "pal_friend" for m in members["members"])
+    assert any(i["invite_id"] == invite_id for i in members["pending_invites"])
+
+    client2 = _client(tmp_path, monkeypatch)
+    assert client2.post(
+        "/api/auth/login", json={"email": "pal@example.com", "password": "password12"}
+    ).status_code == 200
+    notes = client2.get("/api/notifications").json()["notifications"]
+    assert any(
+        n["type"] == "room_invite" and n["payload"].get("invite_id") == invite_id
+        for n in notes
+    )
+    mine_before = client2.get("/api/rooms/mine").json()["rooms"]
+    assert not any(r["room_id"] == room_id for r in mine_before)
+    accepted = client2.post(f"/api/rooms/invites/{invite_id}/accept")
+    assert accepted.status_code == 200, accepted.text
+    mine_after = client2.get("/api/rooms/mine").json()["rooms"]
+    assert any(r["room_id"] == room_id for r in mine_after)
     members = client.get(f"/api/rooms/{room_id}/members").json()["members"]
     pal = next(m for m in members if m["username"] == "pal_friend")
     assert pal["role"] == "editor"
@@ -183,19 +204,29 @@ def test_room_member_roles_docs_style_access(tmp_path: Path, monkeypatch):
     ed_id = friends["ed_itor"]
     vi_id = friends["vi_ewer"]
 
+    ed_invite = client.post(
+        f"/api/rooms/{room_id}/members",
+        json={"user_id": ed_id, "role": "editor"},
+    ).json()["invite"]["invite_id"]
+    vi_invite = client.post(
+        f"/api/rooms/{room_id}/members",
+        json={"user_id": vi_id, "role": "viewer"},
+    ).json()["invite"]["invite_id"]
+
+    client_ed = _client(tmp_path, monkeypatch)
+    assert client_ed.post(
+        "/api/auth/login", json={"email": "ed@example.com", "password": "password12"}
+    ).status_code == 200
     assert (
-        client.post(
-            f"/api/rooms/{room_id}/members",
-            json={"user_id": ed_id, "role": "editor"},
-        ).status_code
-        == 200
+        client_ed.post(f"/api/rooms/invites/{ed_invite}/accept").status_code == 200
     )
+
+    client_vi = _client(tmp_path, monkeypatch)
+    assert client_vi.post(
+        "/api/auth/login", json={"email": "view@example.com", "password": "password12"}
+    ).status_code == 200
     assert (
-        client.post(
-            f"/api/rooms/{room_id}/members",
-            json={"user_id": vi_id, "role": "viewer"},
-        ).status_code
-        == 200
+        client_vi.post(f"/api/rooms/invites/{vi_invite}/accept").status_code == 200
     )
 
     # Editor can patch graph config

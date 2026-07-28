@@ -305,6 +305,7 @@ def room_members(
         {
             "ok": True,
             "members": store.list_room_members(room_id),
+            "pending_invites": store.list_pending_room_invites_for_room(room_id),
             "owner_user_id": room.get("owner_user_id"),
             "my_role": store.room_member_role(room_id, user["user_id"]),
         }
@@ -312,12 +313,13 @@ def room_members(
 
 
 @router.post("/api/rooms/{room_id}/members")
-async def add_room_member(
+async def invite_room_member(
     room_id: str,
     request: Request,
     store: MessageStore = Depends(get_store),
     user: dict[str, Any] = Depends(current_user),
 ) -> JSONResponse:
+    """Owner invites a friend — they must accept before joining the team."""
     from messenger.db import normalize_room_role
 
     room = store.room(room_id)
@@ -331,7 +333,7 @@ async def add_room_member(
             {
                 "ok": False,
                 "error": "owner_required",
-                "message": "Only the team owner can add people to this team.",
+                "message": "Only the team owner can invite people to this team.",
             },
             status_code=403,
         )
@@ -347,7 +349,7 @@ async def add_room_member(
             friend_id = str((found or {}).get("user_id") or "")
     if not friend_id:
         return JSONResponse(
-            {"ok": False, "error": "bad_target", "message": "Pick a friend to add."},
+            {"ok": False, "error": "bad_target", "message": "Pick a friend to invite."},
             status_code=400,
         )
     if not store.are_friends(user["user_id"], friend_id):
@@ -355,7 +357,7 @@ async def add_room_member(
             {
                 "ok": False,
                 "error": "not_friends",
-                "message": "You can only add people you’re friends with.",
+                "message": "You can only invite people you’re friends with.",
             },
             status_code=403,
         )
@@ -367,33 +369,135 @@ async def add_room_member(
     role = normalize_room_role(body.get("role"), default="editor")
     if role == "owner":
         role = "editor"
-    stored_role = store.add_room_member(room_id, friend_id, role=role)
-    # If already a member, still allow role update when owner re-adds with a role.
-    if stored_role not in {"owner"} and "role" in body:
-        updated = store.set_room_member_role(room_id, friend_id, role)
-        if updated:
-            stored_role = updated
+    try:
+        invite = store.create_room_invite(
+            room_id,
+            inviter_id=user["user_id"],
+            invitee_id=friend_id,
+            role=role,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        messages = {
+            "already_member": "They’re already on this team.",
+            "self_invite": "You can’t invite yourself.",
+        }
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": code,
+                "message": messages.get(code, "Could not send invite."),
+            },
+            status_code=409 if code == "already_member" else 400,
+        )
     store.create_notification(
         friend_id,
         "room_invite",
         {
+            "invite_id": invite["invite_id"],
             "room_id": room_id,
             "room_title": room.get("title"),
-            "role": stored_role,
+            "role": invite.get("role") or role,
             "from_user_id": user["user_id"],
             "from_username": (store.user_by_id(user["user_id"]) or {}).get("username"),
             "from_display_name": user.get("display_name") or user.get("name"),
         },
     )
+    handle = friend.get("username") or friend["display_name"]
     return JSONResponse(
         {
             "ok": True,
-            "member": {**_public(friend), "role": stored_role},
+            "pending": True,
+            "invite": invite,
+            "member": {**_public(friend), "role": invite.get("role") or role},
             "message": (
-                f"Added @{friend.get('username') or friend['display_name']} "
-                f"as {stored_role}."
+                f"Invite sent to @{handle} as {invite.get('role') or role}. "
+                "They’ll see it in Notifications."
             ),
         }
+    )
+
+
+@router.post("/api/rooms/invites/{invite_id}/accept")
+def accept_room_invite(
+    invite_id: str,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        invite = store.respond_room_invite(
+            invite_id, user["user_id"], accept=True
+        )
+    except ValueError as exc:
+        code = str(exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": code,
+                "message": (
+                    "Invite not found or already handled."
+                    if code == "invite_not_found"
+                    else "You can’t accept this invite."
+                ),
+            },
+            status_code=404 if code == "invite_not_found" else 403,
+        )
+    room = store.room(str(invite["room_id"])) or {}
+    inviter_id = str(invite.get("inviter_id") or "")
+    if inviter_id:
+        store.create_notification(
+            inviter_id,
+            "room_invite_accepted",
+            {
+                "invite_id": invite["invite_id"],
+                "room_id": invite["room_id"],
+                "room_title": room.get("title"),
+                "from_user_id": user["user_id"],
+                "from_username": (store.user_by_id(user["user_id"]) or {}).get(
+                    "username"
+                ),
+                "from_display_name": user.get("display_name") or user.get("name"),
+            },
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "invite": invite,
+            "room": {
+                "room_id": invite["room_id"],
+                "title": room.get("title"),
+            },
+            "message": f"Joined {room.get('title') or 'the team'}.",
+        }
+    )
+
+
+@router.post("/api/rooms/invites/{invite_id}/reject")
+def reject_room_invite(
+    invite_id: str,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    try:
+        invite = store.respond_room_invite(
+            invite_id, user["user_id"], accept=False
+        )
+    except ValueError as exc:
+        code = str(exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": code,
+                "message": (
+                    "Invite not found or already handled."
+                    if code == "invite_not_found"
+                    else "You can’t decline this invite."
+                ),
+            },
+            status_code=404 if code == "invite_not_found" else 403,
+        )
+    return JSONResponse(
+        {"ok": True, "invite": invite, "message": "Invite declined."}
     )
 
 

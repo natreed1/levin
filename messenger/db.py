@@ -260,6 +260,29 @@ class MessageStore:
                     )
                 conn.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS room_invites (
+                        invite_id TEXT PRIMARY KEY,
+                        room_id TEXT NOT NULL,
+                        inviter_id TEXT NOT NULL,
+                        invitee_id TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'editor',
+                        status TEXT NOT NULL
+                            CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled')),
+                        created_at TEXT NOT NULL,
+                        responded_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_room_invites_invitee "
+                    "ON room_invites(invitee_id, status, created_at DESC)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_room_invites_room "
+                    "ON room_invites(room_id, status)"
+                )
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS sessions (
                         sid TEXT PRIMARY KEY,
                         user_id TEXT,
@@ -1385,6 +1408,225 @@ class MessageStore:
                 }
             )
         return members
+
+    # --- room invites ----------------------------------------------------------
+
+    def create_room_invite(
+        self,
+        room_id: str,
+        *,
+        inviter_id: str,
+        invitee_id: str,
+        role: str = "editor",
+    ) -> dict[str, Any]:
+        """Create or refresh a pending team invite. Raises ValueError on conflict."""
+        import secrets
+
+        if inviter_id == invitee_id:
+            raise ValueError("self_invite")
+        if self.user_in_room(room_id, invitee_id):
+            raise ValueError("already_member")
+        role_norm = normalize_room_role(role, default="editor")
+        if role_norm == "owner":
+            role_norm = "editor"
+        existing = self.pending_room_invite(room_id, invitee_id)
+        if existing:
+            # Refresh role on an open invite
+            with self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute(
+                        """
+                        UPDATE room_invites SET role = ?, created_at = ?
+                        WHERE invite_id = ? AND status = 'pending'
+                        """,
+                        (role_norm, _utc_now(), existing["invite_id"]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            existing["role"] = role_norm
+            return existing
+
+        invite_id = "ri" + secrets.token_hex(12)
+        created_at = _utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO room_invites
+                        (invite_id, room_id, inviter_id, invitee_id, role,
+                         status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (
+                        invite_id,
+                        room_id,
+                        inviter_id,
+                        invitee_id,
+                        role_norm,
+                        created_at,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "invite_id": invite_id,
+            "room_id": room_id,
+            "inviter_id": inviter_id,
+            "invitee_id": invitee_id,
+            "role": role_norm,
+            "status": "pending",
+            "created_at": created_at,
+            "responded_at": None,
+        }
+
+    def pending_room_invite(
+        self, room_id: str, invitee_id: str
+    ) -> Optional[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT invite_id, room_id, inviter_id, invitee_id, role,
+                           status, created_at, responded_at
+                    FROM room_invites
+                    WHERE room_id = ? AND invitee_id = ? AND status = 'pending'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (room_id, invitee_id),
+                ).fetchone()
+            finally:
+                conn.close()
+        return dict(row) if row else None
+
+    def room_invite(self, invite_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT invite_id, room_id, inviter_id, invitee_id, role,
+                           status, created_at, responded_at
+                    FROM room_invites
+                    WHERE invite_id = ?
+                    """,
+                    (invite_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return dict(row) if row else None
+
+    def list_pending_room_invites_for_room(
+        self, room_id: str
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT i.invite_id, i.room_id, i.inviter_id, i.invitee_id,
+                           i.role, i.status, i.created_at,
+                           u.username, u.display_name
+                    FROM room_invites i
+                    INNER JOIN users u ON u.user_id = i.invitee_id
+                    WHERE i.room_id = ? AND i.status = 'pending'
+                    ORDER BY i.created_at ASC
+                    """,
+                    (room_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "invite_id": r["invite_id"],
+                "room_id": r["room_id"],
+                "inviter_id": r["inviter_id"],
+                "invitee_id": r["invitee_id"],
+                "user_id": r["invitee_id"],
+                "role": normalize_room_role(r["role"], default="editor"),
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+            }
+            for r in rows
+        ]
+
+    def respond_room_invite(
+        self, invite_id: str, user_id: str, *, accept: bool
+    ) -> dict[str, Any]:
+        """Accept or decline a pending invite. Invitee only."""
+        invite = self.room_invite(invite_id)
+        if not invite or invite.get("status") != "pending":
+            raise ValueError("invite_not_found")
+        if str(invite.get("invitee_id") or "") != user_id:
+            raise ValueError("forbidden")
+        room_id = str(invite["room_id"])
+        role = normalize_room_role(invite.get("role"), default="editor")
+        now = _utc_now()
+        status = "accepted" if accept else "rejected"
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE room_invites
+                    SET status = ?, responded_at = ?
+                    WHERE invite_id = ? AND status = 'pending'
+                    """,
+                    (status, now, invite_id),
+                )
+                if cur.rowcount <= 0:
+                    raise ValueError("invite_not_found")
+                if accept:
+                    conn.execute(
+                        """
+                        INSERT INTO room_members
+                            (room_id, user_id, joined_at, role)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(room_id, user_id) DO UPDATE SET
+                            role = CASE
+                                WHEN room_members.role = 'owner' THEN 'owner'
+                                ELSE excluded.role
+                            END
+                        """,
+                        (room_id, user_id, now, role if role != "owner" else "editor"),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        invite["status"] = status
+        invite["responded_at"] = now
+        return invite
+
+    def cancel_room_invite(self, invite_id: str, *, by_user_id: str) -> bool:
+        invite = self.room_invite(invite_id)
+        if not invite or invite.get("status") != "pending":
+            return False
+        room = self.room(str(invite["room_id"]))
+        owner = str((room or {}).get("owner_user_id") or "").strip()
+        if by_user_id not in {owner, str(invite.get("inviter_id") or "")}:
+            return False
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE room_invites
+                    SET status = 'cancelled', responded_at = ?
+                    WHERE invite_id = ? AND status = 'pending'
+                    """,
+                    (_utc_now(), invite_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
 
     # --- notifications ---------------------------------------------------------
 
