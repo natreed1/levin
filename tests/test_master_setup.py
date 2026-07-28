@@ -92,10 +92,64 @@ def test_stub_plan_coding_room():
         "Create a coding room that reviews GitHub PRs then scans for exploits"
     )
     names = [t["name"] for t in plan["tools"]]
-    assert "create_room" in names
-    assert names.count("hire_agent") >= 2
-    create = next(t for t in plan["tools"] if t["name"] == "create_room")
-    assert any(n.get("kind") == "github_token" for n in create["args"]["needs"])
+    assert names == ["apply_recipe"]
+    assert plan["tools"][0]["args"]["recipe_id"] == "pr_security"
+
+
+def test_stub_plan_equity_research():
+    from messenger.graph_recipes import match_recipe
+    from messenger.master_setup import stub_plan_from_message
+
+    msg = "Create a research equities room for trade ideas"
+    assert match_recipe(msg)["id"] == "equity_research"
+    plan = stub_plan_from_message(msg)
+    assert plan["tools"][0]["name"] == "apply_recipe"
+    assert plan["tools"][0]["args"]["recipe_id"] == "equity_research"
+
+
+def test_apply_recipe_equity_writes_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "unit-test-secret")
+    monkeypatch.setenv("ANALYST_LEDGER_DATA", str(tmp_path / "ledger"))
+    from analyst_ledger.paths import use_data_dir
+    from messenger.db import MessageStore
+    from messenger.master_setup import execute_tool
+    from messenger.team_harness import normalize_graph
+
+    with use_data_dir(tmp_path / "ledger"):
+        store = MessageStore(db_path=tmp_path / "messages.sqlite3")
+        user_id = "u_recipe"
+        store.create_user(
+            user_id,
+            email="recipe@example.com",
+            password_hash="hash",
+            display_name="Recipe",
+        )
+        result = execute_tool(
+            "apply_recipe",
+            {
+                "recipe_id": "equity_research",
+                "query": "Create a research equities room",
+                "objective": "NVDA AI demand trade ideas",
+            },
+            store=store,
+            user_id=user_id,
+        )
+        assert result.get("ok"), result
+        room_id = result["room_id"]
+        room = store.room(room_id)
+        assert room
+        config = room.get("config") or {}
+        assert config.get("orchestrator") == "workflow"
+        graph = normalize_graph(config.get("graph"))
+        assert len(graph["layers"]) == 3
+        assert all(layer.get("members") for layer in graph["layers"])
+        agents = config.get("agents") or []
+        assert len(agents) >= 3
+        assert "Bullish" in result.get("message", "") or "equity" in (
+            result.get("recipe_name") or ""
+        ).casefold()
 
 
 def test_hire_agent_accepts_name_aliases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -155,6 +209,84 @@ def test_assign_agent_creates_display_name(tmp_path: Path, monkeypatch: pytest.M
     assert agent_id in agents
 
 
+def test_master_overrides_invented_room_id_on_assign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Models invent placeholder room_ids; runtime must use the create_room id."""
+    monkeypatch.setenv("MESSENGER_SESSION_SECRET", "unit-test-secret")
+    monkeypatch.setenv("ANALYST_LEDGER_DATA", str(tmp_path / "ledger"))
+    from analyst_ledger.ledger import Ledger
+    from analyst_ledger.paths import use_data_dir
+    from analyst_ledger.workflow_engine import MasterCoordinator
+    from messenger.db import MessageStore
+
+    store = MessageStore(db_path=tmp_path / "messages.sqlite3")
+    user_id = "u_master_override"
+    store.create_user(
+        user_id,
+        email="override@example.com",
+        password_hash="hash",
+        display_name="Override",
+    )
+    with use_data_dir(tmp_path / "ledger"):
+        ledger = Ledger()
+        coord = MasterCoordinator(ledger, store=store, user_id=user_id)
+
+        def fake_plan(message, **_kwargs):
+            return {
+                "reply": "Building equity research team.",
+                "tools": [
+                    {
+                        "name": "create_room",
+                        "args": {
+                            "title": "Equity Research & Trade Ideas",
+                            "objective": message[:200],
+                            "orchestrator": "workflow",
+                        },
+                    },
+                    {
+                        "name": "assign_agent",
+                        "args": {
+                            "room_id": "invented-placeholder-id",
+                            "agent_id": "Bullish Researcher",
+                            "role": "bullish",
+                        },
+                    },
+                    {
+                        "name": "assign_agent",
+                        "args": {
+                            "room_id": "Equity Research & Trade Ideas",
+                            "agent_id": "Contrarian Researcher",
+                            "role": "contrarian",
+                        },
+                    },
+                    {
+                        "name": "assign_agent",
+                        "args": {
+                            "room_id": "room_fake",
+                            "agent_id": "Trade Synthesizer",
+                            "role": "synthesizer",
+                        },
+                    },
+                ],
+                "run_workflows": [],
+            }
+
+        monkeypatch.setattr(coord, "_plan", fake_plan)
+        out = coord.run("Create an equity research room", stub=True)
+    tools = out.get("tools") or []
+    creates = [t for t in tools if t.get("tool") == "create_room"]
+    assigns = [t for t in tools if t.get("tool") == "assign_agent"]
+    assert creates and creates[0].get("ok"), creates
+    room_id = creates[0].get("room_id")
+    assert room_id
+    assert len(assigns) >= 3
+    assert all(a.get("ok") for a in assigns[:3]), assigns
+    room = store.room(room_id)
+    agents = (room.get("config") or {}).get("agents") or []
+    assert len(agents) >= 3, agents
+
+
 def test_master_chat_creates_coding_room_stub(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -187,10 +319,15 @@ def test_master_chat_creates_coding_room_stub(
     room_list = rooms.json()["rooms"]
     assert room_list, "Master should have created a team"
     coding = room_list[-1]
-    ws = (coding.get("config") or {}).get("workspace") or {}
+    coding_cfg = coding.get("config") or {}
+    ws = coding_cfg.get("workspace") or {}
     needs = ws.get("needs") or []
     assert any(n.get("kind") == "github_token" for n in needs)
-    assert "workspace_secrets" not in (coding.get("config") or {})
+    assert "workspace_secrets" not in coding_cfg
+    graph = coding_cfg.get("graph") or {}
+    layers = graph.get("layers") or []
+    assert len(layers) >= 2, "pr_security recipe should write Graph steps"
+    assert coding_cfg.get("orchestrator") == "workflow"
 
     agents = client.get("/api/registry/agents")
     assert agents.status_code == 200
@@ -205,7 +342,11 @@ def test_master_chat_creates_coding_room_stub(
         payload = m.get("payload") if isinstance(m.get("payload"), dict) else {}
         bodies.append(str(payload.get("content") or m.get("content") or ""))
     assert any(
-        "Room settings" in b or "Created team" in b or "Hiring" in b for b in bodies
+        "recipe" in b.casefold()
+        or "Graph" in b
+        or "Created team" in b
+        or "Diff" in b
+        for b in bodies
     ), bodies
 
 

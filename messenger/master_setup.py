@@ -39,6 +39,7 @@ ALLOWED_TOOLS = frozenset(
         "create_loop",
         "draft_capability",
         "list_catalog",
+        "apply_recipe",
     }
 )
 
@@ -358,12 +359,15 @@ def catalog_snapshot(*, store: Any = None, user_id: Optional[str] = None) -> Dic
                 )
         except Exception as exc:  # noqa: BLE001
             logger.info("catalog rooms failed: %s", exc)
+    from messenger.graph_recipes import list_recipes
+
     return {
         "agents": agents,
         "capabilities": caps,
         "lenses": lenses,
         "loops": loops,
         "rooms": rooms,
+        "recipes": list_recipes(),
         "need_kinds": sorted(KNOWN_NEED_KINDS),
         "tools": sorted(ALLOWED_TOOLS),
     }
@@ -398,6 +402,8 @@ def execute_tool(
             return _tool_create_loop(payload)
         if tool == "draft_capability":
             return _tool_draft_capability(payload)
+        if tool == "apply_recipe":
+            return _tool_apply_recipe(payload, store=store, user_id=user_id)
     except Exception as exc:  # noqa: BLE001
         logger.info("master tool %s failed: %s", tool, exc)
         return {"ok": False, "error": str(exc)[:400]}
@@ -652,6 +658,187 @@ def _tool_set_workspace(args: dict, *, store: Any, user_id: str) -> Dict[str, An
     }
 
 
+def _tool_apply_recipe(args: dict, *, store: Any, user_id: str) -> Dict[str, Any]:
+    """Match or load a recipe, hire agents, write Team Graph onto a room."""
+    from messenger.graph_recipes import (
+        build_graph_from_recipe,
+        get_recipe,
+        match_recipe,
+        summarize_graph,
+    )
+    from messenger.team_harness import normalize_graph
+
+    recipe_id = str(args.get("recipe_id") or args.get("recipe") or "").strip()
+    query = str(args.get("query") or args.get("message") or args.get("prompt") or "").strip()
+    recipe = get_recipe(recipe_id) if recipe_id else None
+    if recipe is None and query:
+        recipe = match_recipe(query)
+    if recipe is None and recipe_id:
+        return {"ok": False, "error": f"unknown_recipe:{recipe_id}"}
+    if recipe is None:
+        from messenger.graph_recipes import list_recipes
+
+        return {
+            "ok": False,
+            "error": "recipe_id_or_query_required",
+            "recipes": [r["id"] for r in list_recipes()],
+        }
+
+    edits = args.get("edits") if isinstance(args.get("edits"), dict) else {}
+    disable_steps = edits.get("disable_steps") if isinstance(edits.get("disable_steps"), list) else []
+    guard_overrides = (
+        edits.get("guard_overrides")
+        if isinstance(edits.get("guard_overrides"), dict)
+        else {}
+    )
+    agent_overrides = (
+        edits.get("agent_overrides")
+        if isinstance(edits.get("agent_overrides"), dict)
+        else {}
+    )
+
+    role_to_agent: Dict[str, str] = {}
+    hired: List[Dict[str, Any]] = []
+    for agent_spec in recipe.get("agents") or []:
+        if not isinstance(agent_spec, dict):
+            continue
+        role = str(agent_spec.get("role") or "").strip()
+        override_name = str(agent_overrides.get(role) or "").strip() if role else ""
+        hire_args = {
+            "name": override_name or agent_spec.get("name"),
+            "capability_ids": list(agent_spec.get("capability_ids") or []),
+            "lens_ids": list(agent_spec.get("lens_ids") or []),
+            "prompt": agent_spec.get("prompt") or "",
+            "summary": agent_spec.get("summary") or "",
+            "stage": agent_spec.get("stage") or "",
+        }
+        hired_result = _tool_hire_agent(hire_args)
+        if not hired_result.get("ok"):
+            return {
+                "ok": False,
+                "error": hired_result.get("error") or "hire_failed",
+                "role": role,
+                "recipe_id": recipe["id"],
+            }
+        agent_id = str(hired_result.get("agent_id") or "")
+        if role and agent_id:
+            role_to_agent[role] = agent_id
+        hired.append(
+            {
+                "role": role,
+                "agent_id": agent_id,
+                "name": hired_result.get("name"),
+                "reused": bool(hired_result.get("reused")),
+            }
+        )
+
+    graph = normalize_graph(
+        build_graph_from_recipe(
+            recipe,
+            role_to_agent=role_to_agent,
+            disable_steps=disable_steps,
+            guard_overrides=guard_overrides,
+        )
+    )
+    empty_steps = [l for l in graph.get("layers") or [] if not (l.get("members") or [])]
+    if not (graph.get("layers") or []):
+        return {"ok": False, "error": "recipe_produced_empty_graph", "recipe_id": recipe["id"]}
+
+    room_id = str(args.get("room_id") or "").strip()
+    title = str(args.get("title") or "").strip()[:80] or str(recipe.get("title") or recipe["name"])[:80]
+    objective = (
+        str(args.get("objective") or "").strip()[:800]
+        or str(recipe.get("objective") or "")[:800]
+    )
+    created_new = False
+    if room_id:
+        room = _owned_room(store, room_id, user_id)
+        if not room:
+            return {"ok": False, "error": "room_not_found_or_forbidden"}
+    else:
+        create_args: Dict[str, Any] = {
+            "title": title,
+            "objective": objective,
+            "orchestrator": "workflow",
+            "skills": list(recipe.get("skills") or []),
+            "agents": list(role_to_agent.values()),
+            "roles": {
+                aid: role for role, aid in role_to_agent.items() if aid and role
+            },
+        }
+        needs = recipe.get("workspace_needs")
+        if needs:
+            create_args["needs"] = needs
+            create_args["workspace_notes"] = recipe.get("workspace_notes") or ""
+        created = _tool_create_room(create_args, store=store, user_id=user_id)
+        if not created.get("ok"):
+            return created
+        room_id = str(created.get("room_id") or "")
+        created_new = True
+        room = _owned_room(store, room_id, user_id)
+        if not room:
+            return {"ok": False, "error": "room_create_inconsistent"}
+
+    config = dict(room.get("config") or {})
+    config["objective"] = objective or config.get("objective") or ""
+    config["orchestrator"] = "workflow"
+    if recipe.get("skills"):
+        config["skills"] = list(recipe.get("skills") or [])[:20]
+    agents = list(config.get("agents") or config.get("specialists") or [])
+    for aid in role_to_agent.values():
+        if aid and aid not in agents:
+            agents.append(aid)
+    config["agents"] = agents[:24]
+    config["specialists"] = list(config["agents"])
+    roles = dict(config.get("roles") or {})
+    for role, aid in role_to_agent.items():
+        if aid and role:
+            roles[aid] = role
+    config["roles"] = roles
+    config["graph"] = graph
+    if recipe.get("workspace_needs") and not (config.get("workspace") or {}).get("needs"):
+        config = apply_workspace_patch(
+            config,
+            notes=recipe.get("workspace_notes"),
+            needs=recipe.get("workspace_needs"),
+        )
+    store.update_room_config(room_id, config)
+
+    loop_result = None
+    loop_spec = recipe.get("create_loop")
+    if isinstance(loop_spec, dict) and loop_spec.get("name"):
+        loop_result = _tool_create_loop(
+            {
+                **loop_spec,
+                "room_id": room_id,
+                "transcript": f"From recipe {recipe['id']}",
+            }
+        )
+
+    map_summary = summarize_graph(graph)
+    warn = ""
+    if empty_steps:
+        warn = f" Warning: {len(empty_steps)} step(s) have no analysts."
+    action = "Created" if created_new else "Updated"
+    return {
+        "ok": True,
+        "recipe_id": recipe["id"],
+        "recipe_name": recipe.get("name"),
+        "room_id": room_id,
+        "title": title,
+        "created_room": created_new,
+        "agents": hired,
+        "graph": graph,
+        "graph_summary": map_summary,
+        "loop": loop_result,
+        "workspace": public_workspace(config),
+        "message": (
+            f"{action} team “{title}” with recipe “{recipe.get('name')}”: {map_summary}."
+            f"{warn} Open Graph to tweak steps/guards; fill Room settings for any secrets."
+        ),
+    }
+
+
 def _tool_create_loop(args: dict) -> Dict[str, Any]:
     from analyst_ledger.registry import create_automation_from_chat
 
@@ -695,137 +882,60 @@ def _tool_draft_capability(args: dict) -> Dict[str, Any]:
 
 def stub_plan_from_message(message: str) -> Dict[str, Any]:
     """Deterministic offline plan for tests / no-model fallback."""
+    from messenger.graph_recipes import match_recipe
+
     lower = (message or "").lower()
-    tools: List[Dict[str, Any]] = []
-    reply_bits = []
-
-    wants_coding = any(
-        w in lower
-        for w in ("github", "pull request", "pr review", "coding", "exploit", "security")
-    )
-    wants_finance = any(
-        w in lower for w in ("filings", "watchlist", "sec ", "finance", "ticker")
-    )
+    recipe = match_recipe(message)
     wants_room = any(
-        w in lower for w in ("room", "team", "create", "set up", "setup", "build")
+        w in lower for w in ("room", "team", "create", "set up", "setup", "build", "graph")
     )
-    wants_agent = "agent" in lower or "hire" in lower or wants_coding or wants_finance
 
-    title = "Coding review"
-    if wants_finance:
-        title = "Finance research"
-    elif "security" in lower or "exploit" in lower:
-        title = "Security review"
-
-    if wants_room or wants_coding or wants_finance:
-        create_args: Dict[str, Any] = {
-            "title": title,
-            "objective": message[:400],
-            "orchestrator": "workflow" if (wants_coding or wants_finance) else "chat",
-        }
-        if wants_coding:
-            create_args["skills"] = ["web_research", "note_digest"]
-            create_args["needs"] = [
-                {
-                    "id": "github_repo",
-                    "kind": "github_repo",
-                    "label": "GitHub repository URL",
-                    "hint": "e.g. https://github.com/org/repo",
-                },
-                {
-                    "id": "github_token",
-                    "kind": "github_token",
-                    "label": "GitHub token",
-                    "hint": "Repo read access for PR diffs",
-                },
-            ]
-            create_args["workspace_notes"] = (
-                "Fill repo URL + GitHub token in Room settings before review agents run."
-            )
-        if wants_finance:
-            create_args["skills"] = ["sec_filings_check", "note_digest", "web_research"]
-        tools.append({"name": "create_room", "args": create_args})
-        reply_bits.append(f"I'll create a “{title}” team and wire Graph settings.")
-
-    if wants_agent and wants_coding:
-        tools.append(
-            {
-                "name": "hire_agent",
-                "args": {
-                    "name": "Diff Reviewer",
-                    "capability_ids": ["web_research", "note_digest"],
-                    "prompt": (
-                        "You review pull request changes: list files, summarize risk, "
-                        "and call out missing tests. Never invent diff contents."
-                    ),
-                    "summary": "Lists and critiques GitHub PR changes",
-                    "stage": "critique",
-                },
-            }
-        )
-        tools.append(
-            {
-                "name": "hire_agent",
-                "args": {
-                    "name": "Security Critic",
-                    "capability_ids": ["web_research"],
-                    "prompt": (
-                        "You hunt for security issues in proposed changes: auth gaps, "
-                        "injection, secret leakage, unsafe defaults. Be concrete."
-                    ),
-                    "summary": "Security pass over diffs",
-                    "stage": "critique",
-                },
-            }
-        )
-        reply_bits.append("Hiring Diff Reviewer and Security Critic agents.")
-
-    if wants_agent and wants_finance and not wants_coding:
-        tools.append(
-            {
-                "name": "hire_agent",
-                "args": {
-                    "name": "Filings Scout",
-                    "capability_ids": ["sec_filings_check", "web_research"],
-                    "prompt": "Scout SEC filings and summarize material changes.",
-                    "summary": "SEC filings scout",
-                },
-            }
-        )
-
-    if wants_finance:
-        tools.append(
-            {
-                "name": "create_loop",
-                "args": {
-                    "name": "filings_morning",
-                    "capability_ids": ["sec_filings_check", "note_digest"],
-                    "schedule": "0 7 * * 1-5",
-                },
-            }
-        )
-        reply_bits.append("Drafting a filings → digest loop (needs approval).")
-
-    if not tools:
+    if recipe and (wants_room or recipe["id"] in {"equity_research", "pr_security", "filings_digest"}):
         return {
             "reply": (
-                "I'm Master — I set up Teams, hire agents, and draft workflow loops "
-                "using the same Hire/Graph pieces as the website.\n\n"
-                "Try: “Create a coding room that reviews GitHub PRs then scans for "
-                "exploits” or “Set up a finance team for SEC filings.”\n\n"
-                "After I create a room, open it → Graph → Room settings to paste "
-                "repo URLs and API keys."
+                f"I'll apply the “{recipe['name']}” recipe: hire specialists, "
+                "create the team, and map Graph steps from the library."
             ),
-            "tools": [],
+            "tools": [
+                {
+                    "name": "apply_recipe",
+                    "args": {
+                        "recipe_id": recipe["id"],
+                        "query": message[:400],
+                        "objective": message[:400],
+                    },
+                }
+            ],
             "run_workflows": [],
         }
 
-    reply_bits.append(
-        "After creation, open the team’s Graph → Room settings to fill any "
-        "requested repo URL or secrets. Draft loops stay unapproved until you enable them."
-    )
+    # Legacy fallback when no recipe matches but user still wants a bare room
+    if wants_room:
+        title = "New team"
+        return {
+            "reply": f"I'll create a “{title}” team. Open Graph to map steps, or ask for a recipe.",
+            "tools": [
+                {
+                    "name": "create_room",
+                    "args": {
+                        "title": title,
+                        "objective": message[:400],
+                        "orchestrator": "chat",
+                    },
+                }
+            ],
+            "run_workflows": [],
+        }
+
     return {
-        "reply": " ".join(reply_bits),
-        "tools": tools,
+        "reply": (
+            "I'm Master — I set up Teams from Graph recipes, hire agents, and draft "
+            "workflow loops using the same Hire/Graph pieces as the website.\n\n"
+            "Try: “Create a research equities room”, “Create a coding room that reviews "
+            "GitHub PRs then scans for exploits”, or “Set up a finance team for SEC filings.”\n\n"
+            "After I create a room, open it → Graph → Room settings to paste "
+            "repo URLs and API keys."
+        ),
+        "tools": [],
         "run_workflows": [],
     }

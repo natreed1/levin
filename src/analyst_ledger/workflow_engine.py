@@ -551,14 +551,17 @@ class MasterCoordinator:
                     for m in memory[:2]
                 ]
                 args = {**args, "memory_hint": " | ".join(h for h in hints if h)}
-            # After create_room, auto-assign subsequently hired agents when possible
-            if name == "assign_agent" and created_room_id and not args.get("room_id"):
-                args = {**args, "room_id": created_room_id}
-            if name == "set_workspace" and created_room_id and not args.get("room_id"):
-                args = {**args, "room_id": created_room_id}
-            if name == "configure_room" and created_room_id and not args.get("room_id"):
-                args = {**args, "room_id": created_room_id}
-            if name == "create_loop" and created_room_id and not args.get("room_id"):
+            # After create_room in this plan, force room-scoped tools onto that room.
+            # Models invent placeholder room_ids (title / fake tokens) before create
+            # returns the real id — only filling when room_id is missing left those
+            # assigns failing with room_not_found_or_forbidden while the team existed.
+            if created_room_id and name in {
+                "assign_agent",
+                "set_workspace",
+                "configure_room",
+                "create_loop",
+                "apply_recipe",
+            }:
                 args = {**args, "room_id": created_room_id}
 
             if self.store is None or not self.user_id:
@@ -579,6 +582,45 @@ class MasterCoordinator:
                 aid = str(result.get("agent_id") or "")
                 if aid:
                     hired_ids.append(aid)
+            if result.get("ok") and name == "apply_recipe":
+                rid = str(result.get("room_id") or "")
+                if rid:
+                    created_room_id = created_room_id or rid
+
+        # If we created a room but never wrote a graph, and the ask matches a recipe,
+        # apply it — covers models that create_room + hire without apply_recipe.
+        applied_recipe = any(
+            r.get("tool") == "apply_recipe" and r.get("ok") for r in tool_results
+        )
+        if (
+            created_room_id
+            and not applied_recipe
+            and self.store is not None
+            and self.user_id
+        ):
+            from messenger.graph_recipes import match_recipe
+            from messenger.team_harness import normalize_graph
+
+            matched = match_recipe(message)
+            room = self.store.room(created_room_id)
+            layers = normalize_graph((room or {}).get("config", {}).get("graph")).get(
+                "layers"
+            ) or []
+            if matched and room and not layers:
+                if job:
+                    job.update(f"Apply recipe {matched['id']}")
+                apply = execute_tool(
+                    "apply_recipe",
+                    {
+                        "recipe_id": matched["id"],
+                        "room_id": created_room_id,
+                        "objective": message[:400],
+                        "query": message[:400],
+                    },
+                    store=self.store,
+                    user_id=self.user_id,
+                )
+                tool_results.append({"tool": "apply_recipe", **apply})
 
         # Auto-assign hired agents to the room we just created
         if (
@@ -587,7 +629,15 @@ class MasterCoordinator:
             and self.store is not None
             and self.user_id
         ):
+            room_after = self.store.room(created_room_id) or {}
+            already = set(
+                (room_after.get("config") or {}).get("agents")
+                or (room_after.get("config") or {}).get("specialists")
+                or []
+            )
             for aid in hired_ids:
+                if aid in already:
+                    continue
                 if job:
                     job.update(f"Assign {aid}")
                 assign = execute_tool(
@@ -742,36 +792,49 @@ class MasterCoordinator:
                 }
                 for r in (catalog.get("rooms") or [])[:20]
             ],
+            "recipes": (catalog.get("recipes") or [])[:12],
             "tools": catalog.get("tools"),
             "need_kinds": catalog.get("need_kinds"),
             "approved_workflows": approved[:20],
         }
         prompt = (
-            "You are Master on Flyleaf. You set up Teams (rooms), hire agents, and draft "
-            "workflow loops using ONLY the allowlisted tools — the same building blocks as "
-            "Hire + Harness on the website. You do NOT invent runners or merge code.\n"
+            "You are Master on Flyleaf. You set up Teams (rooms), hire agents, apply "
+            "Graph recipes, and draft workflow loops using ONLY the allowlisted tools — "
+            "the same building blocks as Hire + Graph on the website. You do NOT invent "
+            "runners or merge code.\n"
             "Return JSON only:\n"
             '{"reply":str,"tools":[{"name":str,"args":{}}],"run_workflows":[str]}\n'
-            "Tools: create_room, hire_agent, assign_agent, configure_room, set_workspace, "
-            "create_loop, draft_capability, list_catalog.\n"
+            "Tools: apply_recipe, create_room, hire_agent, assign_agent, configure_room, "
+            "set_workspace, create_loop, draft_capability, list_catalog.\n"
             "Tool args (required fields must be present — use these exact keys):\n"
+            "- apply_recipe: {\"recipe_id\":str from catalog.recipes OR \"query\":str, "
+            "\"objective\":str optional, \"title\":str optional, \"room_id\":str optional, "
+            "\"edits\":{\"disable_steps\":[str],\"agent_overrides\":{role:name},"
+            "\"guard_overrides\":{from_to:prompt}}}. "
+            "Creates the team + specialists + Graph steps from the library. "
+            "Prefer this whenever a catalog recipe matches (equity research, PR+security, "
+            "filings digest, multi-analyst).\n"
             "- hire_agent: {\"name\":str (required; also accepts title/agent_name/label), "
             "\"capability_ids\":[str], \"lens_ids\":[str], \"prompt\":str, "
             "\"summary\":str, \"stage\":str}. If no catalog agent fits, hire a new one "
             "instead of only assign_agent on missing ids.\n"
-            "- assign_agent: {\"room_id\":str, \"agent_id\":str, \"role\":str}. "
-            "Use catalog ids; display names like \"Diff Reviewer\" auto-create when missing.\n"
+            "- assign_agent: {\"agent_id\":str, \"role\":str, \"room_id\":str optional}. "
+            "Use catalog ids; display names like \"Diff Reviewer\" auto-create when missing. "
+            "After create_room in the same plan, omit room_id (runtime injects the new id).\n"
             "- create_room: {\"title\":str (required), \"objective\":str, "
             "\"orchestrator\":\"chat\"|\"debate\"|\"workflow\", \"agents\":[str], "
             "\"skills\":[str], \"needs\":[{\"kind\":str,\"label\":str}]}\n"
-            "- set_workspace: {\"room_id\":str, \"repo_url\":str, \"needs\":[...]}\n"
+            "- set_workspace: {\"repo_url\":str, \"needs\":[...], \"room_id\":str optional}\n"
             "Rules:\n"
+            "- When the user asks to create a research/equities/coding/filings team, "
+            "call apply_recipe with the matching recipe_id. Do NOT invent graph JSON.\n"
             "- Prefer composing existing capability ids from the catalog.\n"
+            "- Never invent room_id values. create_room / apply_recipe first, then "
+            "room-scoped tools without a fabricated id.\n"
             "- When the plan needs a specialist not in catalog, call hire_agent first "
             "(with name + capability_ids), then assign_agent.\n"
-            "- For coding/GitHub rooms: create_room + hire agents + set_workspace needs "
-            "(github_repo, github_token, cursor_api_key as needed). Never ask the user to "
-            "paste secrets in chat — tell them to use Room settings.\n"
+            "- For coding/GitHub rooms prefer recipe pr_security (includes workspace needs). "
+            "Never ask the user to paste secrets in chat — tell them to use Room settings.\n"
             "- create_loop drafts are always unapproved.\n"
             "- run_workflows only for approved workflow ids when the user wants a run now.\n"
             "- If the ask is just conversation, tools=[] and a helpful reply.\n"

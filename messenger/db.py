@@ -27,6 +27,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+ROOM_ROLES = frozenset({"owner", "editor", "viewer"})
+
+
+def normalize_room_role(role: Any, *, default: str = "editor") -> str:
+    value = str(role or "").strip().lower()
+    if value in ROOM_ROLES:
+        return value
+    fallback = str(default or "editor").strip().lower()
+    return fallback if fallback in ROOM_ROLES else "editor"
+
+
 def _room_row(row: Any) -> dict[str, Any]:
     data = dict(row)
     raw = data.pop("config_json", None)
@@ -218,10 +229,35 @@ class MessageStore:
                         room_id TEXT NOT NULL,
                         user_id TEXT NOT NULL,
                         joined_at TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'editor',
                         PRIMARY KEY (room_id, user_id)
                     )
                     """
                 )
+                member_cols = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA table_info(room_members)"
+                    ).fetchall()
+                }
+                if "role" not in member_cols:
+                    conn.execute(
+                        "ALTER TABLE room_members ADD COLUMN role "
+                        "TEXT NOT NULL DEFAULT 'editor'"
+                    )
+                    # Existing members keep collaborator access; owners marked.
+                    conn.execute(
+                        """
+                        UPDATE room_members
+                        SET role = 'owner'
+                        WHERE user_id IN (
+                            SELECT owner_user_id FROM rooms
+                            WHERE rooms.room_id = room_members.room_id
+                              AND owner_user_id IS NOT NULL
+                              AND owner_user_id != ''
+                        )
+                        """
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS sessions (
@@ -739,9 +775,11 @@ class MessageStore:
                 if owner_user_id:
                     conn.execute(
                         """
-                        INSERT OR IGNORE INTO room_members
-                            (room_id, user_id, joined_at)
-                        VALUES (?, ?, ?)
+                        INSERT INTO room_members
+                            (room_id, user_id, joined_at, role)
+                        VALUES (?, ?, ?, 'owner')
+                        ON CONFLICT(room_id, user_id) DO UPDATE SET
+                            role = 'owner'
                         """,
                         (room_id, owner_user_id, created_at),
                     )
@@ -757,19 +795,120 @@ class MessageStore:
             "config": config_obj,
         }
 
-    def add_room_member(self, room_id: str, user_id: str) -> None:
+    def add_room_member(
+        self, room_id: str, user_id: str, *, role: str = "editor"
+    ) -> str:
+        """Add a member. Returns stored role. Does not demote an existing owner."""
+        role_norm = normalize_room_role(role, default="editor")
+        if role_norm == "owner":
+            role_norm = "editor"
         with self._lock:
             conn = self._connect()
             try:
+                existing = conn.execute(
+                    """
+                    SELECT role FROM room_members
+                    WHERE room_id = ? AND user_id = ?
+                    """,
+                    (room_id, user_id),
+                ).fetchone()
+                if existing:
+                    current = normalize_room_role(
+                        existing["role"], default="editor"
+                    )
+                    if current == "owner":
+                        return "owner"
+                    return current
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO room_members
-                        (room_id, user_id, joined_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO room_members
+                        (room_id, user_id, joined_at, role)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (room_id, user_id, _utc_now()),
+                    (room_id, user_id, _utc_now(), role_norm),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+        return role_norm
+
+    def room_member_role(self, room_id: str, user_id: str) -> Optional[str]:
+        """Effective role for a user in a room (owner wins over member row)."""
+        if room_id == "legacy":
+            return "owner"
+        room = self.room(room_id)
+        if not room:
+            return None
+        owner = str(room.get("owner_user_id") or "").strip()
+        if owner and owner == user_id:
+            return "owner"
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT role FROM room_members
+                    WHERE room_id = ? AND user_id = ?
+                    """,
+                    (room_id, user_id),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        role = normalize_room_role(row["role"], default="editor")
+        return "editor" if role == "owner" else role
+
+    def set_room_member_role(
+        self, room_id: str, user_id: str, role: str
+    ) -> Optional[str]:
+        """Set editor/viewer for a non-owner member. Returns new role or None."""
+        role_norm = normalize_room_role(role, default="editor")
+        if role_norm == "owner":
+            return None
+        room = self.room(room_id)
+        if not room:
+            return None
+        owner = str(room.get("owner_user_id") or "").strip()
+        if owner and owner == user_id:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE room_members SET role = ?
+                    WHERE room_id = ? AND user_id = ?
+                    """,
+                    (role_norm, room_id, user_id),
+                )
+                conn.commit()
+                if cur.rowcount <= 0:
+                    return None
+            finally:
+                conn.close()
+        return role_norm
+
+    def remove_room_member(self, room_id: str, user_id: str) -> bool:
+        """Remove a non-owner member from the room."""
+        room = self.room(room_id)
+        if not room:
+            return False
+        owner = str(room.get("owner_user_id") or "").strip()
+        if owner and owner == user_id:
+            return False
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    DELETE FROM room_members
+                    WHERE room_id = ? AND user_id = ?
+                    """,
+                    (room_id, user_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
             finally:
                 conn.close()
 
@@ -794,7 +933,7 @@ class MessageStore:
                 rows = conn.execute(
                     """
                     SELECT r.room_id, r.title, r.created_at, r.owner_user_id,
-                           r.kind, r.config_json
+                           r.kind, r.config_json, m.role AS member_role
                     FROM rooms r
                     INNER JOIN room_members m ON m.room_id = r.room_id
                     WHERE m.user_id = ?
@@ -804,7 +943,18 @@ class MessageStore:
                 ).fetchall()
             finally:
                 conn.close()
-        return [_room_row(r) for r in rows]
+        rooms: list[dict[str, Any]] = []
+        for r in rows:
+            room = _room_row(r)
+            member_role = room.pop("member_role", None)
+            owner = str(room.get("owner_user_id") or "").strip()
+            if owner and owner == user_id:
+                room["my_role"] = "owner"
+            else:
+                role = normalize_room_role(member_role, default="editor")
+                room["my_role"] = "editor" if role == "owner" else role
+            rooms.append(room)
+        return rooms
 
     def list_rooms(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -873,9 +1023,11 @@ class MessageStore:
                     )
                     conn.execute(
                         """
-                        INSERT OR IGNORE INTO room_members
-                            (room_id, user_id, joined_at)
-                        VALUES (?, ?, ?)
+                        INSERT INTO room_members
+                            (room_id, user_id, joined_at, role)
+                        VALUES (?, ?, ?, 'owner')
+                        ON CONFLICT(room_id, user_id) DO UPDATE SET
+                            role = 'owner'
                         """,
                         (room_id, uid, _utc_now()),
                     )
@@ -1197,12 +1349,14 @@ class MessageStore:
         return bool(row and row.get("status") == "accepted")
 
     def list_room_members(self, room_id: str) -> list[dict[str, Any]]:
+        room = self.room(room_id)
+        owner = str((room or {}).get("owner_user_id") or "").strip()
         with self._lock:
             conn = self._connect()
             try:
                 rows = conn.execute(
-                    f"""
-                    SELECT m.user_id, m.joined_at, u.username, u.display_name
+                    """
+                    SELECT m.user_id, m.joined_at, m.role, u.username, u.display_name
                     FROM room_members m
                     INNER JOIN users u ON u.user_id = m.user_id
                     WHERE m.room_id = ?
@@ -1212,15 +1366,25 @@ class MessageStore:
                 ).fetchall()
             finally:
                 conn.close()
-        return [
-            {
-                "user_id": r["user_id"],
-                "username": r["username"],
-                "display_name": r["display_name"],
-                "joined_at": r["joined_at"],
-            }
-            for r in rows
-        ]
+        members: list[dict[str, Any]] = []
+        for r in rows:
+            uid = str(r["user_id"])
+            if owner and uid == owner:
+                role = "owner"
+            else:
+                role = normalize_room_role(r["role"], default="editor")
+                if role == "owner":
+                    role = "editor"
+            members.append(
+                {
+                    "user_id": uid,
+                    "username": r["username"],
+                    "display_name": r["display_name"],
+                    "joined_at": r["joined_at"],
+                    "role": role,
+                }
+            )
+        return members
 
     # --- notifications ---------------------------------------------------------
 

@@ -143,8 +143,153 @@ def test_search_users_and_add_friend_to_room(tmp_path: Path, monkeypatch):
         f"/api/rooms/{room_id}/members", json={"user_id": pal_id}
     )
     assert added.status_code == 200, added.text
+    assert added.json()["member"]["role"] == "editor"
     members = client.get(f"/api/rooms/{room_id}/members").json()["members"]
-    assert any(m["username"] == "pal_friend" for m in members)
+    pal = next(m for m in members if m["username"] == "pal_friend")
+    assert pal["role"] == "editor"
+
+
+def test_room_member_roles_docs_style_access(tmp_path: Path, monkeypatch):
+    """Editors can save graph config; viewers cannot; owner manages roles."""
+    client = _client(tmp_path, monkeypatch)
+    _signup(client, email="owner@example.com", name="Owner", username="owner_docs")
+    room_id = client.post("/api/rooms", json={"title": "Shared desk"}).json()["room_id"]
+
+    client2 = _client(tmp_path, monkeypatch)
+    _signup(client2, email="ed@example.com", name="Ed", username="ed_itor")
+    client3 = _client(tmp_path, monkeypatch)
+    _signup(client3, email="view@example.com", name="Vi", username="vi_ewer")
+
+    client = _client(tmp_path, monkeypatch)
+    assert client.post(
+        "/api/auth/login", json={"email": "owner@example.com", "password": "password12"}
+    ).status_code == 200
+    for uname in ("ed_itor", "vi_ewer"):
+        assert client.post("/api/friends/request", json={"username": uname}).status_code == 200
+
+    for email, uname in (("ed@example.com", "ed_itor"), ("view@example.com", "vi_ewer")):
+        c = _client(tmp_path, monkeypatch)
+        assert c.post(
+            "/api/auth/login", json={"email": email, "password": "password12"}
+        ).status_code == 200
+        owner_id = c.get("/api/friends").json()["incoming"][0]["user_id"]
+        assert c.post(f"/api/friends/{owner_id}/accept").status_code == 200
+
+    client = _client(tmp_path, monkeypatch)
+    assert client.post(
+        "/api/auth/login", json={"email": "owner@example.com", "password": "password12"}
+    ).status_code == 200
+    friends = {f["username"]: f["user_id"] for f in client.get("/api/friends").json()["friends"]}
+    ed_id = friends["ed_itor"]
+    vi_id = friends["vi_ewer"]
+
+    assert (
+        client.post(
+            f"/api/rooms/{room_id}/members",
+            json={"user_id": ed_id, "role": "editor"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/rooms/{room_id}/members",
+            json={"user_id": vi_id, "role": "viewer"},
+        ).status_code
+        == 200
+    )
+
+    # Editor can patch graph config
+    client_ed = _client(tmp_path, monkeypatch)
+    assert client_ed.post(
+        "/api/auth/login", json={"email": "ed@example.com", "password": "password12"}
+    ).status_code == 200
+    mine = client_ed.get("/api/rooms/mine").json()["rooms"]
+    ed_room = next(r for r in mine if r["room_id"] == room_id)
+    assert ed_room["my_role"] == "editor"
+    save = client_ed.patch(
+        f"/api/rooms/{room_id}/config",
+        json={
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Step",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    }
+                ],
+                "guards": [],
+            },
+            "orchestrator": "workflow",
+        },
+    )
+    assert save.status_code == 200, save.text
+    agents = client_ed.post(
+        f"/api/rooms/{room_id}/agents", json={"agent_id": "qwen-bull"}
+    )
+    assert agents.status_code == 200, agents.text
+
+    # Viewer cannot
+    client_vi = _client(tmp_path, monkeypatch)
+    assert client_vi.post(
+        "/api/auth/login", json={"email": "view@example.com", "password": "password12"}
+    ).status_code == 200
+    mine_v = client_vi.get("/api/rooms/mine").json()["rooms"]
+    assert next(r for r in mine_v if r["room_id"] == room_id)["my_role"] == "viewer"
+    denied = client_vi.patch(
+        f"/api/rooms/{room_id}/config",
+        json={"objective": "Nope"},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "editor_required"
+    assert (
+        client_vi.post(
+            f"/api/rooms/{room_id}/agents", json={"agent_id": "qwen-bull"}
+        ).status_code
+        == 403
+    )
+
+    # Viewer cannot change access; owner can promote
+    assert (
+        client_vi.patch(
+            f"/api/rooms/{room_id}/members/{ed_id}",
+            json={"role": "viewer"},
+        ).status_code
+        == 403
+    )
+    client = _client(tmp_path, monkeypatch)
+    assert client.post(
+        "/api/auth/login", json={"email": "owner@example.com", "password": "password12"}
+    ).status_code == 200
+    promoted = client.patch(
+        f"/api/rooms/{room_id}/members/{vi_id}",
+        json={"role": "editor"},
+    )
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["member"]["role"] == "editor"
+    client_vi = _client(tmp_path, monkeypatch)
+    assert client_vi.post(
+        "/api/auth/login", json={"email": "view@example.com", "password": "password12"}
+    ).status_code == 200
+    assert (
+        client_vi.patch(
+            f"/api/rooms/{room_id}/config", json={"objective": "Now ok"}
+        ).status_code
+        == 200
+    )
+
+    # Editor still cannot delete or invite
+    client_ed = _client(tmp_path, monkeypatch)
+    assert client_ed.post(
+        "/api/auth/login", json={"email": "ed@example.com", "password": "password12"}
+    ).status_code == 200
+    assert client_ed.delete(f"/api/rooms/{room_id}").status_code == 403
+    assert (
+        client_ed.post(
+            f"/api/rooms/{room_id}/members",
+            json={"user_id": vi_id, "role": "viewer"},
+        ).status_code
+        == 403
+    )
 
 
 def test_profile_can_claim_username(tmp_path: Path, monkeypatch):
@@ -178,6 +323,9 @@ def test_friends_ui_markers_present():
     assert 'id="settings-username"' in html
     assert 'id="profile-friends-list"' in html
     assert 'id="friend-search"' in html
-    assert "Add friends" in html
+    assert "Share" in html
+    assert 'id="room-access-list"' in html
     assert 'api("/api/friends/request"' in js
     assert "loadNotificationsTab" in js
+    assert "canEditRoom" in js
+    assert "refreshRoomAccessList" in js

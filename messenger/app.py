@@ -838,7 +838,8 @@ def create_app() -> FastAPI:
             {"ok": True, "specialists": rows, "source": "registry"}
         )
 
-    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+    def _owned_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        """Owner-only: delete team, invite friends, change member access."""
         room = store.room(room_id)
         if not room:
             return None, JSONResponse(
@@ -857,13 +858,42 @@ def create_app() -> FastAPI:
             {"ok": False, "error": "owner_required"}, status_code=403
         )
 
+    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        """Owner or editor: graph, agents, room config, harness runs."""
+        room = store.room(room_id)
+        if not room:
+            return None, JSONResponse(
+                {"ok": False, "error": "not_found"}, status_code=404
+            )
+        role = store.room_member_role(room_id, user_id)
+        if role in {"owner", "editor"}:
+            return room, None
+        # Orphan rooms: claim ownership so first manager can edit.
+        owner = str(room.get("owner_user_id") or "").strip()
+        if not owner and store.user_in_room(room_id, user_id):
+            claimed = store.set_room_owner(room_id, user_id)
+            if claimed and str(claimed.get("owner_user_id") or "") == user_id:
+                return claimed, None
+        if role == "viewer":
+            return None, JSONResponse(
+                {
+                    "ok": False,
+                    "error": "editor_required",
+                    "message": "Viewers can chat but can’t edit this team. Ask the owner for Editor access.",
+                },
+                status_code=403,
+            )
+        return None, JSONResponse(
+            {"ok": False, "error": "forbidden"}, status_code=403
+        )
+
     @app.post("/api/rooms/{room_id}/invite")
     def room_invite(
         room_id: str,
         request: Request,
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:
-        _, error = _editable_room(room_id, user["user_id"])
+        _, error = _owned_room(room_id, user["user_id"])
         if error:
             return error
         room_invite = secrets.token_urlsafe(24)
@@ -952,7 +982,7 @@ def create_app() -> FastAPI:
                 {"ok": False, "error": "cannot_delete_legacy"},
                 status_code=400,
             )
-        _, error = _editable_room(room_id, user["user_id"])
+        _, error = _owned_room(room_id, user["user_id"])
         if error:
             return error
         try:
@@ -1588,7 +1618,8 @@ def create_app() -> FastAPI:
         if not name:
             return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
         if user_id and room_id != "legacy":
-            store.add_room_member(room_id, user_id)
+            # Invite-link joins default to viewer; owner can upgrade in Share.
+            store.add_room_member(room_id, user_id, role="viewer")
         resp = JSONResponse(
             {
                 "ok": True,

@@ -300,8 +300,14 @@ def room_members(
         return JSONResponse(
             {"ok": False, "error": "forbidden"}, status_code=403
         )
+    room = store.room(room_id) or {}
     return JSONResponse(
-        {"ok": True, "members": store.list_room_members(room_id)}
+        {
+            "ok": True,
+            "members": store.list_room_members(room_id),
+            "owner_user_id": room.get("owner_user_id"),
+            "my_role": store.room_member_role(room_id, user["user_id"]),
+        }
     )
 
 
@@ -312,6 +318,8 @@ async def add_room_member(
     store: MessageStore = Depends(get_store),
     user: dict[str, Any] = Depends(current_user),
 ) -> JSONResponse:
+    from messenger.db import normalize_room_role
+
     room = store.room(room_id)
     if not room:
         return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
@@ -323,7 +331,7 @@ async def add_room_member(
             {
                 "ok": False,
                 "error": "owner_required",
-                "message": "Only the team owner can add friends to this team.",
+                "message": "Only the team owner can add people to this team.",
             },
             status_code=403,
         )
@@ -356,13 +364,22 @@ async def add_room_member(
         return JSONResponse(
             {"ok": False, "error": "user_not_found"}, status_code=404
         )
-    store.add_room_member(room_id, friend_id)
+    role = normalize_room_role(body.get("role"), default="editor")
+    if role == "owner":
+        role = "editor"
+    stored_role = store.add_room_member(room_id, friend_id, role=role)
+    # If already a member, still allow role update when owner re-adds with a role.
+    if stored_role not in {"owner"} and "role" in body:
+        updated = store.set_room_member_role(room_id, friend_id, role)
+        if updated:
+            stored_role = updated
     store.create_notification(
         friend_id,
         "room_invite",
         {
             "room_id": room_id,
             "room_title": room.get("title"),
+            "role": stored_role,
             "from_user_id": user["user_id"],
             "from_username": (store.user_by_id(user["user_id"]) or {}).get("username"),
             "from_display_name": user.get("display_name") or user.get("name"),
@@ -371,7 +388,124 @@ async def add_room_member(
     return JSONResponse(
         {
             "ok": True,
-            "member": _public(friend),
-            "message": f"Added @{friend.get('username') or friend['display_name']} to the team.",
+            "member": {**_public(friend), "role": stored_role},
+            "message": (
+                f"Added @{friend.get('username') or friend['display_name']} "
+                f"as {stored_role}."
+            ),
         }
     )
+
+
+@router.patch("/api/rooms/{room_id}/members/{member_user_id}")
+async def patch_room_member(
+    room_id: str,
+    member_user_id: str,
+    request: Request,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    """Owner-only: change a member’s access (editor / viewer), Docs-style."""
+    from messenger.db import normalize_room_role
+
+    room = store.room(room_id)
+    if not room:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    owner = str(room.get("owner_user_id") or "").strip()
+    if not owner or owner != user["user_id"]:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "owner_required",
+                "message": "Only the team owner can change access.",
+            },
+            status_code=403,
+        )
+    target_id = str(member_user_id or "").strip()
+    if not target_id:
+        return JSONResponse({"ok": False, "error": "bad_target"}, status_code=400)
+    if target_id == owner:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "cannot_change_owner",
+                "message": "Owner access can’t be changed here.",
+            },
+            status_code=400,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    role = normalize_room_role((body or {}).get("role"), default="editor")
+    if role == "owner":
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "cannot_transfer_owner",
+                "message": "Ownership transfer isn’t supported yet.",
+            },
+            status_code=400,
+        )
+    if not store.user_in_room(room_id, target_id):
+        return JSONResponse(
+            {"ok": False, "error": "not_a_member", "message": "Not on this team."},
+            status_code=404,
+        )
+    updated = store.set_room_member_role(room_id, target_id, role)
+    if not updated:
+        return JSONResponse(
+            {"ok": False, "error": "update_failed"}, status_code=400
+        )
+    member = store.user_by_id(target_id) or {"user_id": target_id}
+    return JSONResponse(
+        {
+            "ok": True,
+            "member": {**_public(member), "role": updated},
+            "message": f"Access updated to {updated}.",
+        }
+    )
+
+
+@router.delete("/api/rooms/{room_id}/members/{member_user_id}")
+def remove_room_member(
+    room_id: str,
+    member_user_id: str,
+    store: MessageStore = Depends(get_store),
+    user: dict[str, Any] = Depends(current_user),
+) -> JSONResponse:
+    """Owner removes someone, or a member leaves themselves."""
+    room = store.room(room_id)
+    if not room:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    owner = str(room.get("owner_user_id") or "").strip()
+    target_id = str(member_user_id or "").strip()
+    if not target_id:
+        return JSONResponse({"ok": False, "error": "bad_target"}, status_code=400)
+    if target_id == owner:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "cannot_remove_owner",
+                "message": "The owner can’t be removed from the team.",
+            },
+            status_code=400,
+        )
+    is_owner = bool(owner and owner == user["user_id"])
+    is_self = target_id == user["user_id"]
+    if not is_owner and not is_self:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "owner_required",
+                "message": "Only the owner can remove other people.",
+            },
+            status_code=403,
+        )
+    if not store.remove_room_member(room_id, target_id):
+        return JSONResponse(
+            {"ok": False, "error": "not_a_member", "message": "Not on this team."},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True, "removed": target_id})
+

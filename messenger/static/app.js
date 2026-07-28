@@ -23,6 +23,10 @@
     specialistPoll: null,
     devAutoLogin: false,
     devUser: null,
+    messageOffset: 0,
+    messageHasMore: false,
+    railsLoading: false,
+    toastTimer: null,
   };
 
   const THEME_KEY = "flyleaf-theme";
@@ -48,8 +52,91 @@
   function setError(id, msg) {
     const el = $(id);
     if (!el) return;
-    if (msg) { el.textContent = msg; show(el); }
-    else { el.textContent = ""; hide(el); }
+    if (!msg) {
+      el.textContent = "";
+      hide(el);
+      return;
+    }
+    // Compact long infrastructure errors (tunnel URLs, stack dumps).
+    let text = String(msg);
+    if (text.length > 220 || /trycloudflare\.com|localhost:\d{4}|Traceback/i.test(text)) {
+      text = "Something went wrong with the model connection. Check Settings → Models or Start local model.";
+    }
+    el.textContent = text;
+    show(el);
+  }
+
+  function setSuccess(id, msg, ms = 3200) {
+    const el = $(id);
+    if (!el) return;
+    if (!msg) {
+      el.textContent = "";
+      hide(el);
+      return;
+    }
+    el.textContent = String(msg);
+    show(el);
+    clearTimeout(el._successTimer);
+    el._successTimer = setTimeout(() => hide(el), ms);
+  }
+
+  function showAppToast(msg, ms = 2800) {
+    const el = $("#app-toast");
+    if (!el || !msg) return;
+    el.textContent = String(msg);
+    show(el);
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => hide(el), ms);
+  }
+
+  function setButtonBusy(btn, busy, busyLabel) {
+    if (!btn) return;
+    if (busy) {
+      if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+      btn.classList.add("button-busy");
+      btn.disabled = true;
+      if (busyLabel) btn.textContent = busyLabel;
+    } else {
+      btn.classList.remove("button-busy");
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  }
+
+  function initialsFrom(name) {
+    const parts = String(name || "?").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  function avatarFallback(name) {
+    const span = document.createElement("span");
+    span.className = "avatar-fallback";
+    span.textContent = initialsFrom(name);
+    span.title = name || "";
+    return span;
+  }
+
+  function setTeamsEmptyVisible(on) {
+    const stage = $("#chat-stage");
+    const empty = $("#teams-empty");
+    if (stage) stage.classList.toggle("is-empty", !!on);
+    if (empty) empty.classList.toggle("hidden", !on);
+    const overflow = $("#room-overflow");
+    if (on) hide(overflow);
+  }
+
+  function syncMobileTabs() {
+    $$(".mobile-tab").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tab === state.tab);
+    });
+  }
+
+  function autoGrowComposer(el) {
+    if (!el || el.tagName !== "TEXTAREA") return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
   }
 
   function fmtTime(iso) {
@@ -178,35 +265,41 @@
     e.preventDefault();
     setError("#login-error", "");
     hide($("#resend-verify-btn"));
+    const submitBtn = $("#login-submit") || e.target.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Signing in…");
     const email = $("#login-email").value;
-    const { res, data } = await api("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        password: $("#login-password").value,
-      }),
-    });
-    if (!res.ok) {
-      if (data?.error === "email_unverified") {
-        setError("#login-error", data.message || "Verify your email first");
-        show($("#resend-verify-btn"));
+    try {
+      const { res, data } = await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          password: $("#login-password").value,
+        }),
+      });
+      if (!res.ok) {
+        if (data?.error === "email_unverified") {
+          setError("#login-error", data.message || "Verify your email first");
+          show($("#resend-verify-btn"));
+          return;
+        }
+        if (data?.error === "rate_limited") {
+          setError(
+            "#login-error",
+            data.message || "Too many login attempts. Wait a few minutes and try again."
+          );
+          return;
+        }
+        setError("#login-error", (data && (data.message || data.error)) || "Login failed");
         return;
       }
-      if (data?.error === "rate_limited") {
-        setError(
-          "#login-error",
-          data.message || "Too many login attempts. Wait a few minutes and try again."
-        );
+      if (data?.requires_2fa) {
+        beginOtpChallenge(data);
         return;
       }
-      setError("#login-error", (data && (data.message || data.error)) || "Login failed");
-      return;
+      await bootstrap();
+    } finally {
+      setButtonBusy(submitBtn, false);
     }
-    if (data?.requires_2fa) {
-      beginOtpChallenge(data);
-      return;
-    }
-    await bootstrap();
   });
 
   $("#otp-form")?.addEventListener("submit", async (e) => {
@@ -300,21 +393,28 @@
     e.preventDefault();
     setError("#forgot-error", "");
     const email = $("#forgot-email").value;
-    const { res, data } = await api("/api/auth/forgot-password", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) {
-      setError("#forgot-error", (data && (data.message || data.error)) || "Request failed");
-      return;
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Sending…");
+    try {
+      const { res, data } = await api("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) {
+        setError("#forgot-error", (data && (data.message || data.error)) || "Request failed");
+        return;
+      }
+      let msg = data?.message || "Check your email for a reset link.";
+      if (data?.dev_reset_url) {
+        msg += ` Dev link: ${data.dev_reset_url}`;
+      }
+      setAuthBanner(msg, true);
+      showAppToast("Check your email for a reset link");
+      $("#login-email").value = email;
+      showAuthPanel("login");
+    } finally {
+      setButtonBusy(submitBtn, false);
     }
-    let msg = data?.message || "Check your email for a reset link.";
-    if (data?.dev_reset_url) {
-      msg += ` Dev link: ${data.dev_reset_url}`;
-    }
-    setAuthBanner(msg, true);
-    $("#login-email").value = email;
-    showAuthPanel("login");
   });
 
   $("#reset-form").addEventListener("submit", async (e) => {
@@ -424,12 +524,16 @@
   $$(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
+  $$(".mobile-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
 
   function switchTab(tab) {
     // Review / Tracking UI is temporarily retired from the main shell.
     if (tab === "review" || tab === "tracking") tab = "chats";
     state.tab = tab;
     $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    syncMobileTabs();
     $$(".tab-panel").forEach((p) => hide(p));
     show($(`#tab-${tab}`));
     if (tab === "agents") loadAgentsStudio();
@@ -493,14 +597,26 @@
       state.kind = null;
       state.threadId = null;
       $("#stage-kind").textContent = "Team";
-      $("#stage-title").textContent = "Select a team";
+      $("#stage-title").textContent = "Your teams";
+      $("#stage-title").title = "Your teams";
+      setTeamsEmptyVisible(true);
       enableComposer(false, "Create or open a team to chat", "teams");
       renderRails();
       return;
     }
     if (state.kind === "people" && state.roomId) {
       openWs();
+      setTeamsEmptyVisible(false);
+      return;
     }
+    if (!state.rooms.length) {
+      setTeamsEmptyVisible(true);
+      $("#stage-title").textContent = "Your teams";
+      enableComposer(false, "Create or open a team to chat", "teams");
+      return;
+    }
+    const next = state.rooms[0];
+    await selectPeople(next.room_id, next.title, next);
   }
 
   async function selectMaster() {
@@ -510,26 +626,37 @@
   // --- Chats -----------------------------------------------------------------
 
   async function refreshChatRails() {
-    if (state.me?.authenticated) {
-      const [rooms, threads, specialists, models] = await Promise.all([
-        api("/api/rooms/mine"),
-        api("/api/agent-chats"),
-        api("/api/specialists"),
-        api("/api/settings/models"),
-      ]);
-      state.rooms = (rooms.data && rooms.data.rooms) || [];
-      state.threads = (threads.data && threads.data.threads) || [];
-      state.specialists = (specialists.data && specialists.data.specialists) || [];
-      state.compute = models.data?.active || null;
-      state.modelProfiles = models.data?.profiles || [];
-      state.activeProfileId = models.data?.active_profile_id || null;
-    } else {
-      state.rooms = state.me?.room_id
-        ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
-        : [];
-      state.threads = [];
+    const list = $("#room-list");
+    if (list && !state.rooms.length) {
+      list.setAttribute("aria-busy", "true");
+      list.innerHTML = `<li class="state-skeleton" aria-hidden="true"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></li>`;
     }
-    renderRails();
+    state.railsLoading = true;
+    try {
+      if (state.me?.authenticated) {
+        const [rooms, threads, specialists, models] = await Promise.all([
+          api("/api/rooms/mine"),
+          api("/api/agent-chats"),
+          api("/api/specialists"),
+          api("/api/settings/models"),
+        ]);
+        state.rooms = (rooms.data && rooms.data.rooms) || [];
+        state.threads = (threads.data && threads.data.threads) || [];
+        state.specialists = (specialists.data && specialists.data.specialists) || [];
+        state.compute = models.data?.active || null;
+        state.modelProfiles = models.data?.profiles || [];
+        state.activeProfileId = models.data?.active_profile_id || null;
+      } else {
+        state.rooms = state.me?.room_id
+          ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
+          : [];
+        state.threads = [];
+      }
+      renderRails();
+    } finally {
+      state.railsLoading = false;
+      list?.setAttribute("aria-busy", "false");
+    }
   }
 
   function roomAgents(room) {
@@ -549,15 +676,31 @@
   function renderRails() {
     const list = $("#room-list");
     const palette = $("#agent-palette");
+    if (!list || !palette) return;
     list.innerHTML = "";
     palette.innerHTML = "";
     const entries = allRoomEntries();
 
     if (!entries.length) {
       const li = document.createElement("li");
-      li.innerHTML = '<button type="button" class="muted" disabled>No teams yet</button>';
+      li.className = "rail-empty";
+      li.innerHTML =
+        '<p class="muted tiny-hint">No teams yet</p>' +
+        '<button type="button" class="ghost tiny" id="rail-create-team">Create team</button>';
       list.appendChild(li);
+      li.querySelector("#rail-create-team")?.addEventListener("click", () => {
+        $("#new-room-btn")?.click();
+      });
+      if (state.tab === "chats" && state.kind !== "people") {
+        setTeamsEmptyVisible(true);
+        $("#stage-kind").textContent = "Team";
+        $("#stage-title").textContent = "Your teams";
+        $("#stage-title").title = "Your teams";
+      }
+    } else if (state.tab === "chats" && state.kind === "people") {
+      setTeamsEmptyVisible(false);
     }
+
     entries.forEach((entry) => {
       const li = document.createElement("li");
       const btn = document.createElement("button");
@@ -567,8 +710,10 @@
       const meta = compute
         ? `${compute.local ? "Local" : "API"} · ${compute.label || compute.model}`
         : "Team";
+      const title = entry.title || entry.id;
+      btn.title = title;
       btn.innerHTML = `
-        <span class="room-name"><span class="room-icon">#</span><span class="room-title">${escapeHtml(entry.title || entry.id)}</span></span>
+        <span class="room-name"><span class="room-icon">#</span><span class="room-title title">${escapeHtml(title)}</span></span>
         <span class="meta">${escapeHtml(meta)}</span>
         ${agents.length ? `<span class="room-agents" aria-label="${agents.length} agents">${agents.map(() => '<i class="room-agent-dot"></i>').join("")}</span>` : ""}
       `;
@@ -584,7 +729,7 @@
     if (!state.specialists.length) {
       const li = document.createElement("li");
       li.className = "muted tiny-hint";
-      li.textContent = "No agents available";
+      li.textContent = "No agents yet — open Hire to compose one";
       palette.appendChild(li);
     }
     state.specialists.forEach((agent) => {
@@ -593,11 +738,11 @@
       li.draggable = true;
       li.dataset.agentId = agent.id;
       const kind = agent.kind === "operator" ? "operator" : "lens";
-      li.title = `${agent.name} (${kind}) — click to add to the open room, or drag onto a room`;
+      li.title = `${agent.name} (${kind}) — click to assign to the open team`;
       const caps = (agent.capabilities || []).length
         ? ` · ${(agent.capabilities || []).slice(0, 2).join(", ")}`
         : " · prompt only";
-      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}${escapeHtml(caps)}</span>`;
+      li.innerHTML = `<strong class="title">${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}${escapeHtml(caps)}</span>`;
       li.addEventListener("dragstart", (event) => {
         event.dataTransfer.effectAllowed = "copy";
         event.dataTransfer.setData("application/x-workflow-agent", agent.id);
@@ -605,10 +750,11 @@
         li.classList.add("dragging");
       });
       li.addEventListener("dragend", () => li.classList.remove("dragging"));
-      // Click also adds to the current people room (drag is easy to miss).
       li.addEventListener("click", async () => {
         if (state.kind === "people" && state.roomId) {
           await addAgentToRoom(state.roomId, agent.id);
+        } else {
+          showAppToast("Open a team first, then click an agent to assign");
         }
       });
       palette.appendChild(li);
@@ -666,9 +812,24 @@
   function canManageRoom(room) {
     const me = state.me?.user_id;
     if (!me || !room) return false;
+    if (room.my_role === "owner") return true;
     const owner = room.owner_user_id;
     if (!owner) return true;
     return owner === me;
+  }
+
+  /** Owner or editor — graph, agents, room config, runs. */
+  function canEditRoom(room) {
+    if (!room) return false;
+    if (canManageRoom(room)) return true;
+    const role = room.my_role || "viewer";
+    return role === "editor";
+  }
+
+  function roomRoleLabel(role) {
+    if (role === "owner") return "Owner";
+    if (role === "editor") return "Editor";
+    return "Viewer";
   }
 
   function updateSpecialistActions(room) {
@@ -689,13 +850,19 @@
     const enabled = !!(room?.config?.autonomy?.enabled);
     const graph = normalizeGraph(room?.config?.graph);
     const hasGraph = (graph.layers || []).length > 0;
-    // One-shot Run Graph when the team has saved steps
+    // One-shot Run Graph when the team has saved steps (editors+)
     if (runBtn) {
-      if (hasGraph && state.me?.authenticated && state.kind === "people") show(runBtn);
-      else hide(runBtn);
+      if (
+        hasGraph &&
+        state.me?.authenticated &&
+        state.kind === "people" &&
+        canEditRoom(room)
+      ) {
+        show(runBtn);
+      } else hide(runBtn);
     }
-    // Keep-running loop only for Workflow mode
-    if (orch === "workflow") {
+    // Keep-running loop only for Workflow mode (editors+)
+    if (orch === "workflow" && canEditRoom(room)) {
       show(wrap);
       toggle.checked = enabled;
     } else {
@@ -734,7 +901,7 @@
       chip.appendChild(
         document.createTextNode(`${agent?.name || agentId}${mention}`)
       );
-      if (canManageRoom(room)) {
+      if (canEditRoom(room)) {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.setAttribute("aria-label", `Remove ${agent?.name || agentId}`);
@@ -830,7 +997,7 @@
     if (current && select.value !== current) {
       select.value = "";
     }
-    select.disabled = !canManageRoom(room);
+    select.disabled = !canEditRoom(room);
   }
 
   function setSpecialistRunUi(job) {
@@ -953,10 +1120,17 @@
     state.kind = "people";
     state.roomId = roomId;
     state.threadId = null;
+    state.messageOffset = 0;
+    state.messageHasMore = false;
+    state.messageLimit = 80;
     const room = roomMeta || currentRoom() || { room_id: roomId, title, kind: "people" };
     const hasAgents = roomAgents(room).length > 0;
+    const stageTitle = title || room.title || "Team";
+    setTeamsEmptyVisible(false);
     $("#stage-kind").textContent = "Team";
-    $("#stage-title").textContent = title || room.title || "Team";
+    $("#stage-title").textContent = stageTitle;
+    $("#stage-title").title = stageTitle;
+    show($("#room-overflow"));
     show($("#clear-chat"));
     if (canManageRoom(room)) {
       show($("#delete-room"));
@@ -964,9 +1138,11 @@
       hide($("#delete-room"));
     }
     if (state.me?.authenticated) {
-      show($("#invite-friend-btn"));
+      if (canManageRoom(room)) show($("#invite-friend-btn"));
+      else hide($("#invite-friend-btn"));
       show($("#room-design-btn"));
-      show($("#room-settings-btn"));
+      if (canEditRoom(room)) show($("#room-settings-btn"));
+      else hide($("#room-settings-btn"));
       syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
@@ -974,12 +1150,17 @@
       hide($("#room-settings-btn"));
       hide($("#room-run-graph-btn"));
       hide($("#autonomy-toggle-wrap"));
+      hide($("#room-overflow"));
     }
     enableComposer(
       true,
       hasAgents
-        ? "Message the team… /graph <topic> · /automate opens editor"
-        : "Message… open Graph, or @Bullish for a lens"
+        ? canEditRoom(room)
+          ? "Message the team… /graph <topic> · /automate opens editor"
+          : "Message the team…"
+        : canEditRoom(room)
+          ? "Message… open Graph, or @Bullish for a lens"
+          : "Message this team…"
     );
     if (state.shareRoomId !== roomId && typeof closeShareDialog === "function") {
       closeShareDialog();
@@ -995,9 +1176,16 @@
         body: JSON.stringify({ room_id: roomId }),
       });
     }
-    const { data } = await api("/api/messages?limit=200");
+    const loading = $("#messages-loading");
+    show(loading);
     $("#messages").innerHTML = "";
-    (data?.messages || []).forEach((m) => appendPeopleMessage(m, data?.me));
+    hide($("#load-earlier-btn"));
+    const { data } = await api("/api/messages?limit=80");
+    hide(loading);
+    const msgs = data?.messages || [];
+    state.messageHasMore = msgs.length >= 80;
+    if (state.messageHasMore) show($("#load-earlier-btn"));
+    msgs.forEach((m) => appendPeopleMessage(m, data?.me));
     openWs();
     if (hasAgents) await refreshSpecialistStatus(roomId);
     else setSpecialistRunUi(null);
@@ -1014,6 +1202,7 @@
     hide($("#room-settings-btn"));
     hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
+    hide($("#room-overflow"));
     closeShareDialog();
     if (state.compute) {
       const source = state.compute.is_local ? "Local compute" : "API compute";
@@ -1061,7 +1250,12 @@
     if (!input || !btn) return;
     input.disabled = !on;
     btn.disabled = !on;
+    const why = on ? "" : (placeholder || "Unavailable");
+    input.title = why;
+    btn.title = why;
+    input.setAttribute("aria-disabled", on ? "false" : "true");
     if (placeholder) input.placeholder = placeholder;
+    if (on) autoGrowComposer(input);
     if (!on && (!surface || surface === "teams")) hideMentionSuggest();
   }
 
@@ -1170,36 +1364,109 @@
     input.focus();
   }
 
-  $("#body")?.addEventListener("input", () => refreshMentionSuggest());
+  $("#body")?.addEventListener("input", () => {
+    refreshMentionSuggest();
+    autoGrowComposer($("#body"));
+  });
   $("#body")?.addEventListener("keydown", (e) => {
     const el = $("#mention-suggest");
-    if (!el || el.classList.contains("hidden")) return;
+    const mentionOpen = el && !el.classList.contains("hidden");
     const items = state.mentionItems || [];
-    if (!items.length) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      const next = (state.mentionActiveIndex + 1) % items.length;
-      renderMentionSuggest(items, next);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      const next = (state.mentionActiveIndex - 1 + items.length) % items.length;
-      renderMentionSuggest(items, next);
-    } else if (e.key === "Enter" || e.key === "Tab") {
-      const item = items[state.mentionActiveIndex];
-      if (item) {
+    if (mentionOpen && items.length) {
+      if (e.key === "ArrowDown") {
         e.preventDefault();
-        applyMentionSuggestion(item);
+        const next = (state.mentionActiveIndex + 1) % items.length;
+        renderMentionSuggest(items, next);
+        return;
       }
-    } else if (e.key === "Escape") {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = (state.mentionActiveIndex - 1 + items.length) % items.length;
+        renderMentionSuggest(items, next);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        const item = items[state.mentionActiveIndex];
+        if (item) {
+          e.preventDefault();
+          applyMentionSuggestion(item);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        hideMentionSuggest();
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      hideMentionSuggest();
+      $("#send-form")?.requestSubmit?.();
     }
   });
   $("#body")?.addEventListener("blur", () => {
     setTimeout(() => hideMentionSuggest(), 120);
   });
+  $("#mgmt-body")?.addEventListener("input", () => autoGrowComposer($("#mgmt-body")));
+  $("#mgmt-body")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("#mgmt-send-form")?.requestSubmit?.();
+    }
+  });
 
-  function appendPeopleMessage(msg, me) {
+  function appendSystemChip(text, actions) {
+    const wrap = document.createElement("div");
+    wrap.className = "system-chip";
+    const span = document.createElement("span");
+    span.textContent = text;
+    wrap.appendChild(span);
+    (actions || []).forEach((a) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost tiny";
+      btn.textContent = a.label;
+      btn.addEventListener("click", a.onClick);
+      wrap.appendChild(btn);
+    });
+    $("#messages")?.appendChild(wrap);
+    const messages = $("#messages");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+  }
+
+  function isInfraErrorBody(body) {
+    const text = String(body || "");
+    return (
+      text.length > 280 ||
+      /trycloudflare\.com|localhost:\d{4}|Traceback|ECONNREFUSED|tunnel/i.test(text) ||
+      /Error code:\s*401|API key is invalid|invalid.?api.?key|authentication_error|Unauthorized/i.test(text)
+    );
+  }
+
+  function appendPeopleMessage(msg, me, { prepend } = {}) {
+    const body = msg.body || "";
+    if (isInfraErrorBody(body) && !msg.author?.includes?.("you")) {
+      // Keep chat clean — infrastructure failures become a compact chip.
+      const chipParent = document.createElement("div");
+      chipParent.className = "system-chip";
+      chipParent.innerHTML =
+        '<span>Model connection failed.</span><span class="muted">Open Settings → Models or Start local model.</span>';
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ghost tiny";
+      go.textContent = "Open models";
+      go.addEventListener("click", () => {
+        switchTab("settings");
+        document.querySelector('[data-settings-panel="models"]')?.click?.();
+      });
+      chipParent.appendChild(go);
+      const messages = $("#messages");
+      if (!messages) return;
+      if (prepend) messages.insertBefore(chipParent, messages.firstChild);
+      else messages.appendChild(chipParent);
+      if (!prepend) messages.scrollTop = messages.scrollHeight;
+      return;
+    }
     const div = document.createElement("div");
     const mine = msg.author === (me || state.me?.name);
     const author = msg.author || "";
@@ -1213,13 +1480,26 @@
       );
     div.className = "msg" + (mine ? " mine" : "") + (agent ? " agent" : "");
     div.innerHTML =
-      '<div class="meta"><span class="author"></span><span class="time"></span></div>' +
-      '<div class="body"></div>';
-    div.querySelector(".author").textContent = author;
-    div.querySelector(".time").textContent = fmtTime(msg.created_at);
-    div.querySelector(".body").textContent = msg.body || "";
-    $("#messages").appendChild(div);
-    $("#messages").scrollTop = $("#messages").scrollHeight;
+      '<div class="meta"></div><div class="body"></div>';
+    const meta = div.querySelector(".meta");
+    meta.appendChild(avatarFallback(author));
+    const authorEl = document.createElement("span");
+    authorEl.className = "author";
+    authorEl.textContent = author;
+    authorEl.title = author;
+    meta.appendChild(authorEl);
+    const timeEl = document.createElement("span");
+    timeEl.className = "time";
+    timeEl.textContent = fmtTime(msg.created_at);
+    meta.appendChild(timeEl);
+    div.querySelector(".body").textContent = body;
+    const messages = $("#messages");
+    if (!messages) return;
+    if (prepend) messages.insertBefore(div, messages.firstChild);
+    else {
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
   }
 
   function appendAgentMessage(ev, surface) {
@@ -1261,57 +1541,73 @@
     setError(errorSel, "");
     const body = bodyInput.value.trim();
     if (!body) return;
-    if (surface === "teams" && /^\/automate(?:\s|$)/i.test(body)) {
-      bodyInput.value = "";
-      openRoomDesign();
-      return;
-    }
-    if (surface === "teams" && /^\/graph(?:\s|$)/i.test(body)) {
-      const focus = body.replace(/^\/graph\s*/i, "").trim();
-      bodyInput.value = "";
-      if (!focus) {
-        showFlowToast("Usage: /graph <topic> — e.g. /graph Research NVDA AI demand");
+    const form = bodyInput.closest("form");
+    const submitBtn = form?.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Sending…");
+    bodyInput.disabled = true;
+    try {
+      if (surface === "teams" && /^\/automate(?:\s|$)/i.test(body)) {
+        bodyInput.value = "";
+        openRoomDesign();
         return;
       }
-      await runRoomGraph({ fromDialog: false, focus });
-      return;
-    }
-    if (state.kind === "people" && surface === "teams") {
-      if (state.ws && state.ws.readyState === 1) {
-        state.ws.send(JSON.stringify({ type: "message", body }));
+      if (surface === "teams" && /^\/graph(?:\s|$)/i.test(body)) {
+        const focus = body.replace(/^\/graph\s*/i, "").trim();
         bodyInput.value = "";
-      } else {
-        const { res, data } = await api("/api/messages", {
-          method: "POST",
-          body: JSON.stringify({ body }),
-        });
-        if (!res.ok) {
-          setError(errorSel, data?.error || "Send failed");
+        if (!focus) {
+          showFlowToast("Usage: /graph <topic> — e.g. /graph Research NVDA AI demand");
           return;
         }
-        bodyInput.value = "";
-        if (data?.message) appendPeopleMessage(data.message, data.me);
-      }
-      return;
-    }
-    if (state.kind === "agents" && state.threadId && surface === "management") {
-      bodyInput.value = "";
-      appendAgentMessage(
-        {
-          ts: new Date().toISOString(),
-          payload: { role: "user", content: body },
-        },
-        "management"
-      );
-      const { res, data } = await api("/api/agent-chats/message", {
-        method: "POST",
-        body: JSON.stringify({ thread_id: state.threadId, content: body }),
-      });
-      if (!res.ok) {
-        setError(errorSel, data?.error || data?.message || "Send failed");
+        await runRoomGraph({ fromDialog: false, focus });
         return;
       }
-      if (data?.job?.job_id) pollJob(data.job.job_id);
+      if (state.kind === "people" && surface === "teams") {
+        if (state.ws && state.ws.readyState === 1) {
+          state.ws.send(JSON.stringify({ type: "message", body }));
+          bodyInput.value = "";
+          autoGrowComposer(bodyInput);
+        } else {
+          const { res, data } = await api("/api/messages", {
+            method: "POST",
+            body: JSON.stringify({ body }),
+          });
+          if (!res.ok) {
+            setError(errorSel, data?.error || "Send failed");
+            return;
+          }
+          bodyInput.value = "";
+          autoGrowComposer(bodyInput);
+          if (data?.message) appendPeopleMessage(data.message, data.me);
+        }
+        return;
+      }
+      if (state.kind === "agents" && state.threadId && surface === "management") {
+        bodyInput.value = "";
+        autoGrowComposer(bodyInput);
+        appendAgentMessage(
+          {
+            ts: new Date().toISOString(),
+            payload: { role: "user", content: body },
+          },
+          "management"
+        );
+        const { res, data } = await api("/api/agent-chats/message", {
+          method: "POST",
+          body: JSON.stringify({ thread_id: state.threadId, content: body }),
+        });
+        if (!res.ok) {
+          setError(errorSel, data?.error || data?.message || "Send failed");
+          return;
+        }
+        if (data?.job?.job_id) pollJob(data.job.job_id);
+      }
+    } finally {
+      setButtonBusy(submitBtn, false);
+      // Re-enable if composer should be on
+      if (surface === "management" || state.kind === "people") {
+        bodyInput.disabled = false;
+        if (submitBtn) submitBtn.disabled = false;
+      }
     }
   }
 
@@ -1424,6 +1720,7 @@
     hide($("#room-settings-btn"));
     hide($("#room-run-graph-btn"));
     hide($("#autonomy-toggle-wrap"));
+    hide($("#room-overflow"));
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
     $("#messages").innerHTML = "";
@@ -1440,7 +1737,9 @@
     state.roomId = null;
     state.threadId = null;
     $("#stage-kind").textContent = "Team";
-    $("#stage-title").textContent = "Select a team";
+    $("#stage-title").textContent = "Your teams";
+    $("#stage-title").title = "Your teams";
+    setTeamsEmptyVisible(true);
     enableComposer(false, "Create or open a team to chat", "teams");
     renderRails();
   }
@@ -1487,6 +1786,42 @@
       dlg?.showModal?.();
     } catch (err) {
       setError("#chat-error", String(err.message || err));
+    }
+  });
+  $("#teams-empty-create")?.addEventListener("click", () => {
+    $("#new-room-btn")?.click();
+  });
+  $("#agent-dock-toggle")?.addEventListener("click", () => {
+    const dock = $("#agent-dock");
+    const btn = $("#agent-dock-toggle");
+    if (!dock || !btn) return;
+    const open = !dock.classList.contains("is-open");
+    dock.classList.toggle("is-open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.textContent = open ? "Hide" : "Assign";
+  });
+  $("#load-earlier-btn")?.addEventListener("click", async () => {
+    if (state.kind !== "people" || !state.roomId) return;
+    const btn = $("#load-earlier-btn");
+    setButtonBusy(btn, true, "Loading…");
+    try {
+      const nextLimit = Math.min(500, (state.messageLimit || 80) + 80);
+      state.messageLimit = nextLimit;
+      const { data } = await api(`/api/messages?limit=${nextLimit}`);
+      const msgs = data?.messages || [];
+      state.messageHasMore = msgs.length >= nextLimit && nextLimit < 500;
+      if (!state.messageHasMore) hide(btn);
+      const box = $("#messages");
+      if (box) box.innerHTML = "";
+      msgs.forEach((m) => appendPeopleMessage(m, data?.me));
+    } finally {
+      setButtonBusy(btn, false);
+      if (!state.messageHasMore) hide(btn);
+    }
+  });
+  $("#room-overflow")?.addEventListener("click", (e) => {
+    if (e.target.closest(".overflow-item")) {
+      $("#room-overflow").open = false;
     }
   });
   $("#new-room-cancel").addEventListener("click", () => {
@@ -1557,17 +1892,152 @@
     state.shareRoomId = roomId || null;
     $("#share-url").value = shareUrl || "";
     const hasRoom = !!roomId;
+    const title = $("#share-dialog-title");
+    if (title) title.textContent = hasRoom ? "Share team" : "Friends";
     const hint = $("#friends-dialog-hint");
     if (hint) {
       hint.textContent = hasRoom
-        ? "Search usernames to send friend requests. Add friends to this team once they’re accepted."
+        ? "Editors can change the graph, agents, and room settings. Viewers can chat. Only you (owner) can add people or change access."
         : "Search usernames to send friend requests.";
     }
+    const accessSection = $("#room-access-section");
+    if (accessSection) accessSection.classList.toggle("hidden", !hasRoom);
     const inviteDetails = document.querySelector("#share-dialog .invite-link-details");
     if (inviteDetails) inviteDetails.classList.toggle("hidden", !hasRoom);
     const dialog = $("#share-dialog");
     if (dialog && !dialog.open) dialog.showModal();
     refreshFriendsDialog();
+  }
+
+  function makeRoleSelect(currentRole, { disabled = false, onChange } = {}) {
+    const select = document.createElement("select");
+    select.className = "room-access-role";
+    select.setAttribute("aria-label", "Access level");
+    [
+      ["editor", "Editor"],
+      ["viewer", "Viewer"],
+    ].forEach(([value, label]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      if (value === currentRole) opt.selected = true;
+      select.appendChild(opt);
+    });
+    select.disabled = !!disabled;
+    if (typeof onChange === "function") {
+      select.addEventListener("change", () => onChange(select.value, select));
+    }
+    return select;
+  }
+
+  async function refreshRoomAccessList() {
+    const section = $("#room-access-section");
+    const list = $("#room-access-list");
+    const empty = $("#room-access-empty");
+    if (!section || !list) return;
+    if (!state.shareRoomId) {
+      section.classList.add("hidden");
+      list.innerHTML = "";
+      return;
+    }
+    section.classList.remove("hidden");
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members`
+    );
+    if (!res.ok) {
+      list.innerHTML = "";
+      if (empty) {
+        empty.textContent = "Could not load access list.";
+        empty.classList.remove("hidden");
+      }
+      return;
+    }
+    const members = data.members || [];
+    const iAmOwner = data.my_role === "owner" || canManageRoom(currentRoom());
+    list.innerHTML = "";
+    members.forEach((member) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const name = member.display_name || member.username || "User";
+      if (typeof avatarFallback === "function") {
+        li.appendChild(avatarFallback(name));
+      }
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      strong.title = name;
+      meta.appendChild(strong);
+      if (member.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${member.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      if (member.role === "owner") {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = "Owner";
+        actions.appendChild(tag);
+      } else if (iAmOwner) {
+        const select = makeRoleSelect(member.role === "viewer" ? "viewer" : "editor", {
+          onChange: async (role, el) => {
+            setError("#friends-dialog-error", "");
+            const result = await api(
+              `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members/${encodeURIComponent(member.user_id)}`,
+              { method: "PATCH", body: JSON.stringify({ role }) }
+            );
+            if (!result.res.ok) {
+              setError(
+                "#friends-dialog-error",
+                result.data?.message || result.data?.error || "Could not update access"
+              );
+              el.value = member.role === "viewer" ? "viewer" : "editor";
+              return;
+            }
+            member.role = role;
+            settingsMessage(
+              "#friends-dialog-message",
+              result.data.message || `Access updated to ${roomRoleLabel(role)}.`
+            );
+          },
+        });
+        actions.appendChild(select);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost tiny";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const result = await api(
+            `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members/${encodeURIComponent(member.user_id)}`,
+            { method: "DELETE" }
+          );
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not remove"
+            );
+            return;
+          }
+          settingsMessage("#friends-dialog-message", "Removed from team.");
+          await refreshRoomAccessList();
+          await refreshFriendsDialog();
+        });
+        actions.appendChild(remove);
+      } else {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = roomRoleLabel(member.role);
+        actions.appendChild(tag);
+      }
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+    if (empty) empty.classList.toggle("hidden", members.length > 0);
   }
 
   async function openFriendsFromProfile() {
@@ -1593,11 +2063,13 @@
   }
 
   function setNotifyBadge(count) {
-    const badge = $("#notify-badge");
-    if (!badge) return;
     const n = Number(count || 0);
-    badge.textContent = n > 99 ? "99+" : String(n);
-    badge.classList.toggle("hidden", n <= 0);
+    ["#notify-badge", "#mobile-notify-badge"].forEach((sel) => {
+      const badge = $(sel);
+      if (!badge) return;
+      badge.textContent = n > 99 ? "99+" : String(n);
+      badge.classList.toggle("hidden", n <= 0);
+    });
   }
 
   async function refreshNotifyBadge() {
@@ -1622,10 +2094,13 @@
     users.forEach((user) => {
       const li = document.createElement("li");
       li.className = "friend-row";
+      const name = user.display_name || user.username || "User";
+      li.appendChild(avatarFallback(name));
       const meta = document.createElement("div");
       meta.className = "friend-meta";
       const strong = document.createElement("strong");
-      strong.textContent = user.display_name || user.username || "User";
+      strong.textContent = name;
+      strong.title = name;
       meta.appendChild(strong);
       if (user.username) {
         const handle = document.createElement("span");
@@ -1650,23 +2125,39 @@
     const needed = $("#friends-username-needed");
     const hasUsername = !!(state.me?.username);
     if (needed) needed.classList.toggle("hidden", hasUsername);
+    if (state.shareRoomId) await refreshRoomAccessList();
+    else {
+      const section = $("#room-access-section");
+      if (section) section.classList.add("hidden");
+    }
     const { res, data } = await api("/api/friends");
     if (!res.ok) return;
     state.friends = data.friends || [];
     if (data.username) state.me = { ...(state.me || {}), username: data.username };
+    const room = currentRoom();
+    const iAmOwner =
+      !!state.shareRoomId &&
+      (canManageRoom(room) ||
+        (room?.room_id === state.shareRoomId && room?.my_role === "owner"));
     renderFriendRows($("#friends-dialog-list"), state.friends, {
       emptyText: "No friends yet — search a username above.",
       action: (user, actions) => {
-        if (!state.shareRoomId || state.kind !== "people") return;
+        if (!state.shareRoomId || state.kind !== "people" || !iAmOwner) return;
+        const roleSelect = makeRoleSelect("editor");
+        actions.appendChild(roleSelect);
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "ghost tiny";
-        btn.textContent = "Add to team";
+        btn.textContent = "Share";
         btn.addEventListener("click", async () => {
           setError("#friends-dialog-error", "");
+          const role = roleSelect.value === "viewer" ? "viewer" : "editor";
           const result = await api(
             `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members`,
-            { method: "POST", body: JSON.stringify({ user_id: user.user_id }) }
+            {
+              method: "POST",
+              body: JSON.stringify({ user_id: user.user_id, role }),
+            }
           );
           if (!result.res.ok) {
             setError(
@@ -1679,6 +2170,7 @@
             "#friends-dialog-message",
             result.data.message || "Added to team."
           );
+          await refreshRoomAccessList();
         });
         actions.appendChild(btn);
       },
@@ -1693,8 +2185,13 @@
       if (list) list.innerHTML = "";
       return;
     }
+    if (list) {
+      list.innerHTML =
+        '<li class="state-block" role="status">Searching…</li>';
+    }
     const { res, data } = await api(`/api/users/search?q=${encodeURIComponent(q)}`);
     if (!res.ok) {
+      if (list) list.innerHTML = "";
       setError("#friends-dialog-error", data?.message || data?.error || "Search failed");
       return;
     }
@@ -1758,6 +2255,7 @@
             "#friends-dialog-message",
             result.data.message || "Friend request sent."
           );
+          showAppToast("Friend request sent");
           await searchFriends();
           await refreshFriendsDialog();
         });
@@ -1781,12 +2279,17 @@
   }
 
   async function loadNotificationsTab() {
+    const list = $("#notifications-list");
+    if (list && !list.children.length) {
+      list.innerHTML = '<li class="state-block" role="status">Loading…</li>';
+    }
     const notesData = await refreshNotifyBadge();
     const { res, data } = await api("/api/friends");
     const incoming = res.ok ? data.incoming || [] : [];
     const reqList = $("#notifications-requests");
     const reqEmpty = $("#notifications-requests-empty");
     renderFriendRows(reqList, incoming, {
+      emptyText: "No pending requests.",
       action: (user, actions) => {
         const accept = document.createElement("button");
         accept.type = "button";
@@ -1797,6 +2300,7 @@
             method: "POST",
             body: "{}",
           });
+          showAppToast("Friend request accepted");
           await loadNotificationsTab();
           await loadProfileFriends();
         });
@@ -1817,7 +2321,6 @@
     });
     if (reqEmpty) reqEmpty.classList.toggle("hidden", incoming.length > 0);
 
-    const list = $("#notifications-list");
     const empty = $("#notifications-empty");
     const notes = notesData?.notifications || [];
     if (list) {
@@ -2459,6 +2962,7 @@
     }
     const room = currentRoom() || {};
     const config = room.config || {};
+    const editable = canEditRoom(room);
     $("#room-objective").value = config.objective || "";
     $("#room-prompts").value = (config.prompts || []).join("\n");
     const orch = $("#room-orchestrator");
@@ -2479,6 +2983,27 @@
     renderGraphRoster();
     renderGraphMap();
     updateHarnessCanvasPreview();
+    const form = $("#room-design-form");
+    if (form) {
+      form.querySelectorAll("input, textarea, select, button").forEach((el) => {
+        if (el.id === "room-design-cancel" || el.getAttribute("value") === "cancel") return;
+        if (el.type === "submit" || el.closest(".graph-layer-actions")) {
+          el.disabled = !editable;
+          el.classList.toggle("hidden", !editable && el.type === "submit");
+        } else if (el.tagName !== "BUTTON" || el.type !== "button") {
+          el.disabled = !editable;
+          el.readOnly = !editable;
+        } else if (!editable) {
+          el.disabled = true;
+        }
+      });
+    }
+    if (!editable) {
+      setError(
+        "#room-design-error",
+        "View-only access — ask the owner for Editor to change the graph."
+      );
+    }
     $("#room-design-dialog")?.showModal?.();
   }
 
@@ -2758,6 +3283,13 @@
   async function saveRoomGraphConfig({ closeDialog = true, toast = true } = {}) {
     setError("#room-design-error", "");
     if (!state.roomId) return false;
+    if (!canEditRoom(currentRoom())) {
+      setError(
+        "#room-design-error",
+        "Viewers can’t edit the graph. Ask the owner for Editor access."
+      );
+      return false;
+    }
     syncGuardsToLayers();
     state.graphFocusLayerId = null;
     const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
@@ -3033,20 +3565,33 @@
 
   async function loadAgentsStudio() {
     setError("#agents-tab-error", "");
+    const agentsEl = $("#studio-agents");
+    const emptyEl = $("#studio-agents-empty");
+    if (agentsEl && !agentsEl.children.length) {
+      agentsEl.innerHTML =
+        '<div class="state-skeleton" aria-hidden="true"><div class="sk-row"></div><div class="sk-row"></div></div>';
+    }
     const [agents, lenses, caps] = await Promise.all([
       api("/api/registry/agents"),
       api("/api/registry/lenses"),
       api("/api/registry/capabilities"),
     ]);
-    const agentsEl = $("#studio-agents");
     const lensesEl = $("#studio-lenses");
     const capsEl = $("#studio-caps");
-    const emptyEl = $("#studio-agents-empty");
     if (agentsEl) agentsEl.innerHTML = "";
     if (lensesEl) lensesEl.innerHTML = "";
     if (capsEl) capsEl.innerHTML = "";
     const selectAll = $("#studio-select-all");
     if (selectAll) selectAll.checked = false;
+
+    if (!agents.res.ok) {
+      setError("#agents-tab-error", agents.data?.error || "Could not load agents");
+      if (emptyEl) {
+        emptyEl.textContent = "Could not load agents. Try Refresh.";
+        emptyEl.classList.remove("hidden");
+      }
+      return;
+    }
 
     const allAgents = agents.data?.agents || [];
     const yours = allAgents.filter((a) => a.editable);
@@ -3054,7 +3599,11 @@
       (a) => !a.editable && a.id !== "master" && a.room_palette !== false
     );
 
-    if (emptyEl) emptyEl.classList.toggle("hidden", yours.length > 0);
+    if (emptyEl) {
+      emptyEl.textContent =
+        "No custom agents yet — hit Hire agent to compose one from lenses and capabilities.";
+      emptyEl.classList.toggle("hidden", yours.length > 0);
+    }
 
     function renderAgentCard(a) {
       const card = document.createElement("article");
@@ -4211,7 +4760,7 @@
       await api(`/api/settings/models/${profileId}/enable`, { method: "POST" });
       if (state.kind === "people" && state.roomId) {
         const room = currentRoom();
-        if (canManageRoom(room)) {
+        if (canEditRoom(room)) {
           await api(`/api/rooms/${encodeURIComponent(state.roomId)}/model`, {
             method: "POST",
             body: JSON.stringify({ profile_id: profileId }),

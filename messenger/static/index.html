@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=48" />
+  <link rel="stylesheet" href="/static/style.css?v=51" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -25,7 +25,7 @@
         <label>Email <input id="login-email" type="email" autocomplete="username" required /></label>
         <label>Password <input id="login-password" type="password" autocomplete="current-password" required /></label>
         <p id="login-error" class="error" hidden></p>
-        <button type="submit">Log in</button>
+        <button type="submit" id="login-submit">Log in</button>
         <p class="auth-links">
           <button type="button" id="show-forgot-btn" class="linkish">Forgot password?</button>
           <button type="button" id="resend-verify-btn" class="linkish hidden">Resend verification</button>
@@ -105,73 +105,97 @@
                   <h2>Your teams</h2>
                   <p>Sit in, add friends, run graphs</p>
                 </div>
-                <button type="button" id="new-room-btn" class="ghost tiny" title="Create team">+</button>
+                <button type="button" id="new-room-btn" class="ghost tiny" title="Create team">Create</button>
               </header>
-              <ul id="room-list" class="thread-list room-list"></ul>
+              <ul id="room-list" class="thread-list room-list" aria-busy="false"></ul>
             </div>
-            <div class="rail-section agent-dock">
+            <div class="rail-section agent-dock" id="agent-dock">
               <header class="section-head">
                 <div>
                   <h2>Agents</h2>
-                  <p>Drag onto a team</p>
+                  <p>Click to assign to the open team</p>
                 </div>
+                <button type="button" id="agent-dock-toggle" class="ghost tiny mobile-only" aria-expanded="false" aria-controls="agent-palette">Assign</button>
               </header>
               <ul id="agent-palette" class="agent-palette"></ul>
             </div>
           </aside>
-          <div class="chat-stage" id="chat-stage">
-            <header class="stage-header">
-              <div>
+          <div class="chat-stage is-empty" id="chat-stage">
+            <header class="stage-header" id="stage-header">
+              <div class="stage-header-main">
                 <p class="eyebrow" id="stage-kind">Team</p>
-                <h1 id="stage-title">Select a team</h1>
-                <div class="room-context">
-                  <label class="room-model-wrap hidden" id="room-model-wrap">
-                    <span class="sr-only">Model for this team</span>
-                    <select id="room-model-select" class="room-model-select" title="Agents on this team use the model you pick here"></select>
-                  </label>
-                  <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this team"></span>
-                  <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
-                    Start local model
-                  </button>
+                <h1 id="stage-title">Your teams</h1>
+                <div class="room-context" id="room-context">
                   <div id="room-members" class="room-members"></div>
                 </div>
                 <div id="harness-flow-strip" class="harness-flow-strip hidden" aria-live="polite"></div>
               </div>
-              <div class="header-actions">
-                <button type="button" id="room-design-btn" class="ghost hidden" title="Graph map: steps, analysts, guards">Graph</button>
+              <div class="header-actions" id="header-actions">
+                <label class="room-model-wrap hidden" id="room-model-wrap">
+                  <span class="sr-only">Model for this team</span>
+                  <select id="room-model-select" class="room-model-select" title="Agents on this team use the model you pick here"></select>
+                </label>
+                <span id="compute-badge" class="compute-badge hidden" title="Currently selected for this team"></span>
+                <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
+                  Start local model
+                </button>
                 <button type="button" id="room-run-graph-btn" class="hidden" title="Run Graph (or type /graph &lt;topic&gt; to attach a focus)">Run Graph</button>
-                <button type="button" id="room-settings-btn" class="ghost hidden" title="GitHub repo, API keys, integrations">Room settings</button>
                 <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Keep the Graph looping until you stop">
                   <input type="checkbox" id="autonomy-toggle" />
                   <span>Keep running</span>
                 </label>
-                <button type="button" id="invite-friend-btn" class="ghost hidden">Add friends</button>
-                <button type="button" id="clear-chat" class="ghost danger hidden">Clear</button>
-                <button type="button" id="delete-room" class="ghost danger hidden">Delete</button>
+                <details class="overflow-menu hidden" id="room-overflow">
+                  <summary class="ghost tiny overflow-summary" aria-label="More team actions">⋯</summary>
+                  <div class="overflow-panel" role="menu">
+                    <button type="button" id="room-design-btn" class="overflow-item" role="menuitem" title="Graph map: steps, analysts, guards">Graph</button>
+                    <button type="button" id="room-settings-btn" class="overflow-item" role="menuitem" title="GitHub repo, API keys, integrations">Room settings</button>
+                    <button type="button" id="invite-friend-btn" class="overflow-item" role="menuitem">Share</button>
+                    <button type="button" id="clear-chat" class="overflow-item danger" role="menuitem">Clear</button>
+                    <button type="button" id="delete-room" class="overflow-item danger" role="menuitem">Delete</button>
+                  </div>
+                </details>
               </div>
             </header>
+            <div id="teams-empty" class="empty-card teams-empty">
+              <h2>Create your first team</h2>
+              <p class="muted">One place for friends, hired agents, and graph runs.</p>
+              <ol class="empty-steps">
+                <li>Create a team</li>
+                <li>Hire or assign agents</li>
+                <li>Message the team or run a graph</li>
+              </ol>
+              <button type="button" id="teams-empty-create" class="primary-cta">Create team</button>
+            </div>
             <div id="specialist-run-banner" class="run-banner hidden" role="status">
               <span id="specialist-run-text">Team Graph running — safe to leave.</span>
               <button type="button" id="specialist-stop-banner-btn" class="ghost danger">Stop</button>
             </div>
             <div id="messages" class="messages" aria-live="polite"></div>
+            <div id="messages-loading" class="state-block hidden" role="status">Loading messages…</div>
+            <button type="button" id="load-earlier-btn" class="ghost tiny load-earlier hidden">Load earlier</button>
             <form id="send-form" class="composer">
               <div class="composer-wrap">
                 <ul id="mention-suggest" class="mention-suggest hidden" role="listbox"></ul>
-                <input id="body" type="text" maxlength="2000" placeholder="Message… /graph &lt;topic&gt; to run" autocomplete="off" disabled />
+                <textarea id="body" rows="1" maxlength="2000" placeholder="Message… /graph &lt;topic&gt; to run" autocomplete="off" disabled title="Select a team to chat"></textarea>
               </div>
-              <button type="submit" disabled>Send</button>
+              <button type="submit" disabled title="Select a team to chat">Send</button>
             </form>
             <p id="chat-error" class="error" hidden></p>
+            <div id="chat-success" class="success-banner hidden" role="status"></div>
           </div>
         </div>
 
         <dialog id="share-dialog">
           <form method="dialog" class="share-dialog-form friends-dialog-form" id="friends-dialog-form">
-            <h3>Friends</h3>
+            <h3 id="share-dialog-title">Share</h3>
             <div class="friends-dialog-scroll">
               <p class="muted tiny-hint" id="friends-dialog-hint">Search usernames to send friend requests. Add friends to this team once they’re accepted.</p>
               <p id="friends-username-needed" class="auth-banner hidden">Set your username in Settings → Profile so people can find you.</p>
+              <div id="room-access-section" class="friends-dialog-section hidden">
+                <h4>People with access</h4>
+                <ul id="room-access-list" class="friend-results room-access-list"></ul>
+                <p id="room-access-empty" class="muted tiny-hint hidden">Only you have access so far.</p>
+              </div>
               <label for="friend-search">Find by username</label>
               <div class="share-row">
                 <input id="friend-search" type="text" maxlength="24" placeholder="search @username" autocomplete="off" />
@@ -184,7 +208,7 @@
               </div>
               <details class="invite-link-details">
                 <summary>Or share an invite link</summary>
-                <p class="muted tiny-hint">Anyone with this link can join the team chat.</p>
+                <p class="muted tiny-hint">Anyone with this link joins as a Viewer. Upgrade them under People with access.</p>
                 <label for="share-url">Invite link</label>
                 <div class="share-row">
                   <input id="share-url" type="text" readonly />
@@ -392,11 +416,12 @@
             <div id="mgmt-messages" class="messages" aria-live="polite"></div>
             <form id="mgmt-send-form" class="composer">
               <div class="composer-wrap">
-                <input id="mgmt-body" type="text" maxlength="2000" placeholder="Ask Master to create a team, hire agents, or draft a workflow…" autocomplete="off" disabled />
+                <textarea id="mgmt-body" rows="1" maxlength="2000" placeholder="Ask Master to create a team, hire agents, or draft a workflow…" autocomplete="off" disabled title="Master chat loading"></textarea>
               </div>
               <button type="submit" disabled>Send</button>
             </form>
             <p id="mgmt-chat-error" class="error" hidden></p>
+            <div id="mgmt-chat-success" class="success-banner hidden" role="status"></div>
           </div>
         </div>
       </section>
@@ -757,7 +782,7 @@
               </div>
               <div class="settings-subcard stacked">
                 <strong>Your Flyleaf data</strong>
-                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team Graph runs use the <strong>team owner’s</strong> ledger and model links; invited friends contribute in chat.</p>
+                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team Graph runs use the <strong>team owner’s</strong> ledger and model links. Invited people get Viewer or Editor access (Docs-style); Editors can edit graphs, hire agents, and change room config. Only the owner can delete the team or manage who has access.</p>
                 <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
               </div>
             </section>
@@ -888,8 +913,20 @@
         </div>
       </section>
     </main>
+    <nav class="mobile-tabbar" aria-label="Primary mobile">
+      <button type="button" class="mobile-tab active" data-tab="chats">Teams</button>
+      <button type="button" class="mobile-tab" data-tab="management">Master</button>
+      <button type="button" class="mobile-tab" data-tab="agents">Hire</button>
+      <button type="button" class="mobile-tab" data-tab="settings">Settings</button>
+      <button type="button" class="mobile-tab mobile-tab-notify" data-tab="notifications" id="mobile-nav-notifications">
+        Alerts
+        <span id="mobile-notify-badge" class="notify-badge hidden" aria-hidden="true">0</span>
+      </button>
+    </nav>
   </div>
 
-  <script src="/static/app.js?v=53"></script>
+  <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js?v=55"></script>
 </body>
 </html>
