@@ -273,7 +273,12 @@
                   <legend>People in this room</legend>
                   <ul id="room-settings-people" class="room-settings-people"></ul>
                   <p id="room-settings-people-empty" class="muted tiny-hint hidden">Only you have access so far.</p>
-                  <p class="muted tiny-hint">Green means they’re in the team right now. Use Share to invite or change roles.</p>
+                  <div class="room-people-actions">
+                    <button type="button" id="room-settings-invite-btn" class="ghost tiny">Invite people</button>
+                    <p class="muted tiny-hint">Green means they’re in the team right now. Owners can change roles here.</p>
+                  </div>
+                  <p id="room-settings-people-message" class="auth-banner" hidden></p>
+                  <p id="room-settings-people-error" class="error" hidden></p>
                 </fieldset>
 
                 <details class="graph-advanced">
@@ -940,6 +945,6 @@
 
   <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=59"></script>
+  <script src="/static/app.js?v=60"></script>
 </body>
 </html>

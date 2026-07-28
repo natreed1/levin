@@ -364,3 +364,5 @@ def test_friends_ui_markers_present():
     assert "refreshRoomAccessList" in js
     assert "applyRoomPresence" in js
     assert "loadRoomSettingsPeople" in js
+    assert "room-settings-invite-btn" in html
+    assert "Owners can change roles here" in html

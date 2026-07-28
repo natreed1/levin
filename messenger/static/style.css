@@ -1339,6 +1339,14 @@ input:disabled, select:disabled, textarea:disabled {
   flex: 1 1 auto;
   min-width: 0;
 }
+.room-settings-person .friend-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .room-settings-person .presence-pill {
   flex: 0 0 auto;
   font-size: 0.68rem;
@@ -1352,6 +1360,17 @@ input:disabled, select:disabled, textarea:disabled {
   color: #15803d;
   border-color: color-mix(in srgb, #16a34a 40%, var(--border));
   background: color-mix(in srgb, #16a34a 12%, transparent);
+}
+.room-people-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+.room-people-actions .tiny-hint {
+  margin: 0;
+  flex: 1 1 12rem;
 }
 
 .run-banner {

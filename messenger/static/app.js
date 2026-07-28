@@ -29,6 +29,8 @@
     toastTimer: null,
     roomPresence: [],
     roomMembersCache: [],
+    roomPendingInvites: [],
+    roomMyRole: null,
   };
 
   const THEME_KEY = "flyleaf-theme";
@@ -949,7 +951,10 @@
       updateRoomContext(currentRoom());
       const peopleDialog = $("#room-design-dialog");
       if (peopleDialog?.open) {
-        renderRoomSettingsPeople(state.roomMembersCache || []);
+        renderRoomSettingsPeople(
+          state.roomMembersCache || [],
+          state.roomPendingInvites || []
+        );
       }
     }
   }
@@ -965,12 +970,22 @@
     applyRoomPresence(data.active || [], data.room_id || id);
   }
 
-  function renderRoomSettingsPeople(members) {
+  function renderRoomSettingsPeople(members, pendingInvites) {
     const list = $("#room-settings-people");
     const empty = $("#room-settings-people-empty");
+    const inviteBtn = $("#room-settings-invite-btn");
     if (!list) return;
     list.innerHTML = "";
     const rows = Array.isArray(members) ? members : [];
+    const pending = Array.isArray(pendingInvites)
+      ? pendingInvites
+      : state.roomPendingInvites || [];
+    const iAmOwner =
+      state.roomMyRole === "owner" || canManageRoom(currentRoom());
+    if (inviteBtn) {
+      inviteBtn.classList.toggle("hidden", !iAmOwner);
+      inviteBtn.disabled = !iAmOwner;
+    }
     const activeIds = new Set(
       (state.roomPresence || [])
         .map((p) => String(p.user_id || "").trim())
@@ -982,7 +997,7 @@
         .map((p) => String(p.name || "").trim().toLowerCase())
         .filter(Boolean)
     );
-    if (!rows.length) {
+    if (!rows.length && !pending.length) {
       if (empty) {
         empty.textContent = "Only you have access so far.";
         empty.classList.remove("hidden");
@@ -1009,16 +1024,72 @@
         meta.appendChild(handle);
       }
       li.appendChild(meta);
-      const role = document.createElement("span");
-      role.className = "room-access-role-label";
-      const roleLabel =
-        member.role === "owner"
-          ? "Owner"
-          : member.role === "viewer"
-            ? "Viewer"
-            : "Editor";
-      role.textContent = roleLabel;
-      li.appendChild(role);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      if (member.role === "owner") {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = "Owner";
+        actions.appendChild(tag);
+      } else if (iAmOwner) {
+        const select = makeRoleSelect(member.role === "viewer" ? "viewer" : "editor", {
+          onChange: async (role, el) => {
+            setError("#room-settings-people-error", "");
+            settingsMessage("#room-settings-people-message", "");
+            const result = await api(
+              `/api/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.user_id)}`,
+              { method: "PATCH", body: JSON.stringify({ role }) }
+            );
+            if (!result.res.ok) {
+              setError(
+                "#room-settings-people-error",
+                result.data?.message || result.data?.error || "Could not update access"
+              );
+              el.value = member.role === "viewer" ? "viewer" : "editor";
+              return;
+            }
+            member.role = role;
+            settingsMessage(
+              "#room-settings-people-message",
+              result.data.message || `Access updated to ${roomRoleLabel(role)}.`
+            );
+            if (state.shareRoomId === state.roomId) {
+              refreshRoomAccessList().catch(() => {});
+            }
+          },
+        });
+        actions.appendChild(select);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost tiny danger";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", async () => {
+          setError("#room-settings-people-error", "");
+          settingsMessage("#room-settings-people-message", "");
+          const result = await api(
+            `/api/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.user_id)}`,
+            { method: "DELETE" }
+          );
+          if (!result.res.ok) {
+            setError(
+              "#room-settings-people-error",
+              result.data?.message || result.data?.error || "Could not remove"
+            );
+            return;
+          }
+          settingsMessage("#room-settings-people-message", "Removed from team.");
+          await loadRoomSettingsPeople(state.roomId);
+          if (state.shareRoomId === state.roomId) {
+            await refreshRoomAccessList();
+          }
+        });
+        actions.appendChild(remove);
+      } else {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = roomRoleLabel(member.role);
+        actions.appendChild(tag);
+      }
       const uid = String(member.user_id || "").trim();
       const isActive =
         (uid && activeIds.has(uid)) ||
@@ -1026,7 +1097,36 @@
       const pill = document.createElement("span");
       pill.className = `presence-pill${isActive ? " is-active" : ""}`;
       pill.textContent = isActive ? "Active" : "Away";
-      li.appendChild(pill);
+      actions.appendChild(pill);
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+    pending.forEach((invite) => {
+      const li = document.createElement("li");
+      li.className = "room-settings-person";
+      const name = invite.display_name || invite.username || "User";
+      if (typeof avatarFallback === "function") {
+        li.appendChild(avatarFallback(name));
+      }
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      meta.appendChild(strong);
+      if (invite.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${invite.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      const tag = document.createElement("span");
+      tag.className = "room-access-role-label";
+      tag.textContent = `Invited · ${roomRoleLabel(invite.role)}`;
+      actions.appendChild(tag);
+      li.appendChild(actions);
       list.appendChild(li);
     });
   }
@@ -1037,6 +1137,7 @@
     const empty = $("#room-settings-people-empty");
     if (!id || !list) return;
     list.innerHTML = "";
+    setError("#room-settings-people-error", "");
     if (empty) {
       empty.textContent = "Loading…";
       empty.classList.remove("hidden");
@@ -1044,6 +1145,8 @@
     const { res, data } = await api(`/api/rooms/${encodeURIComponent(id)}/members`);
     if (!res.ok) {
       state.roomMembersCache = [];
+      state.roomPendingInvites = [];
+      state.roomMyRole = null;
       if (empty) {
         empty.textContent = "Could not load people in this room.";
         empty.classList.remove("hidden");
@@ -1051,7 +1154,9 @@
       return;
     }
     state.roomMembersCache = data.members || [];
-    renderRoomSettingsPeople(state.roomMembersCache);
+    state.roomPendingInvites = data.pending_invites || [];
+    state.roomMyRole = data.my_role || null;
+    renderRoomSettingsPeople(state.roomMembersCache, state.roomPendingInvites);
   }
 
   function syncComputeBadgeFromSelect(room) {
@@ -1295,6 +1400,8 @@
     }
     state.roomPresence = [];
     state.roomMembersCache = [];
+    state.roomPendingInvites = [];
+    state.roomMyRole = null;
     updateRoomContext(room);
     updateSpecialistActions(room);
     renderRails();
@@ -1862,6 +1969,8 @@
     setSpecialistRunUi(null);
     state.roomPresence = [];
     state.roomMembersCache = [];
+    state.roomPendingInvites = [];
+    state.roomMyRole = null;
     $("#messages").innerHTML = "";
     $("#room-members").innerHTML = "";
     hide($("#compute-badge"));
@@ -2679,6 +2788,21 @@
   $("#invite-friend-btn").addEventListener("click", async () => {
     if (!state.roomId) return;
     setError("#chat-error", "");
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    let shareUrl = "";
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
+      { method: "POST", body: "{}" }
+    );
+    if (res.ok) shareUrl = data.share_url || "";
+    openShareDialog(shareUrl, state.roomId);
+  });
+
+  $("#room-settings-invite-btn")?.addEventListener("click", async () => {
+    if (!state.roomId) return;
+    setError("#room-settings-people-error", "");
+    settingsMessage("#room-settings-people-message", "");
     setError("#friends-dialog-error", "");
     settingsMessage("#friends-dialog-message", "");
     let shareUrl = "";
