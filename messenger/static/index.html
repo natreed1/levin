@@ -144,7 +144,6 @@
                 <button type="button" id="start-local-model-btn" class="ghost tiny hidden" title="Link Local Companion and turn on an open-source model">
                   Start local model
                 </button>
-                <button type="button" id="room-run-graph-btn" class="hidden" title="Run Graph (or type /graph &lt;topic&gt; to attach a focus)">Run Graph</button>
                 <label class="autonomy-toggle hidden" id="autonomy-toggle-wrap" title="Keep the Graph looping until you stop">
                   <input type="checkbox" id="autonomy-toggle" />
                   <span>Keep running</span>
@@ -270,6 +269,18 @@
               </div>
 
               <div class="graph-dialog-meta">
+                <fieldset class="cap-picker room-people-fieldset">
+                  <legend>People in this room</legend>
+                  <ul id="room-settings-people" class="room-settings-people"></ul>
+                  <p id="room-settings-people-empty" class="muted tiny-hint hidden">Only you have access so far.</p>
+                  <div class="room-people-actions">
+                    <button type="button" id="room-settings-invite-btn" class="ghost tiny">Invite people</button>
+                    <p class="muted tiny-hint">Green means they’re in the team right now. Owners can change roles here.</p>
+                  </div>
+                  <p id="room-settings-people-message" class="auth-banner" hidden></p>
+                  <p id="room-settings-people-error" class="error" hidden></p>
+                </fieldset>
+
                 <details class="graph-advanced">
                   <summary>Advanced — orchestrator, capabilities, loops, room settings</summary>
 
@@ -934,6 +945,6 @@
 
   <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=58"></script>
+  <script src="/static/app.js?v=61"></script>
 </body>
 </html>

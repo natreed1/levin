@@ -356,7 +356,13 @@ def test_friends_ui_markers_present():
     assert 'id="friend-search"' in html
     assert "Share" in html
     assert 'id="room-access-list"' in html
+    assert 'id="room-settings-people"' in html
+    assert "People in this room" in html
     assert 'api("/api/friends/request"' in js
     assert "loadNotificationsTab" in js
     assert "canEditRoom" in js
     assert "refreshRoomAccessList" in js
+    assert "applyRoomPresence" in js
+    assert "loadRoomSettingsPeople" in js
+    assert "room-settings-invite-btn" in html
+    assert "Owners can change roles here" in html
