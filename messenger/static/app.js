@@ -675,10 +675,8 @@
 
   function renderRails() {
     const list = $("#room-list");
-    const palette = $("#agent-palette");
-    if (!list || !palette) return;
+    if (!list) return;
     list.innerHTML = "";
-    palette.innerHTML = "";
     const entries = allRoomEntries();
 
     if (!entries.length) {
@@ -726,39 +724,54 @@
       list.appendChild(li);
     });
 
-    if (!state.specialists.length) {
-      const li = document.createElement("li");
-      li.className = "muted tiny-hint";
-      li.textContent = "No agents yet — open Hire to compose one";
-      palette.appendChild(li);
+    fillAgentAssignSelect();
+  }
+
+  function fillAgentAssignSelect() {
+    const select = $("#agent-assign-select");
+    const emptyHint = $("#agent-assign-empty");
+    if (!select) return;
+    const prev = select.value;
+    select.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    const canAssign = state.kind === "people" && !!state.roomId;
+    const agents = state.specialists || [];
+    if (!agents.length) {
+      placeholder.textContent = "No agents available";
+      select.appendChild(placeholder);
+      select.disabled = true;
+      select.title = "Open Hire to compose an agent";
+      if (emptyHint) emptyHint.classList.remove("hidden");
+      return;
     }
-    state.specialists.forEach((agent) => {
-      const li = document.createElement("li");
-      li.className = "agent-card";
-      li.draggable = true;
-      li.dataset.agentId = agent.id;
-      const kind = agent.kind === "operator" ? "operator" : "lens";
-      li.title = `${agent.name} (${kind}) — click to assign to the open team`;
+    if (emptyHint) emptyHint.classList.add("hidden");
+    placeholder.textContent = canAssign ? "Assign an agent…" : "Open a team to assign…";
+    select.appendChild(placeholder);
+    const onTeam = new Set(roomAgents(currentRoom()));
+    agents.forEach((agent) => {
+      const opt = document.createElement("option");
+      opt.value = agent.id;
       const caps = (agent.capabilities || []).length
         ? ` · ${(agent.capabilities || []).slice(0, 2).join(", ")}`
         : " · prompt only";
-      li.innerHTML = `<strong class="title">${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}${escapeHtml(caps)}</span>`;
-      li.addEventListener("dragstart", (event) => {
-        event.dataTransfer.effectAllowed = "copy";
-        event.dataTransfer.setData("application/x-workflow-agent", agent.id);
-        event.dataTransfer.setData("text/plain", agent.id);
-        li.classList.add("dragging");
-      });
-      li.addEventListener("dragend", () => li.classList.remove("dragging"));
-      li.addEventListener("click", async () => {
-        if (state.kind === "people" && state.roomId) {
-          await addAgentToRoom(state.roomId, agent.id);
-        } else {
-          showAppToast("Open a team first, then click an agent to assign");
-        }
-      });
-      palette.appendChild(li);
+      const mention = agent.mention || agent.role || "";
+      opt.textContent = `${agent.name}${mention ? ` (${mention})` : ""}${caps}`;
+      if (onTeam.has(agent.id)) {
+        opt.disabled = true;
+        opt.textContent += " — on team";
+      }
+      select.appendChild(opt);
     });
+    select.disabled = !canAssign;
+    select.title = canAssign
+      ? "Choose an agent to add to this team"
+      : "Open a team to assign agents";
+    if (prev && [...select.options].some((o) => o.value === prev && !o.disabled)) {
+      select.value = prev;
+    } else {
+      select.value = "";
+    }
   }
 
   function makeRoomDropTarget(element, roomId) {
@@ -1791,14 +1804,23 @@
   $("#teams-empty-create")?.addEventListener("click", () => {
     $("#new-room-btn")?.click();
   });
-  $("#agent-dock-toggle")?.addEventListener("click", () => {
-    const dock = $("#agent-dock");
-    const btn = $("#agent-dock-toggle");
-    if (!dock || !btn) return;
-    const open = !dock.classList.contains("is-open");
-    dock.classList.toggle("is-open", open);
-    btn.setAttribute("aria-expanded", open ? "true" : "false");
-    btn.textContent = open ? "Hide" : "Assign";
+  $("#agent-assign-select")?.addEventListener("change", async (e) => {
+    const select = e.target;
+    const agentId = select.value;
+    if (!agentId) return;
+    if (state.kind !== "people" || !state.roomId) {
+      showAppToast("Open a team first, then assign an agent");
+      select.value = "";
+      return;
+    }
+    select.disabled = true;
+    try {
+      await addAgentToRoom(state.roomId, agentId);
+      showAppToast("Agent assigned to team");
+    } finally {
+      select.value = "";
+      fillAgentAssignSelect();
+    }
   });
   $("#load-earlier-btn")?.addEventListener("click", async () => {
     if (state.kind !== "people" || !state.roomId) return;

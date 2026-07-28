@@ -960,9 +960,49 @@ input:disabled, select:disabled, textarea:disabled {
 }
 .agent-dock {
   flex: 0 0 auto;
-  max-height: 40%;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   min-width: 0;
+  padding-bottom: var(--space-2);
+}
+.agent-assign-wrap {
+  display: block;
+  padding: 0 var(--space-1) var(--space-2);
+  min-width: 0;
+}
+.agent-assign-select {
+  width: 100%;
+  max-width: 100%;
+  min-height: var(--control-h);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.agent-assign-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.agent-assign-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.agent-assign-empty {
+  margin: 0 var(--space-1) var(--space-2);
+}
+.agent-palette {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: none;
+}
+.agent-card {
+  display: none;
 }
 .section-head {
   display: flex;
@@ -1063,38 +1103,6 @@ input:disabled, select:disabled, textarea:disabled {
   background: var(--agents);
   opacity: 0.85;
 }
-.agent-palette {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-1);
-}
-.agent-card {
-  min-width: 0;
-  padding: var(--space-2) var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-soft);
-  cursor: grab;
-  user-select: none;
-  transition: border-color var(--ease), background var(--ease);
-}
-.agent-card:hover {
-  border-color: var(--border-strong);
-  background: color-mix(in srgb, var(--agents) 8%, var(--bg-soft));
-}
-.agent-card:active { cursor: grabbing; }
-.agent-card.dragging { opacity: 0.45; }
-.agent-card strong, .agent-card span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-card strong { font-size: 0.74rem; font-weight: 600; }
-.agent-card span { color: var(--muted); font-size: 0.64rem; }
 
 .chat-stage {
   display: flex;
@@ -2202,12 +2210,13 @@ button.tiny, .ghost.tiny {
     min-width: 0;
   }
   .agent-dock {
-    width: min(42%, 200px);
+    width: 100%;
+    max-width: none;
     max-height: none;
-    overflow: auto;
+    overflow: visible;
     flex: 0 0 auto;
+    border: none;
   }
-  .agent-palette { grid-template-columns: 1fr; }
   .stage-header, .page-header {
     flex-direction: column;
     align-items: stretch;
@@ -3023,12 +3032,14 @@ button.tiny, .ghost.tiny {
     position: relative;
   }
   .mobile-tab.active { color: var(--accent); }
-  .agent-dock:not(.is-open) .agent-palette { display: none; }
   .agent-dock {
     width: auto;
     max-width: none;
     flex: 0 0 auto;
     border-left: none;
+  }
+  .agent-assign-wrap {
+    padding-bottom: var(--space-3);
   }
   .thread-rail {
     flex-direction: column;

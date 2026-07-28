@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=51" />
+  <link rel="stylesheet" href="/static/style.css?v=52" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -113,11 +113,16 @@
               <header class="section-head">
                 <div>
                   <h2>Agents</h2>
-                  <p>Click to assign to the open team</p>
+                  <p>Assign to the open team</p>
                 </div>
-                <button type="button" id="agent-dock-toggle" class="ghost tiny mobile-only" aria-expanded="false" aria-controls="agent-palette">Assign</button>
               </header>
-              <ul id="agent-palette" class="agent-palette"></ul>
+              <label class="agent-assign-wrap">
+                <span class="sr-only">Assign an agent to this team</span>
+                <select id="agent-assign-select" class="agent-assign-select" disabled title="Open a team to assign agents">
+                  <option value="">Assign an agent…</option>
+                </select>
+              </label>
+              <p id="agent-assign-empty" class="muted tiny-hint agent-assign-empty hidden">No agents yet — open Hire to compose one.</p>
             </div>
           </aside>
           <div class="chat-stage is-empty" id="chat-stage">
@@ -927,6 +932,6 @@
 
   <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=55"></script>
+  <script src="/static/app.js?v=56"></script>
 </body>
 </html>
