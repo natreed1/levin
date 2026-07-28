@@ -1449,10 +1449,17 @@
 
   function isInfraErrorBody(body) {
     const text = String(body || "");
+    // Real model/tunnel failures only — never treat normal long agent replies as errors.
     return (
-      text.length > 280 ||
-      /trycloudflare\.com|localhost:\d{4}|Traceback|ECONNREFUSED|tunnel/i.test(text) ||
-      /Error code:\s*401|API key is invalid|invalid.?api.?key|authentication_error|Unauthorized/i.test(text)
+      /trycloudflare\.com|localhost:\d{4}|Traceback|ECONNREFUSED|cloudflared/i.test(
+        text
+      ) ||
+      /Error code:\s*401|API key is invalid|invalid.?api.?key|authentication_error/i.test(
+        text
+      ) ||
+      /(?:OpenRouter|Anthropic|OpenAI|Ollama|Messenger error).{0,60}(?:401|Unauthorized|forbidden|unreachable)/i.test(
+        text
+      )
     );
   }
 
