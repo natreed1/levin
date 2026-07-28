@@ -475,3 +475,17 @@ def test_graph_guard_rejection_continues_layer(monkeypatch: pytest.MonkeyPatch):
     assert "Graph finished" in joined
     assert job.status == "completed"
     assert calls["n"] == 2
+
+
+def test_web_search_query_strips_make_imperative():
+    from messenger.team_harness import _web_search_query_from_focus
+
+    assert (
+        _web_search_query_from_focus("make a ww2 history essay")
+        == "ww2 history essay"
+    )
+    assert (
+        _web_search_query_from_focus("write an essay about the New Deal")
+        == "essay about the New Deal"
+    )
+    assert _web_search_query_from_focus("NVDA AI demand") == "NVDA AI demand"

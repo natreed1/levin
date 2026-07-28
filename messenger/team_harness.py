@@ -313,6 +313,54 @@ def _arxiv_search(query: str, *, limit: int = 6) -> List[Dict[str, Any]]:
     return hits
 
 
+def _web_search_query_from_focus(topic: str) -> str:
+    """Turn a /graph guiding question into a Bing subject query.
+
+    Agents still get the full focus (“make a ww2 history essay”). Search must
+    not — Bing treats a leading “Make” as Make.com / GNU Make.
+    """
+    import re
+
+    text = " ".join(str(topic or "").split()).strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"^(?:please\s+)?(?:help\s+me\s+)?(?:"
+        r"make|write|create|draft|compose|build|do|prepare|produce|generate|"
+        r"research|find|get|summarize|outline"
+        r")\s+(?:me\s+)?(?:a|an|the|some|my)\s+",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:please\s+)?(?:help\s+me\s+)?(?:"
+        r"make|write|create|draft|compose|build|do|prepare|produce|generate|"
+        r"summarize|outline"
+        r")\s+",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"^(?:a|an|the)\s+", "", text, flags=re.I)
+    cleaned = " ".join(text.split()).strip()
+    return cleaned or " ".join(str(topic or "").split()).strip()
+
+
+def _topic_wants_cs_academic_search(focus: str) -> bool:
+    import re
+
+    return bool(
+        re.search(
+            r"\bRAG\b|retrieval[\s-]?augmented|LLM|large language model|"
+            r"transformer|machine learning|deep learning|NeurIPS|arxiv|"
+            r"\bnlp\b|computer vision|reinforcement learning",
+            focus or "",
+            re.I,
+        )
+    )
+
+
 def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
     """Public web search pack for Graph research steps (Bing RSS + optional page enrich)."""
     focus = " ".join(str(topic or "").split()).strip()
@@ -337,9 +385,13 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
 
     import re
 
-    # "survey" alone makes Bing return SurveyMonkey — rewrite for academic topics.
-    focus_q = re.sub(r"\b[Ss]urvey\b", "literature review", focus)
-    focus_q = re.sub(r"\b[Pp]apers?\b", "arxiv OR ACL OR NeurIPS paper", focus_q)
+    # Guiding question stays intact for agents; search uses the subject only.
+    subject = _web_search_query_from_focus(focus)
+    focus_q = re.sub(r"\b[Ss]urvey\b", "literature review", subject)
+    cs_academic = _topic_wants_cs_academic_search(focus)
+    if cs_academic:
+        focus_q = re.sub(r"\b[Pp]apers?\b", "arxiv OR ACL OR NeurIPS paper", focus_q)
+
     queries: List[str] = []
     arxiv_queries: List[str] = []
     if re.search(
@@ -361,22 +413,20 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
                 "retrieval augmented generation hallucination",
             ]
         )
-    queries.append(focus_q[:160])
-    short = focus_q[:90]
-    queries.append(f"{short} arxiv OR ACL OR EMNLP OR NeurIPS 2024 OR 2025")
-    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))[:5]
-    if not arxiv_queries:
-        # Generic academic fallback from focus keywords
-        arxiv_queries.append(re.sub(r"[^\w\s\-]", " ", focus)[:80].strip() or focus[:80])
 
-    all_hits: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for aq in arxiv_queries[:3]:
-        for hit in _arxiv_search(aq, limit=5):
-            url = str(hit.get("url") or "")
-            if url and url not in seen:
-                seen.add(url)
-                all_hits.append(hit)
+    queries.append(focus_q[:160])
+    expanded = re.sub(r"\bww2\b", "World War II", focus_q, flags=re.I)
+    expanded = re.sub(r"\bwwii\b", "World War II", expanded, flags=re.I)
+    if expanded != focus_q:
+        queries.append(expanded[:160])
+    if cs_academic:
+        short = focus_q[:90]
+        queries.append(f"{short} arxiv OR ACL OR EMNLP OR NeurIPS 2024 OR 2025")
+        if not arxiv_queries:
+            arxiv_queries.append(
+                re.sub(r"[^\w\s\-]", " ", subject)[:80].strip() or subject[:80]
+            )
+    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))[:5]
 
     skip_hosts = {
         "surveymonkey.com",
@@ -392,8 +442,25 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
         "cambridge.org",
         "thesaurus.com",
     }
+    software_make = bool(
+        re.search(
+            r"\bgnu\s+make\b|\bmakefile\b|make\.com|\bintegromat\b",
+            focus,
+            re.I,
+        )
+    )
+    if not software_make:
+        skip_hosts.update({"make.com", "us2.make.com", "eu1.make.com"})
+
     all_hits: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    for aq in arxiv_queries[:3]:
+        for hit in _arxiv_search(aq, limit=5):
+            url = str(hit.get("url") or "")
+            if url and url not in seen:
+                seen.add(url)
+                all_hits.append(hit)
+
     for q in queries:
         try:
             for hit in bing_search(q, limit=5):
@@ -411,11 +478,25 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
                 snippet = str(hit.get("snippet") or "").lower()
                 if "surveymonkey" in title or "survey junkie" in title:
                     continue
-                # For RAG-ish topics, drop plain dictionary "retrieval" definitions.
+                if not software_make and (
+                    "gnu make" in title
+                    or "make.com" in title
+                    or ("make (software)" in title)
+                    or (host.endswith("gnu.org") and "/software/make" in url.lower())
+                ):
+                    continue
                 if re.search(r"\bRAG\b|retrieval[\s-]?augmented", focus, re.I):
                     blob = f"{title} {snippet}"
-                    if "retrieval-augmented" not in blob and "retrieval augmented" not in blob and " rag " not in f" {blob} ":
-                        if host.endswith("wikipedia.org") or "definition" in title or "meaning" in title:
+                    if (
+                        "retrieval-augmented" not in blob
+                        and "retrieval augmented" not in blob
+                        and " rag " not in f" {blob} "
+                    ):
+                        if (
+                            host.endswith("wikipedia.org")
+                            or "definition" in title
+                            or "meaning" in title
+                        ):
                             continue
                 if url and url not in seen:
                     seen.add(url)
@@ -423,10 +504,9 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
         except Exception as exc:  # noqa: BLE001
             logger.debug("bing_search failed q=%r: %s", q, exc)
 
-    if not all_hits:
-        # One more pass with stricter academic queries only
+    if not all_hits and cs_academic:
         for q in [
-            'site:arxiv.org retrieval augmented generation',
+            "site:arxiv.org retrieval augmented generation",
             '"retrieval-augmented generation" evaluation',
         ]:
             try:
@@ -440,23 +520,34 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
 
     if not all_hits:
         return ""
-    # Prefer arxiv / academic-looking hosts first
+
     def _rank_key(hit: Dict[str, Any]) -> tuple:
         url = str(hit.get("url") or "").lower()
         title = str(hit.get("title") or "").lower()
         score = 0
         if "arxiv.org" in url:
             score += 5
-        if any(k in url for k in ("acl anthology", "aclanthology", "neurips", "openreview", "ieee")):
+        if any(
+            k in url
+            for k in ("acl anthology", "aclanthology", "neurips", "openreview", "ieee")
+        ):
             score += 4
-        if "rag" in title or "retrieval-augmented" in title or "retrieval augmented" in title:
+        if (
+            "rag" in title
+            or "retrieval-augmented" in title
+            or "retrieval augmented" in title
+        ):
             score += 3
+        if re.search(r"\bww2\b|\bwwii\b|world war", focus, re.I):
+            if any(k in url for k in ("wikipedia.org", "britannica.com", "history.com", "archives.gov")):
+                score += 4
+            if "world war" in title or "wwii" in title or "ww2" in title:
+                score += 3
         return (-score, title)
 
     all_hits.sort(key=_rank_key)
     try:
         ranked = rank_search_hits(all_hits, intent="general")
-        # Keep our academic preference order for the top slice
         preferred = all_hits[:8]
         merged = preferred + [h for h in ranked if h not in preferred]
         trusted = enrich_trusted_hits(merged[:8], max_pages=2)
@@ -470,6 +561,8 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
                 f"{(hit.get('snippet') or '')[:180]}"
             )
         text = "\n".join(lines)
+    if text and subject and subject.casefold() != focus.casefold():
+        text = f"(search subject: {subject})\n{text}"
     return (text or "").strip()[:4500]
 
 
