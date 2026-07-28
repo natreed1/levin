@@ -73,23 +73,59 @@ class RateLimiter:
 
 class RoomHub:
     def __init__(self) -> None:
-        self._clients: dict[WebSocket, str] = {}
+        # ws → {room_id, user_id, name}
+        self._clients: dict[WebSocket, dict[str, str]] = {}
         self._lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket, room_id: str) -> None:
+    async def connect(
+        self,
+        ws: WebSocket,
+        room_id: str,
+        *,
+        user_id: str = "",
+        name: str = "",
+    ) -> None:
         await ws.accept()
         async with self._lock:
-            self._clients[ws] = room_id
+            self._clients[ws] = {
+                "room_id": room_id or "",
+                "user_id": (user_id or "").strip(),
+                "name": (name or "").strip() or "Someone",
+            }
 
-    async def disconnect(self, ws: WebSocket) -> None:
+    async def disconnect(self, ws: WebSocket) -> Optional[str]:
         async with self._lock:
-            self._clients.pop(ws, None)
+            info = self._clients.pop(ws, None)
+        return str((info or {}).get("room_id") or "") or None
+
+    def presence_for(self, room_id: str) -> list[dict[str, str]]:
+        """Deduped active collaborators currently connected to the room."""
+        if not room_id:
+            return []
+        by_key: dict[str, dict[str, str]] = {}
+        for info in self._clients.values():
+            if info.get("room_id") != room_id:
+                continue
+            uid = str(info.get("user_id") or "").strip()
+            name = str(info.get("name") or "").strip() or "Someone"
+            key = uid or f"name:{name.lower()}"
+            by_key[key] = {"user_id": uid, "name": name}
+        return sorted(by_key.values(), key=lambda row: row["name"].lower())
+
+    async def broadcast_presence(self, room_id: str) -> None:
+        if not room_id:
+            return
+        await self.broadcast(
+            room_id,
+            {"type": "presence", "room_id": room_id, "active": self.presence_for(room_id)},
+        )
 
     async def broadcast(self, room_id: str, payload: dict[str, Any]) -> None:
         async with self._lock:
             clients = [
-                ws for ws, client_room in self._clients.items()
-                if client_room == room_id
+                ws
+                for ws, info in self._clients.items()
+                if info.get("room_id") == room_id
             ]
         dead: list[WebSocket] = []
         for ws in clients:
@@ -1799,6 +1835,27 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         return JSONResponse(await _clear_chat(identity["name"], identity["room_id"]))
 
+    @app.get("/api/rooms/{room_id}/presence")
+    def room_presence(
+        room_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        identity = resolve_identity(request.cookies.get(COOKIE_NAME), store)
+        if not identity or not identity.get("user_id"):
+            return JSONResponse(
+                {"ok": False, "error": "account_required"}, status_code=401
+            )
+        user_id = str(identity["user_id"])
+        if room_id != "legacy" and not store.user_in_room(room_id, user_id):
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        return JSONResponse(
+            {
+                "ok": True,
+                "room_id": room_id,
+                "active": hub.presence_for(room_id),
+            }
+        )
+
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         identity = resolve_identity(websocket.cookies.get(COOKIE_NAME), store)
@@ -1807,7 +1864,8 @@ def create_app() -> FastAPI:
             return
         name = identity["name"]
         room_id = identity["room_id"]
-        await hub.connect(websocket, room_id)
+        user_id = str(identity.get("user_id") or "")
+        await hub.connect(websocket, room_id, user_id=user_id, name=name)
         try:
             await websocket.send_json(
                 {
@@ -1815,6 +1873,7 @@ def create_app() -> FastAPI:
                     "messages": store.list_messages(limit=200, room_id=room_id),
                 }
             )
+            await hub.broadcast_presence(room_id)
             while True:
                 data = await websocket.receive_json()
                 if not isinstance(data, dict):
@@ -1822,6 +1881,15 @@ def create_app() -> FastAPI:
                 msg_type = data.get("type")
                 if msg_type == "clear":
                     await _clear_chat(name, room_id)
+                    continue
+                if msg_type == "presence_ping":
+                    await websocket.send_json(
+                        {
+                            "type": "presence",
+                            "room_id": room_id,
+                            "active": hub.presence_for(room_id),
+                        }
+                    )
                     continue
                 if msg_type != "message":
                     continue
@@ -1858,7 +1926,9 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         finally:
-            await hub.disconnect(websocket)
+            left_room = await hub.disconnect(websocket)
+            if left_room:
+                await hub.broadcast_presence(left_room)
 
     @app.get("/")
     def index() -> FileResponse:

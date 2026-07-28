@@ -172,3 +172,45 @@ def test_member_can_delete_orphan_room(tmp_path: Path, monkeypatch):
     assert deleted.status_code == 200, deleted.text
     assert deleted.json() == {"ok": True, "room_id": room_id}
     assert store.room(room_id) is None
+
+
+def test_room_presence_endpoint_lists_active_members(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner = _signup_and_login(client, email="presence-owner@example.com", name="Owner")
+    created = client.post("/api/rooms", json={"name": "Owner", "title": "Presence"})
+    assert created.status_code == 200, created.text
+    room_id = created.json()["room_id"]
+
+    empty = client.get(f"/api/rooms/{room_id}/presence")
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["ok"] is True
+    assert empty.json()["active"] == []
+
+    # Simulate a live websocket occupant via the hub.
+    class _FakeWs:
+        async def accept(self):
+            return None
+
+    hub = client.app.state.hub
+
+    async def _seed():
+        await hub.connect(_FakeWs(), room_id, user_id=owner["user_id"], name="Owner")
+
+    import asyncio
+
+    asyncio.run(_seed())
+    live = client.get(f"/api/rooms/{room_id}/presence")
+    assert live.status_code == 200, live.text
+    active = live.json()["active"]
+    assert len(active) == 1
+    assert active[0]["user_id"] == owner["user_id"]
+    assert active[0]["name"] == "Owner"
+
+    forbidden = client.get("/api/rooms/someone-elses/presence")
+    assert forbidden.status_code == 403
+
+    html = (Path(__file__).resolve().parents[1] / "messenger" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'id="room-settings-people"' in html
+    assert "People in this room" in html
