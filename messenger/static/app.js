@@ -1912,7 +1912,8 @@
   function openShareDialog(shareUrl, roomId) {
     state.shareUrl = shareUrl || null;
     state.shareRoomId = roomId || null;
-    $("#share-url").value = shareUrl || "";
+    const shareInput = $("#share-url");
+    if (shareInput) shareInput.value = shareUrl || "";
     const hasRoom = !!roomId;
     const title = $("#share-dialog-title");
     if (title) title.textContent = hasRoom ? "Share team" : "Friends";
@@ -1925,10 +1926,25 @@
     const accessSection = $("#room-access-section");
     if (accessSection) accessSection.classList.toggle("hidden", !hasRoom);
     const inviteDetails = document.querySelector("#share-dialog .invite-link-details");
-    if (inviteDetails) inviteDetails.classList.toggle("hidden", !hasRoom);
+    if (inviteDetails) {
+      inviteDetails.classList.toggle("hidden", !hasRoom);
+      inviteDetails.open = false;
+    }
     const dialog = $("#share-dialog");
-    if (dialog && !dialog.open) dialog.showModal();
-    refreshFriendsDialog();
+    if (!dialog) return;
+    // Keep modal outside #shell so overflow:hidden cannot trap / blank it.
+    if (dialog.parentElement !== document.body) {
+      document.body.appendChild(dialog);
+    }
+    try {
+      if (!dialog.open) dialog.showModal();
+    } catch (err) {
+      dialog.setAttribute("open", "");
+      console.warn("showModal failed", err);
+    }
+    queueMicrotask(() => {
+      refreshFriendsDialog().catch((e) => console.warn("friends dialog refresh", e));
+    });
   }
 
   function makeRoleSelect(currentRole, { disabled = false, onChange } = {}) {
@@ -2082,7 +2098,9 @@
 
   function closeShareDialog() {
     const dialog = $("#share-dialog");
-    if (dialog?.open) dialog.close();
+    if (!dialog) return;
+    if (dialog.open) dialog.close();
+    else dialog.removeAttribute("open");
   }
 
   function friendLabel(user) {
@@ -2460,9 +2478,22 @@
     openShareDialog(shareUrl, state.roomId);
   });
 
-  $("#profile-add-friend-btn")?.addEventListener("click", () => openFriendsFromProfile());
+  $("#profile-add-friend-btn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openFriendsFromProfile();
+  });
+  $("#friends-dialog-done")?.addEventListener("click", () => closeShareDialog());
+  $("#share-dialog")?.addEventListener("cancel", (e) => {
+    // Allow Escape to close without freezing; default is fine, just ensure state clears.
+    e.stopPropagation();
+  });
   $("#share-dialog")?.addEventListener("close", () => {
     if (state.tab === "settings") loadProfileFriends();
+  });
+  // Click backdrop (dialog itself) to dismiss — not the inner form.
+  $("#share-dialog")?.addEventListener("click", (e) => {
+    if (e.target === $("#share-dialog")) closeShareDialog();
   });
 
   ["dragover", "dragleave", "drop"].forEach((eventName) => {
