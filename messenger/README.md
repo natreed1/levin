@@ -1,8 +1,12 @@
 # Unified Workflow Messenger
 
-Cloud-hosted workflow system: **People chats**, **Agentic chats**, **Automations**,
-and **Tracking** behind individual accounts. Per-user research ledgers live under
+Cloud-hosted workflow system: **People chats**, **Agentic chats**, and
+**Automations** behind individual accounts. Per-user research ledgers live under
 `/data/users/{user_id}/`. Automations run in-cloud via `CloudScheduler`.
+
+**Note:** The **Review** and **Tracking** tabs are temporarily hidden from the
+main UI. Backend `/api/review` and `/api/tracking` routes remain for extension /
+ledger use.
 
 ## Local run
 
@@ -14,13 +18,35 @@ source .venv/bin/activate
 pip install -r messenger/requirements.txt
 pip install -e .
 
-export MESSENGER_INVITE_TOKEN='pick-a-long-secret'
-export MESSENGER_SESSION_SECRET='another-long-secret'
-export MESSENGER_SCHEDULER=0   # optional: disable background scheduler in dev
+cp messenger/.env.example messenger/.env
+# Edit messenger/.env — set OPENROUTER_API_KEY for local/testing chat.
+# `python -m messenger` loads messenger/.env (and repo-root .env) automatically.
+
 export PYTHONPATH="$PWD/src:$PWD"
+# Or keep exporting secrets instead of using .env:
+# export MESSENGER_INVITE_TOKEN='pick-a-long-secret'
+# export MESSENGER_SESSION_SECRET='another-long-secret'
+# export OPENROUTER_API_KEY='sk-or-…'
+export MESSENGER_SCHEDULER=0   # optional: disable background scheduler in dev
 
 python -m messenger
 # → http://127.0.0.1:8790/
+# Local launcher enables passwordless Dev auto-login by default.
+# With OPENROUTER_API_KEY set, Dev gets an "OpenRouter (from env)" profile.
+```
+
+### Dev auto-login (local only)
+
+`python -m messenger` on loopback sets `MESSENGER_DEV_AUTO_LOGIN=1` unless you
+override it. The UI signs in as **Dev** (`dev@example.com`) with no password.
+Hard-disabled whenever `FLY_APP_NAME` is set (Fly production).
+
+```bash
+# Opt out (require normal login)
+MESSENGER_DEV_AUTO_LOGIN=0 python -m messenger
+
+# Reuse your existing account instead of Dev
+MESSENGER_DEV_EMAIL='tester@example.com' MESSENGER_DEV_NAME='Tester' python -m messenger
 ```
 
 Create an account in the UI (Create account), or hit the API:
@@ -63,12 +89,16 @@ reset, or OTP codes in production responses.
 
 | Tab | What it is |
 |-----|------------|
-| **Chats → People** | Person-to-person rooms (WebSocket). Owner-scoped; share invite links. `@Qwen` / `@workflow` handled in-process. |
-| **Chats → Agents** | Per-user workflow threads in that user's ledger (Master + automation threads). |
-| **Automations** | Mine / approve / run ritual specs for the signed-in user (cloud scheduler fires approved+enabled specs). |
-| **Tracking** | Start/end capture sessions, notes, timeline of sessions/events. |
+| **Teams** | Project teams (rooms). Sit in chat with hired agents, invite friends, open **Graph** (layered steps, analyst assignments, orchestrator guards, capability loops, room integration settings). `/automate` opens Graph. |
+| **Management** | **Master** setup chat — ask Master to create teams, hire agents, and draft workflows via your frontier model. |
+| **Hire** | Compose agents from lenses + capabilities. Describe a capability need (allowlisted runners/actions) or create manually; assign agents to teams. |
+| **Settings** | Profile, security, preferences, models & integrations, privacy. |
 
-Keyboard on Chats: `j` / `k` moves between People and Agent threads.
+*(Review and Tracking tabs are temporarily retired from the shell.)*
+
+Keyboard on Teams: `j` / `k` moves between teams. Master lives on **Management**.
+
+Happy path: **Management** → Master (“create a coding review team…”) *or* **Hire** an agent → **assign to a Team** → open **Graph** (map steps + guards + Room settings for repo/API keys) → **Run Graph** / sit in chat / invite a friend.
 
 ## Deploy on Fly.io
 
@@ -103,12 +133,12 @@ fly secrets set -a levin MESSENGER_SCHEDULER_LIVE=1
 
 ## Model tab (per-user providers)
 
-Live specialists use **the room owner's** linked provider — not a shared Fly secret.
+Live specialists use **the team owner's** linked provider — not a shared Fly secret.
 
-In **Model**, each account can connect:
+In **Settings → Models**, each account can connect:
+- **OpenRouter** — one key (`sk-or-…`), many models (default for local/testing)
 - **Claude (Anthropic)** — paste `sk-ant-…`
 - **GPT (OpenAI)** — paste `sk-…`
-- **OpenRouter** — one key, many models
 - **Local Ollama (tunnel)** — `./scripts/secure_qwen_tunnel.sh`, then paste HTTPS `/v1` URL + token
 - **Custom OpenAI-compatible** — Groq, Together, vLLM, etc.
 
@@ -154,6 +184,11 @@ Until a companion is reachable, the cloud volume under `/data/users/{id}/` is th
 | `MESSENGER_SMTP_PORT` | SMTP port (default 587) |
 | `MESSENGER_SMTP_USER` / `MESSENGER_SMTP_PASSWORD` | Optional SMTP credentials |
 | `MESSENGER_AUTO_VERIFY` | Emergency bypass only; keep `0` in production |
+| `OPENROUTER_API_KEY` | Preferred local/testing frontier key; auto-links on login |
+| `OPENROUTER_MODEL` | OpenRouter model id (default `anthropic/claude-sonnet-4`) |
+| `OPENROUTER_BASE_URL` | Override OpenRouter base (default `https://openrouter.ai/api/v1`) |
+| `ANTHROPIC_API_KEY` | Fallback frontier key when OpenRouter is unset |
+| `ANALYST_CLAUDE_MODEL` | Anthropic model id when using `ANTHROPIC_API_KEY` |
 | `ANALYST_QWEN_BASE_URL` | OpenAI-compatible base (local Ollama or tunnel `/v1`) |
 | `ANALYST_QWEN_MODEL` | Model id (default `qwen3:8b`) |
 | `ANALYST_QWEN_API_KEY` | Bearer token (required for the secure gateway) |
@@ -165,6 +200,6 @@ Until a companion is reachable, the cloud volume under `/data/users/{id}/` is th
 - People: `POST /api/rooms`, `GET /api/rooms/mine`, `POST /api/rooms/select`, `POST /api/join`, `WS /ws`
 - Agents: `GET /api/agent-chats`, `POST /api/agent-chats/message`, `GET /api/agent-chats/jobs/{id}`
 - Automations: `GET /api/automations`, `POST /api/automations/{mine,approve,run,…}`
-- Tracking: `GET /api/tracking/summary|sessions|events`, `POST /api/tracking/session/{start,note,end}`
+- Tracking (API retained; UI hidden): `GET /api/tracking/summary|sessions|events`, `POST /api/tracking/session/{start,note,end}`
 - Companion: `POST|DELETE /api/companion/link`, `GET /api/companion/status`
-- Review: `GET /api/review`, `POST /api/review/run` (Claude/stub + chat-mining drafts)
+- Review (API retained; UI hidden): `GET /api/review`, `POST /api/review/run` (Claude/stub + chat-mining drafts)

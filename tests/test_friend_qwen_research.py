@@ -591,6 +591,102 @@ def test_agent_hooks_research_path_posts_ack_and_reply(monkeypatch):
     assert PERSONALITIES_BY_ID["qwen"].name in {p["author"] for p in posted}
 
 
+def test_agent_hooks_custom_roster_mention_replies(tmp_path, monkeypatch):
+    """Add custom agent to room roster → @Name must dispatch a reply."""
+    monkeypatch.setenv("ANALYST_LEDGER_DATA", str(tmp_path / "ledger"))
+    import messenger.agent_hooks as hooks
+    from analyst_ledger.paths import use_data_dir
+    from analyst_ledger.registry import create_composed_agent
+
+    posted: list[dict] = []
+
+    with use_data_dir(tmp_path / "ledger"):
+        agent = create_composed_agent(
+            name="HawkScout",
+            prompt="You are HawkScout. Be terse and sharp.",
+        )
+
+        class FakeStore:
+            def add_message(self, **kwargs):
+                posted.append(kwargs)
+                return {"id": len(posted), **kwargs}
+
+            def room(self, _room_id):
+                return {
+                    "config": {
+                        "agents": [agent.id],
+                        "model_profile_id": "claude-1",
+                    }
+                }
+
+            def list_messages(self, limit=200, room_id="legacy"):
+                return []
+
+        monkeypatch.setattr(
+            "messenger.model_link.registry",
+            lambda: type(
+                "R",
+                (),
+                {"endpoint_for_call": staticmethod(lambda *a, **k: None)},
+            )(),
+        )
+        monkeypatch.setattr(
+            "analyst_ledger.synthesize.call_chat_messages",
+            lambda *a, **k: "Scout take: watch filings.",
+        )
+        monkeypatch.setattr(
+            "analyst_ledger.synthesize.use_llm_endpoint",
+            __import__("contextlib").nullcontext,
+        )
+
+        # user_context must point at the same data dir for get_agent.
+        from messenger.tenancy import user_context
+
+        with user_context("owner1"):
+            pass  # ensure tenant dir exists if needed
+
+        hooks._reply_qwen(
+            FakeStore(),
+            None,
+            "room1",
+            "Nat",
+            "@HawkScout what's the angle?",
+            owner_user_id=None,  # resolve without tenancy; agent already in data dir
+            loop=None,
+        )
+
+    assert any(p["author"] == "HawkScout" for p in posted)
+    assert any("Scout take" in p["body"] or "Noted" in p["body"] for p in posted)
+
+
+def test_agent_hooks_unassigned_mention_feedback(monkeypatch):
+    import messenger.agent_hooks as hooks
+
+    posted: list[dict] = []
+
+    class FakeStore:
+        def add_message(self, **kwargs):
+            posted.append(kwargs)
+            return {"id": len(posted), **kwargs}
+
+        def room(self, _room_id):
+            return {"config": {"agents": ["qwen-bull"]}}
+
+    hooks._reply_qwen(
+        FakeStore(),
+        None,
+        "room1",
+        "Nat",
+        "@HawkScout ping",
+        owner_user_id=None,
+        loop=None,
+    )
+    assert len(posted) == 1
+    assert posted[0]["author"] == "Flyleaf"
+    assert "isn't assigned" in posted[0]["body"]
+
+
+
 def test_compose_research_routes_to_anthropic_not_local(monkeypatch, tmp_path):
     """Regression: Claude room selection must not fall through to Ollama."""
     monkeypatch.setenv("ANALYST_DATA_DIR", str(tmp_path))

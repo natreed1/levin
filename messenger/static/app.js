@@ -23,6 +23,10 @@
     specialistPoll: null,
     devAutoLogin: false,
     devUser: null,
+    messageOffset: 0,
+    messageHasMore: false,
+    railsLoading: false,
+    toastTimer: null,
   };
 
   const THEME_KEY = "flyleaf-theme";
@@ -48,8 +52,91 @@
   function setError(id, msg) {
     const el = $(id);
     if (!el) return;
-    if (msg) { el.textContent = msg; show(el); }
-    else { el.textContent = ""; hide(el); }
+    if (!msg) {
+      el.textContent = "";
+      hide(el);
+      return;
+    }
+    // Compact long infrastructure errors (tunnel URLs, stack dumps).
+    let text = String(msg);
+    if (text.length > 220 || /trycloudflare\.com|localhost:\d{4}|Traceback/i.test(text)) {
+      text = "Something went wrong with the model connection. Check Settings → Models or Start local model.";
+    }
+    el.textContent = text;
+    show(el);
+  }
+
+  function setSuccess(id, msg, ms = 3200) {
+    const el = $(id);
+    if (!el) return;
+    if (!msg) {
+      el.textContent = "";
+      hide(el);
+      return;
+    }
+    el.textContent = String(msg);
+    show(el);
+    clearTimeout(el._successTimer);
+    el._successTimer = setTimeout(() => hide(el), ms);
+  }
+
+  function showAppToast(msg, ms = 2800) {
+    const el = $("#app-toast");
+    if (!el || !msg) return;
+    el.textContent = String(msg);
+    show(el);
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => hide(el), ms);
+  }
+
+  function setButtonBusy(btn, busy, busyLabel) {
+    if (!btn) return;
+    if (busy) {
+      if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+      btn.classList.add("button-busy");
+      btn.disabled = true;
+      if (busyLabel) btn.textContent = busyLabel;
+    } else {
+      btn.classList.remove("button-busy");
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  }
+
+  function initialsFrom(name) {
+    const parts = String(name || "?").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  function avatarFallback(name) {
+    const span = document.createElement("span");
+    span.className = "avatar-fallback";
+    span.textContent = initialsFrom(name);
+    span.title = name || "";
+    return span;
+  }
+
+  function setTeamsEmptyVisible(on) {
+    const stage = $("#chat-stage");
+    const empty = $("#teams-empty");
+    if (stage) stage.classList.toggle("is-empty", !!on);
+    if (empty) empty.classList.toggle("hidden", !on);
+    const overflow = $("#room-overflow");
+    if (on) hide(overflow);
+  }
+
+  function syncMobileTabs() {
+    $$(".mobile-tab").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tab === state.tab);
+    });
+  }
+
+  function autoGrowComposer(el) {
+    if (!el || el.tagName !== "TEXTAREA") return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
   }
 
   function fmtTime(iso) {
@@ -92,7 +179,12 @@
   function showShell() {
     hide($("#auth-screen"));
     show($("#shell"));
-    $("#who-label").textContent = state.me?.display_name || state.me?.name || "";
+    const me = state.me || {};
+    const who = me.username
+      ? `${me.display_name || me.name || ""} · @${me.username}`
+      : me.display_name || me.name || "";
+    $("#who-label").textContent = who;
+    setNotifyBadge(me.unread_notifications || 0);
   }
 
   function setAuthBanner(msg, ok) {
@@ -173,35 +265,41 @@
     e.preventDefault();
     setError("#login-error", "");
     hide($("#resend-verify-btn"));
+    const submitBtn = $("#login-submit") || e.target.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Signing in…");
     const email = $("#login-email").value;
-    const { res, data } = await api("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        password: $("#login-password").value,
-      }),
-    });
-    if (!res.ok) {
-      if (data?.error === "email_unverified") {
-        setError("#login-error", data.message || "Verify your email first");
-        show($("#resend-verify-btn"));
+    try {
+      const { res, data } = await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          password: $("#login-password").value,
+        }),
+      });
+      if (!res.ok) {
+        if (data?.error === "email_unverified") {
+          setError("#login-error", data.message || "Verify your email first");
+          show($("#resend-verify-btn"));
+          return;
+        }
+        if (data?.error === "rate_limited") {
+          setError(
+            "#login-error",
+            data.message || "Too many login attempts. Wait a few minutes and try again."
+          );
+          return;
+        }
+        setError("#login-error", (data && (data.message || data.error)) || "Login failed");
         return;
       }
-      if (data?.error === "rate_limited") {
-        setError(
-          "#login-error",
-          data.message || "Too many login attempts. Wait a few minutes and try again."
-        );
+      if (data?.requires_2fa) {
+        beginOtpChallenge(data);
         return;
       }
-      setError("#login-error", (data && (data.message || data.error)) || "Login failed");
-      return;
+      await bootstrap();
+    } finally {
+      setButtonBusy(submitBtn, false);
     }
-    if (data?.requires_2fa) {
-      beginOtpChallenge(data);
-      return;
-    }
-    await bootstrap();
   });
 
   $("#otp-form")?.addEventListener("submit", async (e) => {
@@ -268,6 +366,7 @@
       method: "POST",
       body: JSON.stringify({
         display_name: $("#signup-name").value,
+        username: $("#signup-username").value,
         email,
         password: $("#signup-password").value,
       }),
@@ -294,21 +393,28 @@
     e.preventDefault();
     setError("#forgot-error", "");
     const email = $("#forgot-email").value;
-    const { res, data } = await api("/api/auth/forgot-password", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) {
-      setError("#forgot-error", (data && (data.message || data.error)) || "Request failed");
-      return;
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Sending…");
+    try {
+      const { res, data } = await api("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) {
+        setError("#forgot-error", (data && (data.message || data.error)) || "Request failed");
+        return;
+      }
+      let msg = data?.message || "Check your email for a reset link.";
+      if (data?.dev_reset_url) {
+        msg += ` Dev link: ${data.dev_reset_url}`;
+      }
+      setAuthBanner(msg, true);
+      showAppToast("Check your email for a reset link");
+      $("#login-email").value = email;
+      showAuthPanel("login");
+    } finally {
+      setButtonBusy(submitBtn, false);
     }
-    let msg = data?.message || "Check your email for a reset link.";
-    if (data?.dev_reset_url) {
-      msg += ` Dev link: ${data.dev_reset_url}`;
-    }
-    setAuthBanner(msg, true);
-    $("#login-email").value = email;
-    showAuthPanel("login");
   });
 
   $("#reset-form").addEventListener("submit", async (e) => {
@@ -418,45 +524,139 @@
   $$(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
+  $$(".mobile-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
 
   function switchTab(tab) {
+    // Review / Tracking UI is temporarily retired from the main shell.
+    if (tab === "review" || tab === "tracking") tab = "chats";
     state.tab = tab;
     $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    syncMobileTabs();
     $$(".tab-panel").forEach((p) => hide(p));
     show($(`#tab-${tab}`));
     if (tab === "agents") loadAgentsStudio();
-    if (tab === "review") loadReview();
-    if (tab === "tracking") loadTracking();
     if (tab === "settings") {
       loadAccountSettings();
       loadSettings();
     }
-    if (tab === "chats") refreshChatRails();
+    if (tab === "notifications") {
+      loadNotificationsTab();
+    }
+    if (tab === "management") {
+      openManagement();
+      return;
+    }
+    if (tab === "chats") {
+      restoreTeamsChat();
+    }
+  }
+
+  function chatUi(surface) {
+    const mgmt = surface === "management" || (!surface && state.tab === "management");
+    return {
+      messages: mgmt ? "#mgmt-messages" : "#messages",
+      body: mgmt ? "#mgmt-body" : "#body",
+      sendForm: mgmt ? "#mgmt-send-form" : "#send-form",
+      chatError: mgmt ? "#mgmt-chat-error" : "#chat-error",
+      stageKind: mgmt ? "#mgmt-stage-kind" : "#stage-kind",
+      stageTitle: mgmt ? "#mgmt-stage-title" : "#stage-title",
+      computeBadge: mgmt ? "#mgmt-compute-badge" : "#compute-badge",
+      startLocalBtn: mgmt ? "#mgmt-start-local-model-btn" : "#start-local-model-btn",
+    };
+  }
+
+  function masterThread() {
+    return (state.threads || []).find((t) => t.master) || null;
+  }
+
+  async function refreshMasterThreads() {
+    const { data } = await api("/api/agent-chats");
+    state.threads = data?.threads || [];
+    return masterThread();
+  }
+
+  async function openManagement() {
+    await refreshChatRails();
+    await selectMaster();
+  }
+
+  async function restoreTeamsChat() {
+    await refreshChatRails();
+    if (state.kind === "agents") {
+      const saved = state.roomId;
+      const next =
+        (saved && state.rooms.find((r) => r.room_id === saved)) ||
+        state.rooms[0] ||
+        null;
+      if (next) {
+        await selectPeople(next.room_id, next.title, next);
+        return;
+      }
+      state.kind = null;
+      state.threadId = null;
+      $("#stage-kind").textContent = "Team";
+      $("#stage-title").textContent = "Your teams";
+      $("#stage-title").title = "Your teams";
+      setTeamsEmptyVisible(true);
+      enableComposer(false, "Create or open a team to chat", "teams");
+      renderRails();
+      return;
+    }
+    if (state.kind === "people" && state.roomId) {
+      openWs();
+      setTeamsEmptyVisible(false);
+      return;
+    }
+    if (!state.rooms.length) {
+      setTeamsEmptyVisible(true);
+      $("#stage-title").textContent = "Your teams";
+      enableComposer(false, "Create or open a team to chat", "teams");
+      return;
+    }
+    const next = state.rooms[0];
+    await selectPeople(next.room_id, next.title, next);
+  }
+
+  async function selectMaster() {
+    await selectAgent(null, null, true);
   }
 
   // --- Chats -----------------------------------------------------------------
 
   async function refreshChatRails() {
-    if (state.me?.authenticated) {
-      const [rooms, threads, specialists, models] = await Promise.all([
-        api("/api/rooms/mine"),
-        api("/api/agent-chats"),
-        api("/api/specialists"),
-        api("/api/settings/models"),
-      ]);
-      state.rooms = (rooms.data && rooms.data.rooms) || [];
-      state.threads = (threads.data && threads.data.threads) || [];
-      state.specialists = (specialists.data && specialists.data.specialists) || [];
-      state.compute = models.data?.active || null;
-      state.modelProfiles = models.data?.profiles || [];
-      state.activeProfileId = models.data?.active_profile_id || null;
-    } else {
-      state.rooms = state.me?.room_id
-        ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
-        : [];
-      state.threads = [];
+    const list = $("#room-list");
+    if (list && !state.rooms.length) {
+      list.setAttribute("aria-busy", "true");
+      list.innerHTML = `<li class="state-skeleton" aria-hidden="true"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></li>`;
     }
-    renderRails();
+    state.railsLoading = true;
+    try {
+      if (state.me?.authenticated) {
+        const [rooms, threads, specialists, models] = await Promise.all([
+          api("/api/rooms/mine"),
+          api("/api/agent-chats"),
+          api("/api/specialists"),
+          api("/api/settings/models"),
+        ]);
+        state.rooms = (rooms.data && rooms.data.rooms) || [];
+        state.threads = (threads.data && threads.data.threads) || [];
+        state.specialists = (specialists.data && specialists.data.specialists) || [];
+        state.compute = models.data?.active || null;
+        state.modelProfiles = models.data?.profiles || [];
+        state.activeProfileId = models.data?.active_profile_id || null;
+      } else {
+        state.rooms = state.me?.room_id
+          ? [{ room_id: state.me.room_id, title: state.me.room_title || "Room" }]
+          : [];
+        state.threads = [];
+      }
+      renderRails();
+    } finally {
+      state.railsLoading = false;
+      list?.setAttribute("aria-busy", "false");
+    }
   }
 
   function roomAgents(room) {
@@ -465,98 +665,113 @@
   }
 
   function allRoomEntries() {
-    return [
-      ...state.rooms.map((room) => ({
-        id: room.room_id,
-        title: room.title,
-        surface: "people",
-        room,
-      })),
-      ...state.threads.map((thread) => ({
-        id: thread.session_id,
-        title: thread.title,
-        surface: "agent",
-        thread,
-      })),
-    ];
+    return state.rooms.map((room) => ({
+      id: room.room_id,
+      title: room.title,
+      surface: "people",
+      room,
+    }));
   }
 
   function renderRails() {
     const list = $("#room-list");
-    const palette = $("#agent-palette");
+    if (!list) return;
     list.innerHTML = "";
-    palette.innerHTML = "";
     const entries = allRoomEntries();
 
     if (!entries.length) {
       const li = document.createElement("li");
-      li.innerHTML = '<button type="button" class="muted" disabled>No rooms yet</button>';
+      li.className = "rail-empty";
+      li.innerHTML =
+        '<p class="muted tiny-hint">No teams yet</p>' +
+        '<button type="button" class="ghost tiny" id="rail-create-team">Create team</button>';
       list.appendChild(li);
+      li.querySelector("#rail-create-team")?.addEventListener("click", () => {
+        $("#new-room-btn")?.click();
+      });
+      if (state.tab === "chats" && state.kind !== "people") {
+        setTeamsEmptyVisible(true);
+        $("#stage-kind").textContent = "Team";
+        $("#stage-title").textContent = "Your teams";
+        $("#stage-title").title = "Your teams";
+      }
+    } else if (state.tab === "chats" && state.kind === "people") {
+      setTeamsEmptyVisible(false);
     }
+
     entries.forEach((entry) => {
       const li = document.createElement("li");
       const btn = document.createElement("button");
       btn.type = "button";
-      const agents = entry.room ? roomAgents(entry.room) : [];
-      const compute = entry.room?.compute || (entry.thread ? state.compute : null);
+      const agents = roomAgents(entry.room);
+      const compute = entry.room?.compute || null;
       const meta = compute
         ? `${compute.local ? "Local" : "API"} · ${compute.label || compute.model}`
-        : (entry.thread?.master ? "Private room" : "Ongoing room");
+        : "Team";
+      const title = entry.title || entry.id;
+      btn.title = title;
       btn.innerHTML = `
-        <span class="room-name"><span class="room-icon">#</span><span class="room-title">${escapeHtml(entry.title || entry.id)}</span></span>
+        <span class="room-name"><span class="room-icon">#</span><span class="room-title title">${escapeHtml(title)}</span></span>
         <span class="meta">${escapeHtml(meta)}</span>
         ${agents.length ? `<span class="room-agents" aria-label="${agents.length} agents">${agents.map(() => '<i class="room-agent-dot"></i>').join("")}</span>` : ""}
       `;
-      if (
-        (entry.surface === "people" && state.kind === "people" && state.roomId === entry.id) ||
-        (entry.surface === "agent" && state.kind === "agents" && state.threadId === entry.id)
-      ) {
+      if (state.kind === "people" && state.roomId === entry.id) {
         btn.classList.add("active");
       }
-      if (entry.surface === "people") {
-        btn.addEventListener("click", () => selectPeople(entry.id, entry.title, entry.room));
-        makeRoomDropTarget(btn, entry.id);
-      } else {
-        btn.addEventListener("click", () => {
-          selectAgent(entry.id, entry.title, !!entry.thread?.master);
-        });
-      }
+      btn.addEventListener("click", () => selectPeople(entry.id, entry.title, entry.room));
+      makeRoomDropTarget(btn, entry.id);
       li.appendChild(btn);
       list.appendChild(li);
     });
 
-    if (!state.specialists.length) {
-      const li = document.createElement("li");
-      li.className = "muted tiny-hint";
-      li.textContent = "No agents available";
-      palette.appendChild(li);
+    fillAgentAssignSelect();
+  }
+
+  function fillAgentAssignSelect() {
+    const select = $("#agent-assign-select");
+    const emptyHint = $("#agent-assign-empty");
+    if (!select) return;
+    const prev = select.value;
+    select.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    const canAssign = state.kind === "people" && !!state.roomId;
+    const agents = state.specialists || [];
+    if (!agents.length) {
+      placeholder.textContent = "No agents available";
+      select.appendChild(placeholder);
+      select.disabled = true;
+      select.title = "Open Hire to compose an agent";
+      if (emptyHint) emptyHint.classList.remove("hidden");
+      return;
     }
-    state.specialists.forEach((agent) => {
-      const li = document.createElement("li");
-      li.className = "agent-card";
-      li.draggable = true;
-      li.dataset.agentId = agent.id;
-      const kind = agent.kind === "operator" ? "operator" : "lens";
-      li.title = `${agent.name} (${kind}) — click to add to the open room, or drag onto a room`;
+    if (emptyHint) emptyHint.classList.add("hidden");
+    placeholder.textContent = canAssign ? "Assign an agent…" : "Open a team to assign…";
+    select.appendChild(placeholder);
+    const onTeam = new Set(roomAgents(currentRoom()));
+    agents.forEach((agent) => {
+      const opt = document.createElement("option");
+      opt.value = agent.id;
       const caps = (agent.capabilities || []).length
         ? ` · ${(agent.capabilities || []).slice(0, 2).join(", ")}`
         : " · prompt only";
-      li.innerHTML = `<strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.mention || agent.role)}${escapeHtml(caps)}</span>`;
-      li.addEventListener("dragstart", (event) => {
-        event.dataTransfer.effectAllowed = "copy";
-        event.dataTransfer.setData("application/x-workflow-agent", agent.id);
-        event.dataTransfer.setData("text/plain", agent.id);
-        li.classList.add("dragging");
-      });
-      li.addEventListener("dragend", () => li.classList.remove("dragging"));
-      // Click also adds to the current people room (drag is easy to miss).
-      li.addEventListener("click", async () => {
-        if (state.kind === "people" && state.roomId) {
-          await addAgentToRoom(state.roomId, agent.id);
-        }
-      });
-      palette.appendChild(li);
+      const mention = agent.mention || agent.role || "";
+      opt.textContent = `${agent.name}${mention ? ` (${mention})` : ""}${caps}`;
+      if (onTeam.has(agent.id)) {
+        opt.disabled = true;
+        opt.textContent += " — on team";
+      }
+      select.appendChild(opt);
     });
+    select.disabled = !canAssign;
+    select.title = canAssign
+      ? "Choose an agent to add to this team"
+      : "Open a team to assign agents";
+    if (prev && [...select.options].some((o) => o.value === prev && !o.disabled)) {
+      select.value = prev;
+    } else {
+      select.value = "";
+    }
   }
 
   function makeRoomDropTarget(element, roomId) {
@@ -596,8 +811,8 @@
       enableComposer(
         true,
         hasAgents
-          ? "Message the room… /automate · agents use capabilities"
-          : "Message… @Analyst or /automate"
+          ? "Message the team… /graph <topic> runs Graph"
+          : "Message… @Analyst · /graph <topic> runs Graph"
       );
     }
   }
@@ -606,19 +821,52 @@
     return state.rooms.find((r) => r.room_id === state.roomId) || null;
   }
 
+  /** Owner, or orphan room with no owner recorded (API will claim on manage). */
+  function canManageRoom(room) {
+    const me = state.me?.user_id;
+    if (!me || !room) return false;
+    if (room.my_role === "owner") return true;
+    const owner = room.owner_user_id;
+    if (!owner) return true;
+    return owner === me;
+  }
+
+  /** Owner or editor — graph, agents, room config, runs. */
+  function canEditRoom(room) {
+    if (!room) return false;
+    if (canManageRoom(room)) return true;
+    const role = room.my_role || "viewer";
+    return role === "editor";
+  }
+
+  function roomRoleLabel(role) {
+    if (role === "owner") return "Owner";
+    if (role === "editor") return "Editor";
+    return "Viewer";
+  }
+
   function updateSpecialistActions(room) {
-    const agentCount = roomAgents(room).length;
-    const hasAgents = agentCount > 0;
-    ["#specialist-present-btn", "#specialist-idea-btn"].forEach((sel) => {
-      const el = $(sel);
-      if (!el) return;
-      if (hasAgents) show(el);
-      else hide(el);
-    });
-    if (agentCount > 1) show($("#specialist-debate-btn"));
-    else hide($("#specialist-debate-btn"));
+    // Present / Debate / Ideas trimmed — Orchestrator handles multi-agent from chat.
+    // Keep stop/banner wiring for Orchestrator + Workflow harness runs.
+    const hasAgents = roomAgents(room).length > 0;
     if (!hasAgents) {
       setSpecialistRunUi(null);
+    }
+  }
+
+  function syncAutonomyToggle(room) {
+    const wrap = $("#autonomy-toggle-wrap");
+    const toggle = $("#autonomy-toggle");
+    if (!wrap || !toggle) return;
+    const orch = String(room?.config?.orchestrator || "chat").toLowerCase();
+    const enabled = !!(room?.config?.autonomy?.enabled);
+    // Keep-running loop only for Workflow mode (editors+)
+    if (orch === "workflow" && canEditRoom(room)) {
+      show(wrap);
+      toggle.checked = enabled;
+    } else {
+      hide(wrap);
+      toggle.checked = false;
     }
   }
 
@@ -652,7 +900,7 @@
       chip.appendChild(
         document.createTextNode(`${agent?.name || agentId}${mention}`)
       );
-      if (room?.owner_user_id === state.me?.user_id) {
+      if (canEditRoom(room)) {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.setAttribute("aria-label", `Remove ${agent?.name || agentId}`);
@@ -748,7 +996,7 @@
     if (current && select.value !== current) {
       select.value = "";
     }
-    select.disabled = room?.owner_user_id && room.owner_user_id !== state.me?.user_id;
+    select.disabled = !canEditRoom(room);
   }
 
   function setSpecialistRunUi(job) {
@@ -757,7 +1005,7 @@
     const text = $("#specialist-run-text");
     if (!job || job.status !== "running") {
       hide(banner);
-      hide(stopBtn);
+      if (stopBtn) hide(stopBtn);
       state.specialistJob = null;
       if (state.specialistPoll) {
         clearInterval(state.specialistPoll);
@@ -770,11 +1018,13 @@
       ? `loop ${job.round_num || "…"}`
       : `round ${job.round_num || "?"}/${job.rounds || "?"}`;
     const topicBit = job.topic ? ` “${job.topic}”` : "";
-    text.textContent = job.continuous
-      ? `Looping${topicBit || " debate"} (${loopBit}) — safe to leave; turns keep posting.`
-      : `Running ${job.action || "specialists"}${topicBit} (${loopBit}) — safe to leave this room.`;
+    if (text) {
+      text.textContent = job.continuous
+        ? `Looping${topicBit || " Graph"} (${loopBit}) — safe to leave; turns keep posting.`
+        : `Running ${job.action || "Graph"}${topicBit} (${loopBit}) — safe to leave this team.`;
+    }
     show(banner);
-    show(stopBtn);
+    if (stopBtn) show(stopBtn);
     if (!state.specialistPoll && state.roomId) {
       state.specialistPoll = setInterval(() => {
         if (state.roomId) refreshSpecialistStatus(state.roomId);
@@ -788,7 +1038,9 @@
       return;
     }
     const room = currentRoom() || state.rooms.find((r) => r.room_id === roomId);
-    if (room && roomAgents(room).length === 0) {
+    const agents = room ? roomAgents(room) : [];
+    const skills = room?.config?.skills || [];
+    if (room && agents.length === 0 && skills.length === 0) {
       setSpecialistRunUi(null);
       return;
     }
@@ -867,31 +1119,46 @@
     state.kind = "people";
     state.roomId = roomId;
     state.threadId = null;
+    state.messageOffset = 0;
+    state.messageHasMore = false;
+    state.messageLimit = 80;
     const room = roomMeta || currentRoom() || { room_id: roomId, title, kind: "people" };
     const hasAgents = roomAgents(room).length > 0;
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = title || room.title || "Room";
+    const stageTitle = title || room.title || "Team";
+    setTeamsEmptyVisible(false);
+    $("#stage-kind").textContent = "Team";
+    $("#stage-title").textContent = stageTitle;
+    $("#stage-title").title = stageTitle;
+    show($("#room-overflow"));
     show($("#clear-chat"));
-    if (room?.owner_user_id && room.owner_user_id === state.me?.user_id) {
+    if (canManageRoom(room)) {
       show($("#delete-room"));
     } else {
       hide($("#delete-room"));
     }
     if (state.me?.authenticated) {
-      show($("#invite-friend-btn"));
+      if (canManageRoom(room)) show($("#invite-friend-btn"));
+      else hide($("#invite-friend-btn"));
       show($("#room-design-btn"));
-      show($("#autonomy-toggle-wrap"));
+      if (canEditRoom(room)) show($("#room-settings-btn"));
+      else hide($("#room-settings-btn"));
       syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
       hide($("#room-design-btn"));
+      hide($("#room-settings-btn"));
       hide($("#autonomy-toggle-wrap"));
+      hide($("#room-overflow"));
     }
     enableComposer(
       true,
       hasAgents
-        ? "Message the room… /automate opens Design · agents use the model above"
-        : "Message… Design in the header, or @Bullish for a lens"
+        ? canEditRoom(room)
+          ? "Message the team… /graph <topic> · /automate opens editor"
+          : "Message the team…"
+        : canEditRoom(room)
+          ? "Message… open Graph, or @Bullish for a lens"
+          : "Message this team…"
     );
     if (state.shareRoomId !== roomId && typeof closeShareDialog === "function") {
       closeShareDialog();
@@ -907,9 +1174,16 @@
         body: JSON.stringify({ room_id: roomId }),
       });
     }
-    const { data } = await api("/api/messages?limit=200");
+    const loading = $("#messages-loading");
+    show(loading);
     $("#messages").innerHTML = "";
-    (data?.messages || []).forEach((m) => appendPeopleMessage(m, data?.me));
+    hide($("#load-earlier-btn"));
+    const { data } = await api("/api/messages?limit=80");
+    hide(loading);
+    const msgs = data?.messages || [];
+    state.messageHasMore = msgs.length >= 80;
+    if (state.messageHasMore) show($("#load-earlier-btn"));
+    msgs.forEach((m) => appendPeopleMessage(m, data?.me));
     openWs();
     if (hasAgents) await refreshSpecialistStatus(roomId);
     else setSpecialistRunUi(null);
@@ -918,58 +1192,285 @@
   async function selectAgent(threadId, title, isMaster) {
     closeWs();
     state.kind = "agents";
-    state.roomId = null;
+    const ui = chatUi("management");
     hide($("#clear-chat"));
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-settings-btn"));
     hide($("#autonomy-toggle-wrap"));
+    hide($("#room-overflow"));
     closeShareDialog();
     if (state.compute) {
       const source = state.compute.is_local ? "Local compute" : "API compute";
-      $("#compute-badge").textContent =
+      $(ui.computeBadge).textContent =
         `${source} · ${state.compute.label || state.compute.model}`;
-      show($("#compute-badge"));
+      show($(ui.computeBadge));
     } else {
-      hide($("#compute-badge"));
+      hide($(ui.computeBadge));
     }
     hide($("#room-model-wrap"));
-    if (state.me?.authenticated) show($("#start-local-model-btn"));
-    else hide($("#start-local-model-btn"));
+    if (state.me?.authenticated) show($(ui.startLocalBtn));
+    else hide($(ui.startLocalBtn));
     $("#room-members").innerHTML = "";
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = title || "Room";
-    enableComposer(true, "Message this room… /automate to loop capabilities");
+    $(ui.stageKind).textContent = isMaster ? "Master" : "Room";
+    $(ui.stageTitle).textContent = title || (isMaster ? "Master" : "Room");
+    enableComposer(
+      true,
+      isMaster
+        ? "Ask Master to create a team, hire agents, or draft a workflow…"
+        : "Message this team… /graph <topic> runs Graph",
+      "management"
+    );
     await refreshModelStatus();
 
     if (!threadId) {
-      // Ensure master exists
-      const { data } = await api("/api/agent-chats");
-      const master = (data?.threads || []).find((t) => t.master);
+      const master = await refreshMasterThreads();
       threadId = master?.session_id;
-      title = master?.title || "Master workflows";
-      state.threads = data?.threads || [];
-      $("#stage-title").textContent = title;
+      title = master?.title || "Master";
+      $(ui.stageTitle).textContent = title;
     }
     state.threadId = threadId;
     renderRails();
-    $("#messages").innerHTML = "";
+    $(ui.messages).innerHTML = "";
     if (!threadId) return;
     const { data } = await api(`/api/agent-chats/messages?thread_id=${encodeURIComponent(threadId)}`);
-    (data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+    (data?.messages || []).forEach((ev) => appendAgentMessage(ev, "management"));
   }
 
-  function enableComposer(on, placeholder) {
-    const input = $("#body");
-    const btn = $("#send-form button");
+  function enableComposer(on, placeholder, surface) {
+    const ui = chatUi(surface);
+    const input = $(ui.body);
+    const btn = $(`${ui.sendForm} button`);
+    if (!input || !btn) return;
     input.disabled = !on;
     btn.disabled = !on;
+    const why = on ? "" : (placeholder || "Unavailable");
+    input.title = why;
+    btn.title = why;
+    input.setAttribute("aria-disabled", on ? "false" : "true");
     if (placeholder) input.placeholder = placeholder;
+    if (on) autoGrowComposer(input);
+    if (!on && (!surface || surface === "teams")) hideMentionSuggest();
   }
 
-  function appendPeopleMessage(msg, me) {
+  function mentionCandidates() {
+    const room = currentRoom();
+    const roster = new Set(roomAgents(room));
+    const byId = new Map();
+    (state.specialists || []).forEach((a) => {
+      if (a?.id) byId.set(a.id, a);
+    });
+    // Prefer roster agents when a team is open; otherwise full palette.
+    const ids = roster.size ? [...roster] : [...byId.keys()];
+    return ids
+      .map((id) => {
+        const a = byId.get(id) || { id, name: id, mention: `@${id}` };
+        const handle = (a.mention && String(a.mention).startsWith("@")
+          ? a.mention
+          : `@${String(a.mention || a.name || id).replace(/\s+/g, "")}`
+        );
+        return {
+          id: a.id || id,
+          name: a.name || id,
+          mention: handle,
+          insert: handle.startsWith("@") ? handle : `@${handle}`,
+        };
+      })
+      .filter((a) => a.insert && a.insert !== "@");
+  }
+
+  function hideMentionSuggest() {
+    const el = $("#mention-suggest");
+    if (!el) return;
+    el.innerHTML = "";
+    hide(el);
+    state.mentionActiveIndex = -1;
+    state.mentionQuery = null;
+  }
+
+  function renderMentionSuggest(items, activeIndex) {
+    const el = $("#mention-suggest");
+    if (!el) return;
+    if (!items.length) {
+      hideMentionSuggest();
+      return;
+    }
+    el.innerHTML = "";
+    items.forEach((item, idx) => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", idx === activeIndex ? "true" : "false");
+      li.innerHTML = `<span class="mention-handle"></span><span class="mention-meta"></span>`;
+      li.querySelector(".mention-handle").textContent = item.insert;
+      li.querySelector(".mention-meta").textContent = item.name;
+      li.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        applyMentionSuggestion(item);
+      });
+      el.appendChild(li);
+    });
+    state.mentionItems = items;
+    state.mentionActiveIndex = activeIndex;
+    show(el);
+  }
+
+  function mentionQueryAtCaret(value, caret) {
+    const left = String(value || "").slice(0, caret ?? 0);
+    const m = left.match(/(^|[\s([{])@([A-Za-z0-9_-]*)$/);
+    if (!m) return null;
+    return { start: left.length - (m[2].length + 1), query: m[2] };
+  }
+
+  function refreshMentionSuggest() {
+    const input = $("#body");
+    if (!input || input.disabled || state.kind !== "people") {
+      hideMentionSuggest();
+      return;
+    }
+    const at = mentionQueryAtCaret(input.value, input.selectionStart);
+    if (!at) {
+      hideMentionSuggest();
+      return;
+    }
+    const q = at.query.toLowerCase();
+    const items = mentionCandidates()
+      .filter((a) => {
+        const hay = `${a.insert} ${a.name} ${a.id}`.toLowerCase();
+        return !q || hay.includes(q) || a.insert.toLowerCase().includes(`@${q}`);
+      })
+      .slice(0, 8);
+    state.mentionQuery = at;
+    renderMentionSuggest(items, items.length ? 0 : -1);
+  }
+
+  function applyMentionSuggestion(item) {
+    const input = $("#body");
+    if (!input || !item) return;
+    const at = state.mentionQuery || mentionQueryAtCaret(input.value, input.selectionStart);
+    if (!at) return;
+    const before = input.value.slice(0, at.start);
+    const after = input.value.slice(input.selectionStart || at.start);
+    const insert = item.insert + " ";
+    input.value = before + insert + after;
+    const pos = before.length + insert.length;
+    input.setSelectionRange(pos, pos);
+    hideMentionSuggest();
+    input.focus();
+  }
+
+  $("#body")?.addEventListener("input", () => {
+    refreshMentionSuggest();
+    autoGrowComposer($("#body"));
+  });
+  $("#body")?.addEventListener("keydown", (e) => {
+    const el = $("#mention-suggest");
+    const mentionOpen = el && !el.classList.contains("hidden");
+    const items = state.mentionItems || [];
+    if (mentionOpen && items.length) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const next = (state.mentionActiveIndex + 1) % items.length;
+        renderMentionSuggest(items, next);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = (state.mentionActiveIndex - 1 + items.length) % items.length;
+        renderMentionSuggest(items, next);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        const item = items[state.mentionActiveIndex];
+        if (item) {
+          e.preventDefault();
+          applyMentionSuggestion(item);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        hideMentionSuggest();
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("#send-form")?.requestSubmit?.();
+    }
+  });
+  $("#body")?.addEventListener("blur", () => {
+    setTimeout(() => hideMentionSuggest(), 120);
+  });
+  $("#mgmt-body")?.addEventListener("input", () => autoGrowComposer($("#mgmt-body")));
+  $("#mgmt-body")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("#mgmt-send-form")?.requestSubmit?.();
+    }
+  });
+
+  function appendSystemChip(text, actions) {
+    const wrap = document.createElement("div");
+    wrap.className = "system-chip";
+    const span = document.createElement("span");
+    span.textContent = text;
+    wrap.appendChild(span);
+    (actions || []).forEach((a) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost tiny";
+      btn.textContent = a.label;
+      btn.addEventListener("click", a.onClick);
+      wrap.appendChild(btn);
+    });
+    $("#messages")?.appendChild(wrap);
+    const messages = $("#messages");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+  }
+
+  function isInfraErrorBody(body) {
+    const text = String(body || "");
+    // Real model/tunnel failures only — never treat normal long agent replies as errors.
+    return (
+      /trycloudflare\.com|localhost:\d{4}|Traceback|ECONNREFUSED|cloudflared/i.test(
+        text
+      ) ||
+      /Error code:\s*401|API key is invalid|invalid.?api.?key|authentication_error/i.test(
+        text
+      ) ||
+      /(?:OpenRouter|Anthropic|OpenAI|Ollama|Messenger error).{0,60}(?:401|Unauthorized|forbidden|unreachable)/i.test(
+        text
+      )
+    );
+  }
+
+  function appendPeopleMessage(msg, me, { prepend } = {}) {
+    const body = msg.body || "";
+    if (isInfraErrorBody(body) && !msg.author?.includes?.("you")) {
+      // Keep chat clean — infrastructure failures become a compact chip.
+      const chipParent = document.createElement("div");
+      chipParent.className = "system-chip";
+      chipParent.innerHTML =
+        '<span>Model connection failed.</span><span class="muted">Open Settings → Models or Start local model.</span>';
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ghost tiny";
+      go.textContent = "Open models";
+      go.addEventListener("click", () => {
+        switchTab("settings");
+        document.querySelector('[data-settings-panel="models"]')?.click?.();
+      });
+      chipParent.appendChild(go);
+      const messages = $("#messages");
+      if (!messages) return;
+      if (prepend) messages.insertBefore(chipParent, messages.firstChild);
+      else messages.appendChild(chipParent);
+      if (!prepend) messages.scrollTop = messages.scrollHeight;
+      return;
+    }
     const div = document.createElement("div");
     const mine = msg.author === (me || state.me?.name);
     const author = msg.author || "";
@@ -983,16 +1484,30 @@
       );
     div.className = "msg" + (mine ? " mine" : "") + (agent ? " agent" : "");
     div.innerHTML =
-      '<div class="meta"><span class="author"></span><span class="time"></span></div>' +
-      '<div class="body"></div>';
-    div.querySelector(".author").textContent = author;
-    div.querySelector(".time").textContent = fmtTime(msg.created_at);
-    div.querySelector(".body").textContent = msg.body || "";
-    $("#messages").appendChild(div);
-    $("#messages").scrollTop = $("#messages").scrollHeight;
+      '<div class="meta"></div><div class="body"></div>';
+    const meta = div.querySelector(".meta");
+    meta.appendChild(avatarFallback(author));
+    const authorEl = document.createElement("span");
+    authorEl.className = "author";
+    authorEl.textContent = author;
+    authorEl.title = author;
+    meta.appendChild(authorEl);
+    const timeEl = document.createElement("span");
+    timeEl.className = "time";
+    timeEl.textContent = fmtTime(msg.created_at);
+    meta.appendChild(timeEl);
+    div.querySelector(".body").textContent = body;
+    const messages = $("#messages");
+    if (!messages) return;
+    if (prepend) messages.insertBefore(div, messages.firstChild);
+    else {
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
   }
 
-  function appendAgentMessage(ev) {
+  function appendAgentMessage(ev, surface) {
+    const ui = chatUi(surface || (state.tab === "management" ? "management" : "teams"));
     const payload = ev.payload || {};
     const role = payload.role || "assistant";
     const div = document.createElement("div");
@@ -1012,8 +1527,10 @@
       chip.textContent = kind;
       div.querySelector(".meta").appendChild(chip);
     }
-    $("#messages").appendChild(div);
-    $("#messages").scrollTop = $("#messages").scrollHeight;
+    const messages = $(ui.messages);
+    if (!messages) return;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
   }
 
   function escapeHtml(s) {
@@ -1024,50 +1541,87 @@
       .replace(/"/g, "&quot;");
   }
 
-  $("#send-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setError("#chat-error", "");
-    const body = $("#body").value.trim();
+  async function submitChatMessage(bodyInput, errorSel, surface) {
+    setError(errorSel, "");
+    const body = bodyInput.value.trim();
     if (!body) return;
-    if (/^\/automate(?:\s|$)/i.test(body)) {
-      $("#body").value = "";
-      openRoomDesign();
-      return;
-    }
-    if (state.kind === "people") {
-      if (state.ws && state.ws.readyState === 1) {
-        state.ws.send(JSON.stringify({ type: "message", body }));
-        $("#body").value = "";
-      } else {
-        const { res, data } = await api("/api/messages", {
-          method: "POST",
-          body: JSON.stringify({ body }),
-        });
-        if (!res.ok) {
-          setError("#chat-error", data?.error || "Send failed");
-          return;
-        }
-        $("#body").value = "";
-        if (data?.message) appendPeopleMessage(data.message, data.me);
-      }
-      return;
-    }
-    if (state.kind === "agents" && state.threadId) {
-      $("#body").value = "";
-      appendAgentMessage({
-        ts: new Date().toISOString(),
-        payload: { role: "user", content: body },
-      });
-      const { res, data } = await api("/api/agent-chats/message", {
-        method: "POST",
-        body: JSON.stringify({ thread_id: state.threadId, content: body }),
-      });
-      if (!res.ok) {
-        setError("#chat-error", data?.error || data?.message || "Send failed");
+    const form = bodyInput.closest("form");
+    const submitBtn = form?.querySelector('button[type="submit"]');
+    setButtonBusy(submitBtn, true, "Sending…");
+    bodyInput.disabled = true;
+    try {
+      if (surface === "teams" && /^\/automate(?:\s|$)/i.test(body)) {
+        bodyInput.value = "";
+        openRoomDesign();
         return;
       }
-      if (data?.job?.job_id) pollJob(data.job.job_id);
+      if (surface === "teams" && /^\/graph(?:\s|$)/i.test(body)) {
+        const focus = body.replace(/^\/graph\s*/i, "").trim();
+        bodyInput.value = "";
+        if (!focus) {
+          showFlowToast("Usage: /graph <topic> — e.g. /graph Research NVDA AI demand");
+          return;
+        }
+        await runRoomGraph({ fromDialog: false, focus });
+        return;
+      }
+      if (state.kind === "people" && surface === "teams") {
+        if (state.ws && state.ws.readyState === 1) {
+          state.ws.send(JSON.stringify({ type: "message", body }));
+          bodyInput.value = "";
+          autoGrowComposer(bodyInput);
+        } else {
+          const { res, data } = await api("/api/messages", {
+            method: "POST",
+            body: JSON.stringify({ body }),
+          });
+          if (!res.ok) {
+            setError(errorSel, data?.error || "Send failed");
+            return;
+          }
+          bodyInput.value = "";
+          autoGrowComposer(bodyInput);
+          if (data?.message) appendPeopleMessage(data.message, data.me);
+        }
+        return;
+      }
+      if (state.kind === "agents" && state.threadId && surface === "management") {
+        bodyInput.value = "";
+        autoGrowComposer(bodyInput);
+        appendAgentMessage(
+          {
+            ts: new Date().toISOString(),
+            payload: { role: "user", content: body },
+          },
+          "management"
+        );
+        const { res, data } = await api("/api/agent-chats/message", {
+          method: "POST",
+          body: JSON.stringify({ thread_id: state.threadId, content: body }),
+        });
+        if (!res.ok) {
+          setError(errorSel, data?.error || data?.message || "Send failed");
+          return;
+        }
+        if (data?.job?.job_id) pollJob(data.job.job_id);
+      }
+    } finally {
+      setButtonBusy(submitBtn, false);
+      // Re-enable if composer should be on
+      if (surface === "management" || state.kind === "people") {
+        bodyInput.disabled = false;
+        if (submitBtn) submitBtn.disabled = false;
+      }
     }
+  }
+
+  $("#send-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitChatMessage($("#body"), "#chat-error", "teams");
+  });
+  $("#mgmt-send-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitChatMessage($("#mgmt-body"), "#mgmt-chat-error", "management");
   });
 
   async function pollJob(jobId) {
@@ -1077,13 +1631,13 @@
       const job = data?.job;
       if (!job) continue;
       if (job.status === "completed" || job.status === "failed") {
-        // Reload thread messages
-        if (state.threadId) {
+        if (state.threadId && state.tab === "management") {
           const msgs = await api(
             `/api/agent-chats/messages?thread_id=${encodeURIComponent(state.threadId)}`
           );
-          $("#messages").innerHTML = "";
-          (msgs.data?.messages || []).forEach((ev) => appendAgentMessage(ev));
+          const ui = chatUi("management");
+          $(ui.messages).innerHTML = "";
+          (msgs.data?.messages || []).forEach((ev) => appendAgentMessage(ev, "management"));
         }
         return;
       }
@@ -1105,6 +1659,24 @@
         (data.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
       } else if (data.type === "message" && data.message) {
         appendPeopleMessage(data.message, state.me?.name);
+      } else if (data.type === "orch_run") {
+        const job = data.job || {};
+        if (job.status === "running") {
+          const banner = $("#specialist-run-banner");
+          const text = $("#specialist-run-text");
+          const stopBanner = $("#specialist-stop-banner-btn");
+          if (text) {
+            text.textContent =
+              job.message ||
+              "Orchestrator working — safe to leave; report posts when done.";
+          }
+          if (stopBanner) hide(stopBanner);
+          show(banner);
+        } else {
+          setSpecialistRunUi(null);
+          const stopBanner = $("#specialist-stop-banner-btn");
+          if (stopBanner) show(stopBanner);
+        }
       } else if (data.type === "cleared") {
         $("#messages").innerHTML = "";
       } else if (data.type === "room_deleted") {
@@ -1149,7 +1721,9 @@
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-settings-btn"));
     hide($("#autonomy-toggle-wrap"));
+    hide($("#room-overflow"));
     updateSpecialistActions(null);
     setSpecialistRunUi(null);
     $("#messages").innerHTML = "";
@@ -1162,20 +1736,14 @@
       await selectPeople(next.room_id, next.title, next);
       return;
     }
-    if (state.threads[0]) {
-      await selectAgent(
-        state.threads[0].session_id,
-        state.threads[0].title,
-        !!state.threads[0].master
-      );
-      return;
-    }
     state.kind = null;
     state.roomId = null;
     state.threadId = null;
-    $("#stage-kind").textContent = "Room";
-    $("#stage-title").textContent = "No room selected";
-    enableComposer(false, "Create or open a room to chat");
+    $("#stage-kind").textContent = "Team";
+    $("#stage-title").textContent = "Your teams";
+    $("#stage-title").title = "Your teams";
+    setTeamsEmptyVisible(true);
+    enableComposer(false, "Create or open a team to chat", "teams");
     renderRails();
   }
 
@@ -1183,7 +1751,7 @@
     const room = currentRoom();
     const roomId = state.roomId;
     if (!roomId || roomId === "legacy") return;
-    if (room?.owner_user_id && room.owner_user_id !== state.me?.user_id) {
+    if (!canManageRoom(room)) {
       setError("#chat-error", "Only the room owner can delete this room");
       return;
     }
@@ -1221,6 +1789,51 @@
       dlg?.showModal?.();
     } catch (err) {
       setError("#chat-error", String(err.message || err));
+    }
+  });
+  $("#teams-empty-create")?.addEventListener("click", () => {
+    $("#new-room-btn")?.click();
+  });
+  $("#agent-assign-select")?.addEventListener("change", async (e) => {
+    const select = e.target;
+    const agentId = select.value;
+    if (!agentId) return;
+    if (state.kind !== "people" || !state.roomId) {
+      showAppToast("Open a team first, then assign an agent");
+      select.value = "";
+      return;
+    }
+    select.disabled = true;
+    try {
+      await addAgentToRoom(state.roomId, agentId);
+      showAppToast("Agent assigned to team");
+    } finally {
+      select.value = "";
+      fillAgentAssignSelect();
+    }
+  });
+  $("#load-earlier-btn")?.addEventListener("click", async () => {
+    if (state.kind !== "people" || !state.roomId) return;
+    const btn = $("#load-earlier-btn");
+    setButtonBusy(btn, true, "Loading…");
+    try {
+      const nextLimit = Math.min(500, (state.messageLimit || 80) + 80);
+      state.messageLimit = nextLimit;
+      const { data } = await api(`/api/messages?limit=${nextLimit}`);
+      const msgs = data?.messages || [];
+      state.messageHasMore = msgs.length >= nextLimit && nextLimit < 500;
+      if (!state.messageHasMore) hide(btn);
+      const box = $("#messages");
+      if (box) box.innerHTML = "";
+      msgs.forEach((m) => appendPeopleMessage(m, data?.me));
+    } finally {
+      setButtonBusy(btn, false);
+      if (!state.messageHasMore) hide(btn);
+    }
+  });
+  $("#room-overflow")?.addEventListener("click", (e) => {
+    if (e.target.closest(".overflow-item")) {
+      $("#room-overflow").open = false;
     }
   });
   $("#new-room-cancel").addEventListener("click", () => {
@@ -1274,7 +1887,7 @@
     if (!res.ok) {
       setError(
         "#chat-error",
-        data?.message || data?.error || "Specialist run failed"
+        data?.message || data?.error || "Agent run failed"
       );
       if (data?.job) setSpecialistRunUi(data.job);
       return;
@@ -1282,76 +1895,629 @@
     if (data?.job) setSpecialistRunUi(data.job);
   }
 
-  $("#specialist-present-btn").addEventListener("click", () => {
-    runSpecialistAction("present", "");
-  });
-  $("#specialist-debate-btn").addEventListener("click", () => {
-    state.debateAction = "debate";
-    $("#debate-dialog-title").textContent = "Specialist debate";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    show($("#debate-rounds-wrap"));
-    show($("#debate-loop-wrap"));
-    show($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    $("#debate-rounds").disabled = false;
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#specialist-idea-btn").addEventListener("click", () => {
-    state.debateAction = "idea";
-    $("#debate-dialog-title").textContent = "Idea pass";
-    $("#debate-topic").value = "";
-    $("#debate-continuous").checked = false;
-    hide($("#debate-rounds-wrap"));
-    hide($("#debate-loop-wrap"));
-    hide($("#debate-rounds-hint"));
-    hide($("#debate-loop-hint"));
-    setError("#debate-error", "");
-    $("#debate-dialog").showModal();
-  });
-  $("#debate-continuous").addEventListener("change", () => {
-    const on = $("#debate-continuous").checked;
-    $("#debate-rounds").disabled = on;
-    if (on) {
-      hide($("#debate-rounds-hint"));
-      show($("#debate-loop-hint"));
-    } else {
-      show($("#debate-rounds-hint"));
-      hide($("#debate-loop-hint"));
-    }
-  });
-  $("#debate-cancel").addEventListener("click", () => {
-    $("#debate-dialog").close();
-  });
-  $("#debate-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const topic = $("#debate-topic").value.trim();
-    if (!topic) {
-      setError("#debate-error", "Topic required");
-      return;
-    }
-    const action = state.debateAction || "debate";
-    const continuous =
-      action === "debate" && $("#debate-continuous").checked;
-    const rounds = action === "debate" ? ($("#debate-rounds").value || "2") : "1";
-    $("#debate-dialog").close();
-    await runSpecialistAction(action, topic, rounds, continuous);
-  });
-  $("#specialist-stop-btn").addEventListener("click", () => stopSpecialistRun());
-  $("#specialist-stop-banner-btn").addEventListener("click", () => stopSpecialistRun());
+  // Present / Debate / Ideas header buttons removed — use chat + Orchestrator.
+
+  $("#specialist-stop-banner-btn")?.addEventListener("click", () => stopSpecialistRun());
 
   function openShareDialog(shareUrl, roomId) {
     state.shareUrl = shareUrl || null;
     state.shareRoomId = roomId || null;
-    $("#share-url").value = shareUrl || "";
+    const shareInput = $("#share-url");
+    if (shareInput) shareInput.value = shareUrl || "";
+    const hasRoom = !!roomId;
+    const title = $("#share-dialog-title");
+    if (title) title.textContent = hasRoom ? "Share team" : "Friends";
+    const hint = $("#friends-dialog-hint");
+    if (hint) {
+      hint.textContent = hasRoom
+        ? "Invite friends as Editor or Viewer. They’ll get a notification to accept before the team appears in their list."
+        : "Search usernames to send friend requests.";
+    }
+    const accessSection = $("#room-access-section");
+    if (accessSection) accessSection.classList.toggle("hidden", !hasRoom);
+    const inviteDetails = document.querySelector("#share-dialog .invite-link-details");
+    if (inviteDetails) {
+      inviteDetails.classList.toggle("hidden", !hasRoom);
+      inviteDetails.open = false;
+    }
     const dialog = $("#share-dialog");
-    if (dialog && !dialog.open) dialog.showModal();
+    if (!dialog) return;
+    // Keep modal outside #shell so overflow:hidden cannot trap / blank it.
+    if (dialog.parentElement !== document.body) {
+      document.body.appendChild(dialog);
+    }
+    try {
+      if (!dialog.open) dialog.showModal();
+    } catch (err) {
+      dialog.setAttribute("open", "");
+      console.warn("showModal failed", err);
+    }
+    queueMicrotask(() => {
+      refreshFriendsDialog().catch((e) => console.warn("friends dialog refresh", e));
+    });
+  }
+
+  function makeRoleSelect(currentRole, { disabled = false, onChange } = {}) {
+    const select = document.createElement("select");
+    select.className = "room-access-role";
+    select.setAttribute("aria-label", "Access level");
+    [
+      ["editor", "Editor"],
+      ["viewer", "Viewer"],
+    ].forEach(([value, label]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      if (value === currentRole) opt.selected = true;
+      select.appendChild(opt);
+    });
+    select.disabled = !!disabled;
+    if (typeof onChange === "function") {
+      select.addEventListener("change", () => onChange(select.value, select));
+    }
+    return select;
+  }
+
+  async function refreshRoomAccessList() {
+    const section = $("#room-access-section");
+    const list = $("#room-access-list");
+    const empty = $("#room-access-empty");
+    if (!section || !list) return;
+    if (!state.shareRoomId) {
+      section.classList.add("hidden");
+      list.innerHTML = "";
+      return;
+    }
+    section.classList.remove("hidden");
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members`
+    );
+    if (!res.ok) {
+      list.innerHTML = "";
+      if (empty) {
+        empty.textContent = "Could not load access list.";
+        empty.classList.remove("hidden");
+      }
+      return;
+    }
+    const members = data.members || [];
+    const iAmOwner = data.my_role === "owner" || canManageRoom(currentRoom());
+    list.innerHTML = "";
+    members.forEach((member) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const name = member.display_name || member.username || "User";
+      if (typeof avatarFallback === "function") {
+        li.appendChild(avatarFallback(name));
+      }
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      strong.title = name;
+      meta.appendChild(strong);
+      if (member.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${member.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      if (member.role === "owner") {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = "Owner";
+        actions.appendChild(tag);
+      } else if (iAmOwner) {
+        const select = makeRoleSelect(member.role === "viewer" ? "viewer" : "editor", {
+          onChange: async (role, el) => {
+            setError("#friends-dialog-error", "");
+            const result = await api(
+              `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members/${encodeURIComponent(member.user_id)}`,
+              { method: "PATCH", body: JSON.stringify({ role }) }
+            );
+            if (!result.res.ok) {
+              setError(
+                "#friends-dialog-error",
+                result.data?.message || result.data?.error || "Could not update access"
+              );
+              el.value = member.role === "viewer" ? "viewer" : "editor";
+              return;
+            }
+            member.role = role;
+            settingsMessage(
+              "#friends-dialog-message",
+              result.data.message || `Access updated to ${roomRoleLabel(role)}.`
+            );
+          },
+        });
+        actions.appendChild(select);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost tiny";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const result = await api(
+            `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members/${encodeURIComponent(member.user_id)}`,
+            { method: "DELETE" }
+          );
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not remove"
+            );
+            return;
+          }
+          settingsMessage("#friends-dialog-message", "Removed from team.");
+          await refreshRoomAccessList();
+          await refreshFriendsDialog();
+        });
+        actions.appendChild(remove);
+      } else {
+        const tag = document.createElement("span");
+        tag.className = "room-access-role-label";
+        tag.textContent = roomRoleLabel(member.role);
+        actions.appendChild(tag);
+      }
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+    const pending = data.pending_invites || [];
+    pending.forEach((invite) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const name = invite.display_name || invite.username || "User";
+      if (typeof avatarFallback === "function") {
+        li.appendChild(avatarFallback(name));
+      }
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      strong.title = name;
+      meta.appendChild(strong);
+      if (invite.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${invite.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "friend-row-actions";
+      const tag = document.createElement("span");
+      tag.className = "room-access-role-label";
+      tag.textContent = `Invited · ${roomRoleLabel(invite.role)}`;
+      actions.appendChild(tag);
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+    if (empty) empty.classList.toggle("hidden", members.length + pending.length > 0);
+  }
+
+  async function openFriendsFromProfile() {
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    const search = $("#friend-search");
+    if (search) search.value = "";
+    const results = $("#friend-search-results");
+    if (results) results.innerHTML = "";
+    openShareDialog("", null);
+    // Focus search after the dialog paints (showModal is sync; focus next frame).
+    requestAnimationFrame(() => {
+      const input = $("#friend-search");
+      if (input && !input.disabled) {
+        input.focus();
+        input.select?.();
+      }
+    });
   }
 
   function closeShareDialog() {
     const dialog = $("#share-dialog");
-    if (dialog?.open) dialog.close();
+    if (!dialog) return;
+    if (dialog.open) dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  function friendLabel(user) {
+    const handle = user?.username ? `@${user.username}` : "";
+    const name = user?.display_name || "";
+    if (handle && name) return `${name} (${handle})`;
+    return handle || name || "Unknown";
+  }
+
+  function setNotifyBadge(count) {
+    const n = Number(count || 0);
+    ["#notify-badge", "#mobile-notify-badge"].forEach((sel) => {
+      const badge = $(sel);
+      if (!badge) return;
+      badge.textContent = n > 99 ? "99+" : String(n);
+      badge.classList.toggle("hidden", n <= 0);
+    });
+  }
+
+  async function refreshNotifyBadge() {
+    const { res, data } = await api("/api/notifications");
+    if (!res.ok) return;
+    setNotifyBadge(data.unread || 0);
+    return data;
+  }
+
+  function renderFriendRows(container, users, { emptyText, action } = {}) {
+    if (!container) return;
+    container.innerHTML = "";
+    if (!users?.length) {
+      if (emptyText) {
+        const li = document.createElement("li");
+        li.className = "muted tiny-hint friend-empty-row";
+        li.textContent = emptyText;
+        container.appendChild(li);
+      }
+      return;
+    }
+    users.forEach((user) => {
+      const li = document.createElement("li");
+      li.className = "friend-row";
+      const name = user.display_name || user.username || "User";
+      li.appendChild(avatarFallback(name));
+      const meta = document.createElement("div");
+      meta.className = "friend-meta";
+      const strong = document.createElement("strong");
+      strong.textContent = name;
+      strong.title = name;
+      meta.appendChild(strong);
+      if (user.username) {
+        const handle = document.createElement("span");
+        handle.className = "muted tiny-hint";
+        handle.textContent = `@${user.username}`;
+        meta.appendChild(handle);
+      }
+      li.appendChild(meta);
+      if (typeof action === "function") {
+        const actions = document.createElement("div");
+        actions.className = "friend-row-actions";
+        action(user, actions, li);
+        if (actions.childNodes.length) li.appendChild(actions);
+      }
+      container.appendChild(li);
+    });
+  }
+
+  async function refreshFriendsDialog() {
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    const needed = $("#friends-username-needed");
+    const hasUsername = !!(state.me?.username);
+    if (needed) needed.classList.toggle("hidden", hasUsername);
+    if (state.shareRoomId) await refreshRoomAccessList();
+    else {
+      const section = $("#room-access-section");
+      if (section) section.classList.add("hidden");
+    }
+    const { res, data } = await api("/api/friends");
+    if (!res.ok) return;
+    state.friends = data.friends || [];
+    if (data.username) state.me = { ...(state.me || {}), username: data.username };
+    const room = currentRoom();
+    const iAmOwner =
+      !!state.shareRoomId &&
+      (canManageRoom(room) ||
+        (room?.room_id === state.shareRoomId && room?.my_role === "owner"));
+    renderFriendRows($("#friends-dialog-list"), state.friends, {
+      emptyText: "No friends yet — search a username above.",
+      action: (user, actions) => {
+        if (!state.shareRoomId || state.kind !== "people" || !iAmOwner) return;
+        const roleSelect = makeRoleSelect("editor");
+        actions.appendChild(roleSelect);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ghost tiny";
+        btn.textContent = "Invite";
+        btn.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const role = roleSelect.value === "viewer" ? "viewer" : "editor";
+          const result = await api(
+            `/api/rooms/${encodeURIComponent(state.shareRoomId)}/members`,
+            {
+              method: "POST",
+              body: JSON.stringify({ user_id: user.user_id, role }),
+            }
+          );
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not send invite"
+            );
+            return;
+          }
+          settingsMessage(
+            "#friends-dialog-message",
+            result.data.message || "Invite sent — waiting for them to accept."
+          );
+          showAppToast("Invite sent");
+          await refreshRoomAccessList();
+        });
+        actions.appendChild(btn);
+      },
+    });
+  }
+
+  async function searchFriends() {
+    setError("#friends-dialog-error", "");
+    const raw = ($("#friend-search")?.value || "").trim();
+    const q = raw.replace(/^@+/, "").trim();
+    const list = $("#friend-search-results");
+    if (!q) {
+      if (list) {
+        list.innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "muted tiny-hint friend-empty-row";
+        li.textContent = "Type a username to search.";
+        list.appendChild(li);
+      }
+      return;
+    }
+    if (list) {
+      list.innerHTML =
+        '<li class="state-block" role="status">Searching…</li>';
+    }
+    const { res, data } = await api(`/api/users/search?q=${encodeURIComponent(q)}`);
+    if (!res.ok) {
+      if (list) list.innerHTML = "";
+      setError("#friends-dialog-error", data?.message || data?.error || "Search failed");
+      return;
+    }
+    renderFriendRows(list, data.users || [], {
+      emptyText: "No usernames matched.",
+      action: (user, actions) => {
+        const rel = user.relationship;
+        if (rel === "friends") {
+          const tag = document.createElement("span");
+          tag.className = "muted tiny-hint";
+          tag.textContent = "Friends";
+          actions.appendChild(tag);
+          return;
+        }
+        if (rel === "outgoing") {
+          const tag = document.createElement("span");
+          tag.className = "muted tiny-hint";
+          tag.textContent = "Requested";
+          actions.appendChild(tag);
+          return;
+        }
+        if (rel === "incoming") {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            await api(`/api/friends/${encodeURIComponent(user.user_id)}/accept`, {
+              method: "POST",
+              body: "{}",
+            });
+            await searchFriends();
+            await refreshFriendsDialog();
+            await refreshNotifyBadge();
+          });
+          actions.appendChild(accept);
+          return;
+        }
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tiny";
+        btn.textContent = "Add friend";
+        btn.addEventListener("click", async () => {
+          setError("#friends-dialog-error", "");
+          const result = await api("/api/friends/request", {
+            method: "POST",
+            body: JSON.stringify({ user_id: user.user_id, username: user.username }),
+          });
+          if (!result.res.ok) {
+            setError(
+              "#friends-dialog-error",
+              result.data?.message || result.data?.error || "Could not send request"
+            );
+            if (result.data?.error === "username_required") {
+              const needed = $("#friends-username-needed");
+              if (needed) needed.classList.remove("hidden");
+            }
+            return;
+          }
+          settingsMessage(
+            "#friends-dialog-message",
+            result.data.message || "Friend request sent."
+          );
+          showAppToast("Friend request sent");
+          await searchFriends();
+          await refreshFriendsDialog();
+        });
+        actions.appendChild(btn);
+      },
+    });
+  }
+
+  function notificationCopy(note) {
+    const p = note.payload || {};
+    const who = p.from_username
+      ? `@${p.from_username}`
+      : p.from_display_name || "Someone";
+    if (note.type === "friend_request") return `${who} sent you a friend request.`;
+    if (note.type === "friend_accepted") return `${who} accepted your friend request.`;
+    if (note.type === "room_invite") {
+      const title = p.room_title || "a team";
+      const role = p.role === "viewer" ? "Viewer" : "Editor";
+      return `${who} invited you to join ${title} as ${role}.`;
+    }
+    if (note.type === "room_invite_accepted") {
+      const title = p.room_title || "your team";
+      return `${who} joined ${title}.`;
+    }
+    return `${who} · ${note.type}`;
+  }
+
+  async function loadNotificationsTab() {
+    const list = $("#notifications-list");
+    if (list && !list.children.length) {
+      list.innerHTML = '<li class="state-block" role="status">Loading…</li>';
+    }
+    const notesData = await refreshNotifyBadge();
+    const { res, data } = await api("/api/friends");
+    const incoming = res.ok ? data.incoming || [] : [];
+    const reqList = $("#notifications-requests");
+    const reqEmpty = $("#notifications-requests-empty");
+    renderFriendRows(reqList, incoming, {
+      emptyText: "No pending requests.",
+      action: (user, actions) => {
+        const accept = document.createElement("button");
+        accept.type = "button";
+        accept.className = "tiny";
+        accept.textContent = "Accept";
+        accept.addEventListener("click", async () => {
+          await api(`/api/friends/${encodeURIComponent(user.user_id)}/accept`, {
+            method: "POST",
+            body: "{}",
+          });
+          showAppToast("Friend request accepted");
+          await loadNotificationsTab();
+          await loadProfileFriends();
+        });
+        const decline = document.createElement("button");
+        decline.type = "button";
+        decline.className = "ghost tiny";
+        decline.textContent = "Decline";
+        decline.addEventListener("click", async () => {
+          await api(`/api/friends/${encodeURIComponent(user.user_id)}/reject`, {
+            method: "POST",
+            body: "{}",
+          });
+          await loadNotificationsTab();
+        });
+        actions.appendChild(accept);
+        actions.appendChild(decline);
+      },
+    });
+    if (reqEmpty) reqEmpty.classList.toggle("hidden", incoming.length > 0);
+
+    const empty = $("#notifications-empty");
+    const notes = notesData?.notifications || [];
+    if (list) {
+      list.innerHTML = "";
+      notes.forEach((note) => {
+        const li = document.createElement("li");
+        li.className = `notification-row${note.unread ? " unread" : ""}`;
+        const body = document.createElement("div");
+        body.className = "notification-body";
+        const text = document.createElement("strong");
+        text.textContent = notificationCopy(note);
+        body.appendChild(text);
+        if (note.created_at) {
+          const when = document.createElement("span");
+          when.className = "muted tiny-hint";
+          when.textContent = new Date(note.created_at).toLocaleString();
+          body.appendChild(when);
+        }
+        li.appendChild(body);
+        if (note.unread) {
+          const mark = document.createElement("button");
+          mark.type = "button";
+          mark.className = "ghost tiny";
+          mark.textContent = "Mark read";
+          mark.addEventListener("click", async () => {
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            await loadNotificationsTab();
+          });
+          li.appendChild(mark);
+        }
+        if (note.type === "friend_request" && note.payload?.from_user_id) {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            await api(
+              `/api/friends/${encodeURIComponent(note.payload.from_user_id)}/accept`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            showAppToast("Friend request accepted");
+            await loadNotificationsTab();
+            await loadProfileFriends();
+          });
+          li.appendChild(accept);
+        }
+        if (note.type === "room_invite" && note.payload?.invite_id) {
+          const accept = document.createElement("button");
+          accept.type = "button";
+          accept.className = "tiny";
+          accept.textContent = "Accept";
+          accept.addEventListener("click", async () => {
+            const result = await api(
+              `/api/rooms/invites/${encodeURIComponent(note.payload.invite_id)}/accept`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            if (!result.res.ok) {
+              showAppToast(
+                result.data?.message || result.data?.error || "Could not join team"
+              );
+              await loadNotificationsTab();
+              return;
+            }
+            showAppToast(result.data?.message || "Joined team");
+            await refreshChatRails();
+            const roomId = result.data?.room?.room_id || note.payload.room_id;
+            const title = result.data?.room?.title || note.payload.room_title;
+            if (roomId) {
+              switchTab("chats");
+              await selectPeople(roomId, title || "Team");
+            }
+            await loadNotificationsTab();
+          });
+          const decline = document.createElement("button");
+          decline.type = "button";
+          decline.className = "ghost tiny";
+          decline.textContent = "Decline";
+          decline.addEventListener("click", async () => {
+            await api(
+              `/api/rooms/invites/${encodeURIComponent(note.payload.invite_id)}/reject`,
+              { method: "POST", body: "{}" }
+            );
+            await api(
+              `/api/notifications/${encodeURIComponent(note.notification_id)}/read`,
+              { method: "POST", body: "{}" }
+            );
+            await loadNotificationsTab();
+          });
+          li.appendChild(accept);
+          li.appendChild(decline);
+        }
+        list.appendChild(li);
+      });
+    }
+    if (empty) empty.classList.toggle("hidden", notes.length > 0);
+  }
+
+  async function loadProfileFriends() {
+    const { res, data } = await api("/api/friends");
+    if (!res.ok) return;
+    const friends = data.friends || [];
+    state.friends = friends;
+    renderFriendRows($("#profile-friends-list"), friends);
+    const empty = $("#profile-friends-empty");
+    if (empty) empty.classList.toggle("hidden", friends.length > 0);
   }
 
   $("#copy-share").addEventListener("click", async () => {
@@ -1360,18 +2526,50 @@
     } catch {}
   });
 
+  $("#friend-search-btn")?.addEventListener("click", () => searchFriends());
+  $("#friend-search")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      searchFriends();
+    }
+  });
+
+  $("#notifications-refresh")?.addEventListener("click", () => loadNotificationsTab());
+  $("#notifications-mark-all")?.addEventListener("click", async () => {
+    await api("/api/notifications/read-all", { method: "POST", body: "{}" });
+    await loadNotificationsTab();
+  });
+
   $("#invite-friend-btn").addEventListener("click", async () => {
     if (!state.roomId) return;
     setError("#chat-error", "");
+    setError("#friends-dialog-error", "");
+    settingsMessage("#friends-dialog-message", "");
+    let shareUrl = "";
     const { res, data } = await api(
       `/api/rooms/${encodeURIComponent(state.roomId)}/invite`,
       { method: "POST", body: "{}" }
     );
-    if (!res.ok) {
-      setError("#chat-error", data?.error || "Could not create invite");
-      return;
-    }
-    openShareDialog(data.share_url, state.roomId);
+    if (res.ok) shareUrl = data.share_url || "";
+    openShareDialog(shareUrl, state.roomId);
+  });
+
+  $("#profile-add-friend-btn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openFriendsFromProfile();
+  });
+  $("#friends-dialog-done")?.addEventListener("click", () => closeShareDialog());
+  $("#share-dialog")?.addEventListener("cancel", (e) => {
+    // Allow Escape to close without freezing; default is fine, just ensure state clears.
+    e.stopPropagation();
+  });
+  $("#share-dialog")?.addEventListener("close", () => {
+    if (state.tab === "settings") loadProfileFriends();
+  });
+  // Click backdrop (dialog itself) to dismiss — not the inner form.
+  $("#share-dialog")?.addEventListener("click", (e) => {
+    if (e.target === $("#share-dialog")) closeShareDialog();
   });
 
   ["dragover", "dragleave", "drop"].forEach((eventName) => {
@@ -1394,58 +2592,672 @@
     });
   });
 
-  // Keyboard: j/k moves through the single room list.
+  // Keyboard: j/k moves through teams on Teams; Management is a single Master thread.
   document.addEventListener("keydown", (e) => {
     if (state.tab !== "chats") return;
     if (e.target.matches("input, textarea")) return;
     if (e.key === "j" || e.key === "k") {
-      const items = [
-        ...state.rooms.map((r) => ({ kind: "people", id: r.room_id, title: r.title })),
-        ...state.threads.map((t) => ({
-          kind: "agents",
-          id: t.session_id,
-          title: t.title,
-          master: t.master,
-        })),
-      ];
+      const items = state.rooms.map((r) => ({
+        kind: "people",
+        id: r.room_id,
+        title: r.title,
+      }));
       if (!items.length) return;
       const cur = items.findIndex(
-        (it) =>
-          (state.kind === "people" && it.kind === "people" && it.id === state.roomId) ||
-          (state.kind === "agents" && it.kind === "agents" && it.id === state.threadId)
+        (it) => state.kind === "people" && it.id === state.roomId
       );
       const next = e.key === "j"
         ? Math.min(items.length - 1, cur + 1)
         : Math.max(0, cur < 0 ? 0 : cur - 1);
       const it = items[next];
-      if (it.kind === "people") selectPeople(it.id, it.title);
-      else selectAgent(it.id, it.title, !!it.master);
+      selectPeople(it.id, it.title);
       e.preventDefault();
     }
   });
 
 
-  function syncAutonomyToggle(room) {
-    const box = $("#autonomy-toggle");
-    if (!box) return;
-    const enabled = !!(room?.config?.autonomy?.enabled);
-    box.checked = enabled;
+
+  state.graphDraft = { layers: [], guards: [] };
+  state.graphAgentsById = {};
+  state.graphMemberEdit = null;
+  state.graphFocusLayerId = null;
+  let graphSeq = 0;
+
+  function nextGraphId(prefix) {
+    graphSeq += 1;
+    return `${prefix}${Date.now().toString(36)}${graphSeq}`;
   }
 
-  function openRoomDesign() {
+  function emptyGraph() {
+    return { layers: [], guards: [] };
+  }
+
+  function normalizeGraph(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const layers = [];
+    (Array.isArray(src.layers) ? src.layers : []).slice(0, 24).forEach((layer, idx) => {
+      if (!layer || typeof layer !== "object") return;
+      const id = String(layer.id || `layer_${idx + 1}`).slice(0, 64);
+      const members = [];
+      const seen = new Set();
+      (Array.isArray(layer.members) ? layer.members : []).slice(0, 24).forEach((m) => {
+        let agentId = "";
+        let instructions = "";
+        if (typeof m === "string") {
+          agentId = m.trim();
+        } else if (m && typeof m === "object") {
+          agentId = String(m.agent_id || m.id || "").trim();
+          instructions = String(m.instructions || "").slice(0, 2000);
+        }
+        if (!agentId || seen.has(agentId)) return;
+        seen.add(agentId);
+        members.push({ agent_id: agentId, instructions });
+      });
+      layers.push({
+        id,
+        title: String(layer.title || `Step ${idx + 1}`).slice(0, 80),
+        prompt: String(layer.prompt || "").slice(0, 2000),
+        goal: String(layer.goal || "").slice(0, 800),
+        members,
+      });
+    });
+    const layerIds = new Set(layers.map((l) => l.id));
+    const guards = [];
+    (Array.isArray(src.guards) ? src.guards : []).slice(0, 24).forEach((g, idx) => {
+      if (!g || typeof g !== "object") return;
+      const fromId = String(g.from_layer_id || "").trim();
+      const toId = String(g.to_layer_id || "").trim();
+      if (!layerIds.has(fromId) || !layerIds.has(toId)) return;
+      guards.push({
+        id: String(g.id || `guard_${idx + 1}`).slice(0, 64),
+        from_layer_id: fromId,
+        to_layer_id: toId,
+        prompt: String(g.prompt || "").slice(0, 2000),
+      });
+    });
+    // Ensure consecutive layers have a guard between them
+    for (let i = 0; i < layers.length - 1; i += 1) {
+      const fromId = layers[i].id;
+      const toId = layers[i + 1].id;
+      if (!guards.some((g) => g.from_layer_id === fromId && g.to_layer_id === toId)) {
+        guards.splice(i, 0, {
+          id: nextGraphId("g"),
+          from_layer_id: fromId,
+          to_layer_id: toId,
+          prompt: "",
+        });
+      }
+    }
+    return { layers, guards };
+  }
+
+  function syncGuardsToLayers() {
+    const layers = state.graphDraft.layers || [];
+    const prev = {};
+    (state.graphDraft.guards || []).forEach((g) => {
+      prev[`${g.from_layer_id}->${g.to_layer_id}`] = g.prompt || "";
+    });
+    const guards = [];
+    for (let i = 0; i < layers.length - 1; i += 1) {
+      const fromId = layers[i].id;
+      const toId = layers[i + 1].id;
+      const key = `${fromId}->${toId}`;
+      guards.push({
+        id: nextGraphId("g"),
+        from_layer_id: fromId,
+        to_layer_id: toId,
+        prompt: prev[key] || "",
+      });
+    }
+    state.graphDraft.guards = guards;
+  }
+
+  function findGraphLayer(layerId) {
+    return (state.graphDraft.layers || []).find((l) => l.id === layerId) || null;
+  }
+
+  function findGraphGuard(fromId, toId) {
+    return (state.graphDraft.guards || []).find(
+      (g) => g.from_layer_id === fromId && g.to_layer_id === toId
+    );
+  }
+
+  function agentDisplayName(agentId) {
+    return state.graphAgentsById[agentId]?.name || agentId;
+  }
+
+  function renderGraphRoster() {
+    const list = $("#graph-roster-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const agents = $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId);
+    if (!agents.length) {
+      list.innerHTML = '<li class="muted tiny-hint">Add analysts to this team, then drag them into steps.</li>';
+      return;
+    }
+    agents.forEach((id) => {
+      const li = document.createElement("li");
+      li.className = "graph-roster-card";
+      li.draggable = true;
+      li.dataset.agentId = id;
+      li.title = "Drag onto a step";
+      li.innerHTML = `<strong>${escapeHtml(agentDisplayName(id))}</strong><span>${escapeHtml(id)}</span>`;
+      li.addEventListener("dragstart", (event) => {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("application/x-graph-agent", id);
+        event.dataTransfer.setData("text/plain", id);
+        li.classList.add("dragging");
+      });
+      li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      list.appendChild(li);
+    });
+  }
+
+  function addAgentToGraphLayer(layerId, agentId) {
+    const layer = findGraphLayer(layerId);
+    if (!layer || !agentId) return;
+    if (layer.members.some((m) => m.agent_id === agentId)) return;
+    layer.members.push({ agent_id: agentId, instructions: "" });
+    renderGraphMap();
+    updateHarnessCanvasPreview();
+  }
+
+  function openGraphMemberDialog(layerId, agentId) {
+    const layer = findGraphLayer(layerId);
+    const member = layer?.members?.find((m) => m.agent_id === agentId);
+    if (!member) return;
+    state.graphMemberEdit = { layerId, agentId };
+    const label = $("#graph-member-label");
+    if (label) {
+      label.textContent = `${agentDisplayName(agentId)} · ${layer.title || "step"}`;
+    }
+    if ($("#graph-member-instructions")) {
+      $("#graph-member-instructions").value = member.instructions || "";
+    }
+    $("#graph-member-dialog")?.showModal?.();
+  }
+
+  function renderGraphMap() {
+    const map = $("#graph-map");
+    if (!map) return;
+    const layers = state.graphDraft.layers || [];
+    map.innerHTML = "";
+    if (!layers.length) {
+      state.graphFocusLayerId = null;
+      const empty = document.createElement("button");
+      empty.type = "button";
+      empty.id = "graph-empty-add";
+      empty.className = "graph-empty-add";
+      empty.innerHTML =
+        '<span class="graph-empty-plus">+</span><strong>Add first step</strong>' +
+        '<span class="muted tiny-hint">Click the map to place a layer with a prompt and goal</span>';
+      empty.addEventListener("click", () => addGraphLayer());
+      map.appendChild(empty);
+      map.classList.add("is-empty");
+      updateHarnessCanvasPreview();
+      return;
+    }
+    map.classList.remove("is-empty");
+    if (
+      state.graphFocusLayerId &&
+      !layers.some((l) => l.id === state.graphFocusLayerId)
+    ) {
+      state.graphFocusLayerId = null;
+    }
+    layers.forEach((layer, idx) => {
+      const focused = state.graphFocusLayerId === layer.id;
+      const card = document.createElement("article");
+      card.className = "graph-layer" + (focused ? " is-expanded" : " is-collapsed");
+      card.dataset.layerId = layer.id;
+
+      if (!focused) {
+        const head = document.createElement("div");
+        head.className = "graph-layer-head";
+        head.innerHTML = `<span class="graph-layer-index">Layer ${idx + 1}</span>`;
+        const summary = document.createElement("div");
+        summary.className = "graph-layer-summary";
+        const title = document.createElement("strong");
+        title.textContent = layer.title || `Step ${idx + 1}`;
+        summary.appendChild(title);
+        if (layer.goal) {
+          const goal = document.createElement("span");
+          goal.className = "graph-layer-goal";
+          goal.textContent = layer.goal;
+          summary.appendChild(goal);
+        } else if (layer.prompt) {
+          const goal = document.createElement("span");
+          goal.className = "graph-layer-goal";
+          goal.textContent = layer.prompt.slice(0, 100);
+          summary.appendChild(goal);
+        }
+        const chips = document.createElement("div");
+        chips.className = "graph-layer-chips";
+        if (layer.members.length) {
+          layer.members.forEach((m) => {
+            const chip = document.createElement("span");
+            chip.className = "graph-layer-chip";
+            chip.textContent = agentDisplayName(m.agent_id);
+            chips.appendChild(chip);
+          });
+        } else {
+          const chip = document.createElement("span");
+          chip.className = "graph-layer-chip";
+          chip.textContent = "No analysts";
+          chips.appendChild(chip);
+        }
+        summary.appendChild(chips);
+        head.appendChild(summary);
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "ghost tiny";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          state.graphFocusLayerId = layer.id;
+          renderGraphMap();
+        });
+        head.appendChild(editBtn);
+        card.appendChild(head);
+        card.addEventListener("click", () => {
+          state.graphFocusLayerId = layer.id;
+          renderGraphMap();
+        });
+        map.appendChild(card);
+      } else {
+        const head = document.createElement("div");
+        head.className = "graph-layer-head";
+        head.innerHTML = `<span class="graph-layer-index">Layer ${idx + 1}</span>`;
+        const title = document.createElement("input");
+        title.type = "text";
+        title.maxLength = 80;
+        title.className = "graph-layer-title";
+        title.placeholder = `Step ${idx + 1}`;
+        title.value = layer.title || "";
+        title.addEventListener("input", () => {
+          layer.title = title.value;
+          updateHarnessCanvasPreview();
+        });
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost tiny danger";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", () => removeGraphLayer(layer.id));
+        head.appendChild(title);
+        head.appendChild(remove);
+        card.appendChild(head);
+
+        const promptLabel = document.createElement("label");
+        promptLabel.className = "graph-field";
+        promptLabel.innerHTML = "<span>Prompt</span>";
+        const prompt = document.createElement("textarea");
+        prompt.rows = 2;
+        prompt.maxLength = 2000;
+        prompt.placeholder = "What should this step accomplish?";
+        prompt.value = layer.prompt || "";
+        prompt.addEventListener("input", () => {
+          layer.prompt = prompt.value;
+        });
+        promptLabel.appendChild(prompt);
+        card.appendChild(promptLabel);
+
+        const goalLabel = document.createElement("label");
+        goalLabel.className = "graph-field";
+        goalLabel.innerHTML = "<span>Goal</span>";
+        const goal = document.createElement("input");
+        goal.type = "text";
+        goal.maxLength = 800;
+        goal.placeholder = "Done when…";
+        goal.value = layer.goal || "";
+        goal.addEventListener("input", () => {
+          layer.goal = goal.value;
+        });
+        goalLabel.appendChild(goal);
+        card.appendChild(goalLabel);
+
+        const membersWrap = document.createElement("div");
+        membersWrap.className = "graph-members";
+        membersWrap.dataset.layerId = layer.id;
+        const membersHead = document.createElement("div");
+        membersHead.className = "graph-members-head";
+        membersHead.innerHTML =
+          "<strong>Analysts on this step</strong><span class=\"muted tiny-hint\">Drop here · click for instructions</span>";
+        membersWrap.appendChild(membersHead);
+        const membersList = document.createElement("div");
+        membersList.className = "graph-members-list";
+        if (!layer.members.length) {
+          membersList.innerHTML =
+            '<p class="muted tiny-hint graph-drop-hint">Drop an analyst from the roster</p>';
+        } else {
+          layer.members.forEach((m) => {
+            const box = document.createElement("button");
+            box.type = "button";
+            box.className =
+              "graph-member-box" + (m.instructions ? " has-instructions" : "");
+            box.innerHTML =
+              `<strong>${escapeHtml(agentDisplayName(m.agent_id))}</strong>` +
+              `<span>${m.instructions ? "Has instructions" : "Click to instruct"}</span>`;
+            box.addEventListener("click", () =>
+              openGraphMemberDialog(layer.id, m.agent_id)
+            );
+            membersList.appendChild(box);
+          });
+        }
+        membersWrap.appendChild(membersList);
+        ["dragover", "dragleave", "drop"].forEach((eventName) => {
+          membersWrap.addEventListener(eventName, (event) => {
+            const types = event.dataTransfer?.types || [];
+            const ok =
+              Array.from(types).includes("application/x-graph-agent") ||
+              Array.from(types).includes("application/x-workflow-agent") ||
+              Array.from(types).includes("text/plain");
+            if (!ok && eventName === "dragover") return;
+            if (eventName === "dragover") {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              membersWrap.classList.add("drop-ready");
+              return;
+            }
+            membersWrap.classList.remove("drop-ready");
+            if (eventName !== "drop") return;
+            event.preventDefault();
+            const agentId =
+              event.dataTransfer.getData("application/x-graph-agent") ||
+              event.dataTransfer.getData("application/x-workflow-agent") ||
+              event.dataTransfer.getData("text/plain");
+            if (agentId) addAgentToGraphLayer(layer.id, agentId.trim());
+          });
+        });
+        card.appendChild(membersWrap);
+
+        const actions = document.createElement("div");
+        actions.className = "graph-layer-actions";
+        const done = document.createElement("button");
+        done.type = "button";
+        done.textContent = "Done";
+        done.title = "Collapse this step back onto the graph";
+        done.addEventListener("click", () => {
+          state.graphFocusLayerId = null;
+          renderGraphMap();
+        });
+        actions.appendChild(done);
+        card.appendChild(actions);
+        map.appendChild(card);
+      }
+
+      if (idx < layers.length - 1) {
+        const next = layers[idx + 1];
+        const guard = findGraphGuard(layer.id, next.id) || {
+          id: nextGraphId("g"),
+          from_layer_id: layer.id,
+          to_layer_id: next.id,
+          prompt: "",
+        };
+        const arrow = document.createElement("div");
+        arrow.className = "graph-guard";
+        const collapsedGuard = !focused && state.graphFocusLayerId !== next.id;
+        if (collapsedGuard) {
+          arrow.innerHTML =
+            '<div class="graph-guard-arrow" aria-hidden="true">↓</div>' +
+            '<div class="graph-guard-body">' +
+            '<span class="graph-guard-label">Guard</span>' +
+            `<p class="muted tiny-hint">${escapeHtml(
+              (guard.prompt || "No guard yet").slice(0, 90)
+            )}</p></div>`;
+        } else {
+          arrow.innerHTML =
+            '<div class="graph-guard-arrow" aria-hidden="true">↓</div>' +
+            '<div class="graph-guard-body">' +
+            '<span class="graph-guard-label">Guard · orchestrator judgment</span>' +
+            "</div>";
+          const body = arrow.querySelector(".graph-guard-body");
+          const gPrompt = document.createElement("textarea");
+          gPrompt.rows = 2;
+          gPrompt.maxLength = 2000;
+          gPrompt.placeholder =
+            "Ask the orchestrator when it is ready to advance — e.g. “Has research been thorough enough to start drafting?”";
+          gPrompt.value = guard.prompt || "";
+          gPrompt.addEventListener("input", () => {
+            const g = findGraphGuard(layer.id, next.id);
+            if (g) g.prompt = gPrompt.value;
+          });
+          body.appendChild(gPrompt);
+        }
+        map.appendChild(arrow);
+      }
+    });
+    updateHarnessCanvasPreview();
+  }
+
+  function addGraphLayer() {
+    const n = (state.graphDraft.layers || []).length + 1;
+    const layer = {
+      id: nextGraphId("L"),
+      title: `Step ${n}`,
+      prompt: "",
+      goal: "",
+      members: [],
+    };
+    state.graphDraft.layers.push(layer);
+    state.graphFocusLayerId = layer.id;
+    syncGuardsToLayers();
+    renderGraphMap();
+  }
+
+  function removeGraphLayer(layerId) {
+    state.graphDraft.layers = (state.graphDraft.layers || []).filter((l) => l.id !== layerId);
+    if (state.graphFocusLayerId === layerId) state.graphFocusLayerId = null;
+    syncGuardsToLayers();
+    renderGraphMap();
+  }
+
+  function updateHarnessFlowStrip(room) {
+    const strip = $("#harness-flow-strip");
+    if (!strip) return;
+    if (!room || state.kind !== "people") {
+      hide(strip);
+      strip.innerHTML = "";
+      return;
+    }
+    const config = room.config || {};
+    const graph = normalizeGraph(config.graph);
+    const chips = [];
+    if (graph.layers.length) {
+      graph.layers.forEach((layer, idx) => {
+        const label = layer.title || `Step ${idx + 1}`;
+        const who = layer.members.map((m) => m.agent_id).join(", ");
+        chips.push(
+          `<span class="harness-flow-chip">${escapeHtml(label)}${who ? ` · ${escapeHtml(who)}` : ""}</span>`
+        );
+        if (idx < graph.layers.length - 1) {
+          const g = graph.guards.find(
+            (x) => x.from_layer_id === layer.id && x.to_layer_id === graph.layers[idx + 1].id
+          );
+          chips.push(
+            `<span class="harness-flow-chip graph-guard-chip">↓ ${escapeHtml(
+              (g?.prompt || "guard").slice(0, 40)
+            )}</span>`
+          );
+        }
+      });
+    } else {
+      const agents = roomAgents(room);
+      const roles = config.roles || {};
+      agents.forEach((id) => {
+        const role = roles[id] ? ` · ${roles[id]}` : "";
+        chips.push(`<span class="harness-flow-chip">${escapeHtml(id)}${escapeHtml(role)}</span>`);
+      });
+      const skills = config.skills || [];
+      if (skills.length) {
+        chips.push(`<span class="harness-flow-chip">→ ${escapeHtml(skills.join(" → "))}</span>`);
+      }
+    }
+    chips.push(`<span class="harness-flow-chip">${escapeHtml(config.orchestrator || "chat")}</span>`);
+    strip.innerHTML = chips.join("") || "";
+    if (chips.length) show(strip);
+    else hide(strip);
+  }
+
+  async function openRoomDesign() {
     setError("#room-design-error", "");
     if (state.kind !== "people" || !state.roomId) {
-      showFlowToast("Open a room first to set objective and skills.");
+      showFlowToast("Open a team first to design its Graph.");
       switchTab("chats");
       return;
     }
     const room = currentRoom() || {};
     const config = room.config || {};
+    const editable = canEditRoom(room);
     $("#room-objective").value = config.objective || "";
     $("#room-prompts").value = (config.prompts || []).join("\n");
-    fillRoomSkillsPicker(config.skills || []).then(() => {
-      $("#room-design-dialog")?.showModal?.();
+    const orch = $("#room-orchestrator");
+    if (orch) orch.value = config.orchestrator || "chat";
+    const ws = config.workspace || {};
+    if ($("#room-repo-url")) $("#room-repo-url").value = ws.repo_url || "";
+    if ($("#room-default-ref")) $("#room-default-ref").value = ws.default_ref || "main";
+    if ($("#room-workspace-notes")) $("#room-workspace-notes").value = ws.notes || "";
+    fillWorkspaceNeeds(ws.needs || []);
+    state.graphDraft = normalizeGraph(config.graph);
+    // Open in overview mode — click a step to edit, Done to collapse back
+    state.graphFocusLayerId = null;
+    await Promise.all([
+      fillHarnessRoles(room),
+      fillRoomSkillsPicker(config.skills || []),
+      fillHarnessLoops(),
+    ]);
+    renderGraphRoster();
+    renderGraphMap();
+    updateHarnessCanvasPreview();
+    const form = $("#room-design-form");
+    if (form) {
+      form.querySelectorAll("input, textarea, select, button").forEach((el) => {
+        if (el.id === "room-design-cancel" || el.getAttribute("value") === "cancel") return;
+        if (el.type === "submit" || el.closest(".graph-layer-actions")) {
+          el.disabled = !editable;
+          el.classList.toggle("hidden", !editable && el.type === "submit");
+        } else if (el.tagName !== "BUTTON" || el.type !== "button") {
+          el.disabled = !editable;
+          el.readOnly = !editable;
+        } else if (!editable) {
+          el.disabled = true;
+        }
+      });
+    }
+    if (!editable) {
+      setError(
+        "#room-design-error",
+        "View-only access — ask the owner for Editor to change the graph."
+      );
+    }
+    $("#room-design-dialog")?.showModal?.();
+  }
+
+  async function openRoomSettings() {
+    await openRoomDesign();
+    const details = $("#room-design-form")?.querySelector(".graph-advanced");
+    if (details && !details.open) details.open = true;
+    const fieldset = $(".harness-workspace-fieldset");
+    fieldset?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    $("#room-repo-url")?.focus?.();
+  }
+
+  function fillWorkspaceNeeds(needs) {
+    const list = $("#room-workspace-needs");
+    if (!list) return;
+    list.innerHTML = "";
+    const rows = Array.isArray(needs) ? needs : [];
+    if (!rows.length) {
+      list.innerHTML =
+        '<p class="muted tiny-hint">No integration slots yet — Master can add them when it sets up this team.</p>';
+      return;
+    }
+    rows.forEach((need) => {
+      const wrap = document.createElement("div");
+      wrap.className = "harness-need-row";
+      const kind = need.kind || "other_secret";
+      const id = need.id || kind;
+      const label = need.label || kind;
+      const filled = !!need.filled;
+      const isRepo = kind === "github_repo";
+      const status = filled
+        ? `<span class="muted tiny-hint">Filled${need.suffix ? ` ${escapeHtml(need.suffix)}` : ""}</span>`
+        : '<span class="tiny-hint" style="color:var(--warn,#b45309)">Needed</span>';
+      wrap.innerHTML = `
+        <div class="harness-need-head">
+          <strong>${escapeHtml(label)}</strong>
+          ${status}
+        </div>
+        ${need.hint ? `<p class="muted tiny-hint">${escapeHtml(need.hint)}</p>` : ""}
+      `;
+      if (!isRepo) {
+        const input = document.createElement("input");
+        input.type = "password";
+        input.autocomplete = "off";
+        input.maxLength = 400;
+        input.placeholder = filled ? "•••••••• (leave blank to keep)" : "Paste secret here";
+        input.dataset.needId = id;
+        input.className = "harness-need-secret";
+        wrap.appendChild(input);
+      }
+      list.appendChild(wrap);
     });
+  }
+
+  async function fillHarnessRoles(room) {
+    const list = $("#harness-roles-list");
+    const select = $("#harness-add-agent-select");
+    if (!list) return;
+    list.innerHTML = "";
+    const config = room?.config || {};
+    const roles = config.roles || {};
+    const agents = roomAgents(room);
+    const { data } = await api("/api/registry/agents");
+    const byId = {};
+    (data?.agents || []).forEach((a) => {
+      byId[a.id] = a;
+    });
+    state.graphAgentsById = byId;
+    agents.forEach((id) => {
+      const row = document.createElement("div");
+      row.className = "harness-role-row";
+      const name = document.createElement("span");
+      name.textContent = byId[id]?.name || id;
+      const roleInput = document.createElement("input");
+      roleInput.type = "text";
+      roleInput.maxLength = 80;
+      roleInput.placeholder = "Role (e.g. SEO research)";
+      roleInput.dataset.agentId = id;
+      roleInput.className = "harness-role-input";
+      roleInput.value = roles[id] || "";
+      roleInput.addEventListener("input", updateHarnessCanvasPreview);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "ghost tiny danger";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        row.remove();
+        renderGraphRoster();
+        updateHarnessCanvasPreview();
+      });
+      row.appendChild(name);
+      row.appendChild(roleInput);
+      row.appendChild(remove);
+      list.appendChild(row);
+    });
+    if (select) {
+      select.innerHTML = "";
+      const onTeam = new Set(
+        $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId)
+      );
+      (data?.agents || [])
+        .filter((a) => a.room_palette !== false && !onTeam.has(a.id))
+        .forEach((a) => {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.name;
+          select.appendChild(opt);
+        });
+    }
+    renderGraphRoster();
   }
 
   async function fillRoomSkillsPicker(selected) {
@@ -1463,8 +3275,12 @@
       input.name = "room-skill";
       input.value = c.id;
       input.checked = sel.has(c.id);
+      input.addEventListener("change", updateHarnessCanvasPreview);
       const text = document.createElement("span");
-      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>
+      const badge = c.executable
+        ? '<span class="cap-badge exec">executable</span>'
+        : '<span class="cap-badge prompt">prompt-only</span>';
+      text.innerHTML = `<strong>${escapeHtml(c.name || c.id)}</strong>${badge}
         <span class="muted tiny-hint">${escapeHtml(c.summary || "")}</span>`;
       label.appendChild(input);
       label.appendChild(text);
@@ -1472,32 +3288,256 @@
     });
   }
 
-  $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
-  $("#room-design-cancel")?.addEventListener("click", () => $("#room-design-dialog")?.close());
-  $("#room-design-form")?.addEventListener("submit", async (e) => {
+  async function fillHarnessLoops() {
+    const list = $("#harness-loops-list");
+    if (!list || !state.roomId) return;
+    list.innerHTML = "";
+    const { data } = await api("/api/automations");
+    const rows = (data?.automations || []).filter(
+      (a) => String(a.room_id || "") === String(state.roomId)
+    );
+    if (!rows.length) {
+      list.innerHTML = '<p class="muted tiny-hint">No loops bound to this team yet.</p>';
+      return;
+    }
+    rows.forEach((a) => {
+      const row = document.createElement("div");
+      row.className = "harness-loop-row";
+      const steps = (a.capability_ids || a.steps || []).join
+        ? (a.capability_ids || []).join(", ")
+        : "";
+      row.innerHTML = `<strong>${escapeHtml(a.name || a.ritual_id || "?")}</strong>
+        <span class="muted tiny-hint">${escapeHtml(steps || a.schedule || "")}</span>
+        <span class="muted tiny-hint">${a.approved ? "approved" : "draft"}</span>`;
+      list.appendChild(row);
+    });
+  }
+
+  function updateHarnessCanvasPreview() {
+    const el = $("#harness-canvas-preview");
+    if (!el) return;
+    const layers = state.graphDraft?.layers || [];
+    const orch = $("#room-orchestrator")?.value || "chat";
+    if (!layers.length) {
+      el.textContent = `Empty Graph · ${orch} — click the map to add a step`;
+      return;
+    }
+    const parts = layers.map((layer, idx) => {
+      const who = layer.members.map((m) => agentDisplayName(m.agent_id)).join(", ") || "no analysts";
+      return `${layer.title || `Step ${idx + 1}`} [${who}]`;
+    });
+    el.textContent = `${parts.join("  ↓  ")}  ·  ${orch}`;
+  }
+
+  $("#graph-add-layer-btn")?.addEventListener("click", () => addGraphLayer());
+  $("#graph-map")?.addEventListener("click", (event) => {
+    if (event.target === $("#graph-map") && !(state.graphDraft.layers || []).length) {
+      addGraphLayer();
+    }
+  });
+
+  $("#graph-member-cancel")?.addEventListener("click", () => $("#graph-member-dialog")?.close());
+  $("#graph-member-remove")?.addEventListener("click", () => {
+    const edit = state.graphMemberEdit;
+    if (!edit) return;
+    const layer = findGraphLayer(edit.layerId);
+    if (layer) {
+      layer.members = layer.members.filter((m) => m.agent_id !== edit.agentId);
+    }
+    state.graphMemberEdit = null;
+    $("#graph-member-dialog")?.close();
+    renderGraphMap();
+  });
+  $("#graph-member-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
+    const edit = state.graphMemberEdit;
+    if (!edit) return;
+    const layer = findGraphLayer(edit.layerId);
+    const member = layer?.members?.find((m) => m.agent_id === edit.agentId);
+    if (member) {
+      member.instructions = ($("#graph-member-instructions")?.value || "").slice(0, 2000);
+    }
+    state.graphMemberEdit = null;
+    $("#graph-member-dialog")?.close();
+    renderGraphMap();
+  });
+
+  $("#harness-add-agent-btn")?.addEventListener("click", async () => {
+    const id = $("#harness-add-agent-select")?.value;
+    if (!id || !state.roomId) return;
+    await addAgentToRoom(state.roomId, id);
+    await refreshChatRails();
+    const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
+    await fillHarnessRoles(room || currentRoom());
+    updateHarnessCanvasPreview();
+  });
+
+  $("#harness-loop-create-btn")?.addEventListener("click", async () => {
     setError("#room-design-error", "");
     if (!state.roomId) return;
-    const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
-    const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/config`, {
-      method: "PATCH",
+    const name = ($("#harness-loop-name")?.value || "").trim();
+    const stepsRaw = ($("#harness-loop-steps")?.value || "").trim();
+    const schedule = ($("#harness-loop-schedule")?.value || "").trim() || null;
+    const steps = stepsRaw
+      .split(/[,\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!name || !steps.length) {
+      setError("#room-design-error", "Loop name and at least one capability id required");
+      return;
+    }
+    const { res, data } = await api("/api/automations/from-chat", {
+      method: "POST",
       body: JSON.stringify({
-        objective: $("#room-objective").value,
-        prompts: $("#room-prompts").value,
-        skills,
+        name,
+        steps,
+        schedule,
+        room_id: state.roomId,
       }),
     });
     if (!res.ok) {
+      setError("#room-design-error", data?.error || "Could not create loop");
+      return;
+    }
+    if ($("#harness-loop-name")) $("#harness-loop-name").value = "";
+    if ($("#harness-loop-steps")) $("#harness-loop-steps").value = "";
+    if ($("#harness-loop-schedule")) $("#harness-loop-schedule").value = "";
+    showFlowToast(`Draft loop “${data?.ritual_id || name}” created — approve in Hire.`);
+    await fillHarnessLoops();
+  });
+
+  $("#harness-run-loop-btn")?.addEventListener("click", async () => {
+    setError("#room-design-error", "");
+    if (!state.roomId) return;
+    const saved = await saveRoomGraphConfig({ closeDialog: false, toast: false });
+    if (!saved) return;
+    await runRoomGraph({ fromDialog: true });
+  });
+
+  $("#room-orchestrator")?.addEventListener("change", updateHarnessCanvasPreview);
+
+  $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
+  $("#room-settings-btn")?.addEventListener("click", () => openRoomSettings());
+  $("#room-design-cancel")?.addEventListener("click", () => {
+    state.graphFocusLayerId = null;
+    $("#room-design-dialog")?.close();
+  });
+
+  async function saveRoomGraphConfig({ closeDialog = true, toast = true } = {}) {
+    setError("#room-design-error", "");
+    if (!state.roomId) return false;
+    if (!canEditRoom(currentRoom())) {
+      setError(
+        "#room-design-error",
+        "Viewers can’t edit the graph. Ask the owner for Editor access."
+      );
+      return false;
+    }
+    syncGuardsToLayers();
+    state.graphFocusLayerId = null;
+    const skills = $$('#room-skills-list input[name="room-skill"]:checked').map((el) => el.value);
+    const agents = $$("#harness-roles-list .harness-role-input").map((el) => el.dataset.agentId);
+    const roles = {};
+    $$("#harness-roles-list .harness-role-input").forEach((el) => {
+      roles[el.dataset.agentId] = el.value.trim();
+    });
+    (state.graphDraft.layers || []).forEach((layer) => {
+      (layer.members || []).forEach((m) => {
+        if (m.agent_id && !agents.includes(m.agent_id)) agents.push(m.agent_id);
+      });
+    });
+    const room = currentRoom() || {};
+    const prevNeeds = (room.config?.workspace?.needs || []).map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      label: n.label,
+      hint: n.hint,
+    }));
+    const secrets = {};
+    $$("#room-workspace-needs .harness-need-secret").forEach((el) => {
+      const val = (el.value || "").trim();
+      if (val && el.dataset.needId) secrets[el.dataset.needId] = val;
+    });
+    const graph = normalizeGraph(state.graphDraft);
+    let orch = $("#room-orchestrator")?.value || "chat";
+    // Graph steps imply workflow mode so Keep running stays available
+    if ((graph.layers || []).length && orch === "chat") {
+      orch = "workflow";
+      if ($("#room-orchestrator")) $("#room-orchestrator").value = "workflow";
+    }
+    const body = {
+      objective: $("#room-objective").value,
+      prompts: $("#room-prompts").value,
+      skills,
+      agents,
+      roles,
+      graph,
+      orchestrator: orch,
+      workspace: {
+        repo_url: $("#room-repo-url")?.value || "",
+        default_ref: $("#room-default-ref")?.value || "main",
+        notes: $("#room-workspace-notes")?.value || "",
+        needs: prevNeeds,
+      },
+    };
+    if (Object.keys(secrets).length) body.workspace_secrets = secrets;
+    const { res, data } = await api(`/api/rooms/${encodeURIComponent(state.roomId)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
       setError("#room-design-error", data?.error || "Could not save");
+      return false;
+    }
+    if (closeDialog) $("#room-design-dialog")?.close();
+    else renderGraphMap();
+    if (toast) {
+      showFlowToast(
+        (graph.layers || []).length
+          ? "Graph saved — run with /graph <topic> or open Graph → Run Graph."
+          : "Graph saved."
+      );
+    }
+    await refreshChatRails();
+    if (state.roomId) {
+      const next = (state.rooms || []).find((r) => r.room_id === state.roomId);
+      if (next) await selectPeople(next.room_id, next.title, next);
+    }
+    return true;
+  }
+
+  async function runRoomGraph({ fromDialog = false, focus = "" } = {}) {
+    if (!state.roomId) return;
+    const errSel = fromDialog ? "#room-design-error" : null;
+    if (errSel) setError(errSel, "");
+    const payload = { stub: false };
+    const focusText = String(focus || "").trim();
+    if (focusText) payload.focus = focusText.slice(0, 800);
+    const { res, data } = await api(
+      `/api/rooms/${encodeURIComponent(state.roomId)}/harness-run`,
+      { method: "POST", body: JSON.stringify(payload) }
+    );
+    if (!res.ok) {
+      const msg = data?.message || data?.error || "Graph run failed";
+      if (errSel) setError(errSel, msg);
+      else showFlowToast(msg);
       return;
     }
     $("#room-design-dialog")?.close();
-    showFlowToast("Room design saved — turn on Autonomy to let agents run here.");
-    await refreshChatRails();
-    if (state.roomId) {
-      const room = (state.rooms || []).find((r) => r.room_id === state.roomId);
-      if (room) await selectPeople(room.room_id, room.title, room);
-    }
+    showFlowToast(
+      focusText
+        ? `Graph started — focus: ${focusText.slice(0, 80)}${focusText.length > 80 ? "…" : ""}`
+        : data?.message || "Graph started"
+    );
+    if (data?.job) setSpecialistRunUi(data.job);
+    const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
+    $("#messages").innerHTML = "";
+    (msgs.data?.messages || []).forEach((m) => appendPeopleMessage(m, state.me?.name));
+  }
+
+  $("#room-design-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await saveRoomGraphConfig({ closeDialog: true, toast: true });
   });
 
   $("#autonomy-toggle")?.addEventListener("change", async () => {
@@ -1509,10 +3549,10 @@
     });
     if (!res.ok) {
       $("#autonomy-toggle").checked = !enabled;
-      setError("#chat-error", data?.message || data?.error || "Autonomy failed");
+      setError("#chat-error", data?.message || data?.error || "Graph failed");
       return;
     }
-    showFlowToast(data?.message || (enabled ? "Autonomy on" : "Autonomy off"));
+    showFlowToast(data?.message || (enabled ? "Graph on" : "Graph off"));
     await refreshChatRails();
     if (state.roomId) {
       const msgs = await api(`/api/messages?room_id=${encodeURIComponent(state.roomId)}`);
@@ -1521,10 +3561,69 @@
     }
   });
 
-  // --- Agents studio ---------------------------------------------------------
+  // --- Hire studio ---------------------------------------------------------
 
   state.builderDropped = [];
   state.editingAgentId = null;
+  state.teamPickerAgentId = null;
+  state.capCreateMode = "describe";
+
+  function setCapCreateMode(mode) {
+    state.capCreateMode = mode === "manual" ? "manual" : "describe";
+    const describe = state.capCreateMode === "describe";
+    $("#cap-mode-describe")?.classList.toggle("active", describe);
+    $("#cap-mode-describe")?.classList.toggle("ghost", !describe);
+    $("#cap-mode-manual")?.classList.toggle("active", !describe);
+    $("#cap-mode-manual")?.classList.toggle("ghost", describe);
+    if (describe) {
+      show($("#cap-describe-panel"));
+      hide($("#cap-manual-panel"));
+    } else {
+      hide($("#cap-describe-panel"));
+      show($("#cap-manual-panel"));
+    }
+  }
+
+  async function openTeamPicker(agent) {
+    setError("#team-picker-error", "");
+    state.teamPickerAgentId = agent?.id || null;
+    const label = $("#team-picker-agent-label");
+    if (label) label.textContent = agent ? `Assign ${agent.name} to a team.` : "";
+    const select = $("#team-picker-select");
+    if (!select) return;
+    select.innerHTML = "";
+    await refreshChatRails();
+    const rooms = (state.rooms || []).filter((r) => (r.kind || "people") !== "agent");
+    if (!rooms.length) {
+      showFlowToast("Create a team first, then assign agents.");
+      switchTab("chats");
+      return;
+    }
+    rooms.forEach((r) => {
+      const opt = document.createElement("option");
+      opt.value = r.room_id;
+      opt.textContent = r.title || r.room_id;
+      if (state.roomId && state.roomId === r.room_id) opt.selected = true;
+      select.appendChild(opt);
+    });
+    $("#team-picker-dialog")?.showModal?.();
+  }
+
+  $("#team-picker-cancel")?.addEventListener("click", () => $("#team-picker-dialog")?.close());
+  $("#team-picker-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#team-picker-error", "");
+    const roomId = $("#team-picker-select")?.value;
+    const agentId = state.teamPickerAgentId;
+    if (!roomId || !agentId) return;
+    await addAgentToRoom(roomId, agentId);
+    $("#team-picker-dialog")?.close();
+    showFlowToast("Agent assigned to team");
+    await refreshChatRails();
+    const room = (state.rooms || []).find((r) => r.room_id === roomId);
+    if (room) await selectPeople(room.room_id, room.title, room);
+    switchTab("chats");
+  });
 
   function showFlowToast(message, { tab } = {}) {
     const el = $("#flow-toast");
@@ -1558,7 +3657,7 @@
       setError("#agents-tab-error", data?.error || "Approve failed");
       return false;
     }
-    showFlowToast(`“${ritualId}” approved — add it to an agent or room skills.`, {
+    showFlowToast(`“${ritualId}” approved — add it to an agent or a team Graph allowlist.`, {
       tab: "agents",
     });
     loadAgentsStudio();
@@ -1609,20 +3708,33 @@
 
   async function loadAgentsStudio() {
     setError("#agents-tab-error", "");
+    const agentsEl = $("#studio-agents");
+    const emptyEl = $("#studio-agents-empty");
+    if (agentsEl && !agentsEl.children.length) {
+      agentsEl.innerHTML =
+        '<div class="state-skeleton" aria-hidden="true"><div class="sk-row"></div><div class="sk-row"></div></div>';
+    }
     const [agents, lenses, caps] = await Promise.all([
       api("/api/registry/agents"),
       api("/api/registry/lenses"),
       api("/api/registry/capabilities"),
     ]);
-    const agentsEl = $("#studio-agents");
     const lensesEl = $("#studio-lenses");
     const capsEl = $("#studio-caps");
-    const emptyEl = $("#studio-agents-empty");
     if (agentsEl) agentsEl.innerHTML = "";
     if (lensesEl) lensesEl.innerHTML = "";
     if (capsEl) capsEl.innerHTML = "";
     const selectAll = $("#studio-select-all");
     if (selectAll) selectAll.checked = false;
+
+    if (!agents.res.ok) {
+      setError("#agents-tab-error", agents.data?.error || "Could not load agents");
+      if (emptyEl) {
+        emptyEl.textContent = "Could not load agents. Try Refresh.";
+        emptyEl.classList.remove("hidden");
+      }
+      return;
+    }
 
     const allAgents = agents.data?.agents || [];
     const yours = allAgents.filter((a) => a.editable);
@@ -1630,7 +3742,11 @@
       (a) => !a.editable && a.id !== "master" && a.room_palette !== false
     );
 
-    if (emptyEl) emptyEl.classList.toggle("hidden", yours.length > 0);
+    if (emptyEl) {
+      emptyEl.textContent =
+        "No custom agents yet — hit Hire agent to compose one from lenses and capabilities.";
+      emptyEl.classList.toggle("hidden", yours.length > 0);
+    }
 
     function renderAgentCard(a) {
       const card = document.createElement("article");
@@ -1672,17 +3788,8 @@
       const addBtn = document.createElement("button");
       addBtn.type = "button";
       addBtn.className = a.editable ? "" : "tiny";
-      addBtn.textContent = "Add to room";
-      addBtn.addEventListener("click", async () => {
-        if (state.kind === "people" && state.roomId) {
-          await addAgentToRoom(state.roomId, a.id);
-          showFlowToast(`Added ${a.name} to the room`);
-          switchTab("chats");
-        } else {
-          showFlowToast("Open a room first, then add the agent.");
-          switchTab("chats");
-        }
-      });
+      addBtn.textContent = "Assign to team";
+      addBtn.addEventListener("click", () => openTeamPicker(a));
       actions.appendChild(addBtn);
       if (a.editable) {
         const editBtn = document.createElement("button");
@@ -1701,7 +3808,7 @@
     const addTile = document.createElement("button");
     addTile.type = "button";
     addTile.className = "studio-add-tile";
-    addTile.innerHTML = `<span class="plus">+</span><strong>Add agent</strong><span class="muted tiny-hint">Compose from lenses &amp; capabilities</span>`;
+    addTile.innerHTML = `<span class="plus">+</span><strong>Hire agent</strong><span class="muted tiny-hint">Compose from lenses &amp; capabilities</span>`;
     addTile.addEventListener("click", () => openAgentBuilder(null));
     agentsEl?.appendChild(addTile);
     syncStudioBulkButtons();
@@ -1742,8 +3849,10 @@
         btn.addEventListener("click", () => approveCapability(c.ritual_id));
         actions.push(btn);
       }
+      const badge = c.executable ? "executable" : "prompt-only";
+      const kindLabel = `${c.kind || "cap"} · ${badge}`;
       capsEl?.appendChild(
-        compactLibraryRow(c.name || c.id, c.kind || "cap", c.summary || c.invoke || "", actions)
+        compactLibraryRow(c.name || c.id, kindLabel, c.summary || c.invoke || "", actions)
       );
     });
   }
@@ -1970,13 +4079,45 @@
 
   $("#new-cap-btn")?.addEventListener("click", () => {
     setError("#cap-new-error", "");
-    $("#cap-name").value = "";
-    $("#cap-summary").value = "";
+    if ($("#cap-name")) $("#cap-name").value = "";
+    if ($("#cap-summary")) $("#cap-summary").value = "";
+    if ($("#cap-describe")) $("#cap-describe").value = "";
+    setCapCreateMode("describe");
     openStudioDialog("#cap-new-dialog");
   });
+  $("#cap-mode-describe")?.addEventListener("click", () => setCapCreateMode("describe"));
+  $("#cap-mode-manual")?.addEventListener("click", () => setCapCreateMode("manual"));
   $("#cap-new-cancel")?.addEventListener("click", () => $("#cap-new-dialog")?.close());
   $("#cap-new-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
+    setError("#cap-new-error", "");
+    if (state.capCreateMode === "describe") {
+      const description = ($("#cap-describe")?.value || "").trim();
+      if (description.length < 8) {
+        setError("#cap-new-error", "Describe what the capability should do (at least a sentence).");
+        return;
+      }
+      const { res, data } = await api("/api/registry/capabilities/draft-from-prompt", {
+        method: "POST",
+        body: JSON.stringify({ description }),
+      });
+      if (!res.ok) {
+        setError("#cap-new-error", data?.error || "Draft failed");
+        return;
+      }
+      $("#cap-new-dialog")?.close();
+      if (data?.needs_script || data?.in_scope === false) {
+        showFlowToast(
+          data?.reason || "Out of scope for allowlisted runners — Phase 2 custom scripts needed."
+        );
+      } else {
+        showFlowToast(
+          `Draft “${data?.capability?.name || "capability"}” created — approve before live use.`
+        );
+      }
+      loadAgentsStudio();
+      return;
+    }
     const { res, data } = await api("/api/registry/capabilities", {
       method: "POST",
       body: JSON.stringify({ name: $("#cap-name").value, summary: $("#cap-summary").value }),
@@ -1991,441 +4132,6 @@
   });
 
   $("#refresh-agents-tab-btn")?.addEventListener("click", loadAgentsStudio);
-
-  // --- Review ----------------------------------------------------------------
-
-  async function loadReview() {
-    setError("#review-error", "");
-    $("#review-status").textContent = "";
-    const { res, data } = await api("/api/review");
-    const tbody = $("#review-proposals-table tbody");
-    tbody.innerHTML = "";
-    if (!res.ok) {
-      setError("#review-error", data?.error || "Failed to load review");
-      return;
-    }
-    const rows = data?.proposals || [];
-    $("#review-empty").classList.toggle("hidden", rows.length > 0);
-    rows.forEach((p) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(p.ritual_id || p.name || "")}</td>
-        <td><span class="badge draft">${escapeHtml(p.proposed_by || "review")}</span></td>
-        <td>${escapeHtml(p.runner || "")}</td>
-        <td></td>`;
-      const td = tr.querySelector("td:last-child");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ghost tiny";
-      btn.textContent = "Approve & enable";
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        const ok = await approveCapability(p.ritual_id);
-        if (!ok) btn.disabled = false;
-        loadReview();
-      });
-      td.appendChild(btn);
-      tbody.appendChild(tr);
-    });
-    const memo = data?.memo_text;
-    $("#review-memo").textContent = memo || "(no reviews yet)";
-    $("#review-memo").classList.toggle("muted", !memo);
-  }
-
-  $("#run-review-btn").addEventListener("click", async () => {
-    setError("#review-error", "");
-    const days = parseInt($("#review-days").value, 10) || 14;
-    $("#review-status").textContent = "Reviewing ledger…";
-    $("#run-review-btn").disabled = true;
-    try {
-      const { res, data } = await api("/api/review/run", {
-        method: "POST",
-        body: JSON.stringify({ days }),
-      });
-      if (!res.ok) throw new Error(data?.error || "review failed");
-      const n = (data?.proposals_written || []).length;
-      const dest = data?.destination || "local";
-      const fallback = data?.fallback_from
-        ? ` (fell back from ${data.fallback_from})`
-        : "";
-      $("#review-status").textContent =
-        `Done via ${dest}` + fallback + (n ? ` — ${n} proposal(s).` : ".");
-      await loadReview();
-    } catch (e) {
-      const raw = String(e.message || e);
-      const friendly =
-        /authentication_error|API key|401/i.test(raw)
-          ? "Review model unavailable (check Claude under Models). Try again after linking a key, or the server will use a local stub."
-          : raw;
-      setError("#review-error", friendly);
-      $("#review-status").textContent = "";
-    } finally {
-      $("#run-review-btn").disabled = false;
-    }
-  });
-  $("#refresh-review-btn").addEventListener("click", loadReview);
-
-  // --- Tracking --------------------------------------------------------------
-
-  const SCOPE_LABELS = {
-    active_tab: "Active tab",
-    all_tabs: "All open tabs",
-    selected_tabs: "Selected tabs",
-    research_sites: "Research sites",
-    notes_only: "Notes only",
-  };
-
-  const CAPTURE_PAGE = "flyleaf-tracking";
-  const CAPTURE_EXT = "flyleaf-capture";
-  const BROWSER_SCOPES = new Set([
-    "active_tab",
-    "all_tabs",
-    "selected_tabs",
-    "research_sites",
-  ]);
-
-  let trackingVocab = { kinds: ["research", "build", "observation", "idea", "question"] };
-  let captureExt = { connected: false, version: null, lastAt: 0 };
-
-  function selectedCaptureScope() {
-    const el = document.querySelector('input[name="capture-scope"]:checked');
-    return (el && el.value) || "active_tab";
-  }
-
-  function postToCapture(type, payload) {
-    window.postMessage(
-      Object.assign({ source: CAPTURE_PAGE, type }, payload || {}),
-      window.location.origin
-    );
-  }
-
-  function setCaptureStatus(state, message) {
-    const el = $("#capture-status");
-    if (!el) return;
-    el.dataset.state = state;
-    el.textContent = message;
-    const openBtn = $("#open-capture-btn");
-    if (openBtn) openBtn.disabled = state === "missing";
-    const hint = $("#capture-hint");
-    if (!hint) return;
-    if (state === "connected") {
-      hint.textContent =
-        "Capture is linked to this Flyleaf account. Start tracking to log tab visits; Select tabs opens the picker.";
-    } else if (state === "missing") {
-      hint.textContent =
-        "Install / reload Analyst Ledger Capture, stay signed in here, then refresh. Notes and chat still track without it.";
-    } else {
-      hint.textContent =
-        "Browser tab capture needs the Capture extension. Notes and chat still work without it.";
-    }
-  }
-
-  function markCaptureConnected(version) {
-    captureExt = {
-      connected: true,
-      version: version || captureExt.version,
-      lastAt: Date.now(),
-    };
-    const ver = captureExt.version ? ` v${captureExt.version}` : "";
-    setCaptureStatus("connected", `Capture extension connected${ver}`);
-  }
-
-  function pingCaptureExtension() {
-    postToCapture("ping");
-    postToCapture("sync_origin");
-    window.setTimeout(() => {
-      if (Date.now() - (captureExt.lastAt || 0) > 1500) {
-        captureExt.connected = false;
-        setCaptureStatus(
-          "missing",
-          "Capture extension not detected — tab visits will not be recorded"
-        );
-      }
-    }, 900);
-  }
-
-  function openCapturePicker(opts) {
-    const capture_scope = (opts && opts.capture_scope) || selectedCaptureScope();
-    const session_id = (opts && opts.session_id) || null;
-    setError("#track-error", "");
-    postToCapture("open_picker", { capture_scope, session_id });
-    const wasConnected = captureExt.connected;
-    window.setTimeout(() => {
-      if (!captureExt.connected && !wasConnected) {
-        setError(
-          "#track-error",
-          "Capture extension not connected. Install Analyst Ledger Capture, reload it on chrome://extensions, then try again."
-        );
-      }
-    }, 900);
-  }
-
-  window.addEventListener("message", (event) => {
-    if (event.origin !== window.location.origin) return;
-    const data = event.data;
-    if (!data || data.source !== CAPTURE_EXT) return;
-    if (data.type === "ready" || data.type === "pong" || data.type === "synced") {
-      markCaptureConnected(data.version);
-      return;
-    }
-    if (data.type === "opened_picker") {
-      markCaptureConnected(data.version);
-      if (data.ok === false) {
-        setError("#track-error", "Could not open the Capture tab picker");
-      }
-      return;
-    }
-    if (data.type === "error" && data.message) {
-      setError("#track-error", data.message);
-    }
-  });
-
-  function labelChipsHtml(labels) {
-    const list = Array.isArray(labels) ? labels : [];
-    if (!list.length) return '<span class="muted">—</span>';
-    return (
-      '<span class="label-chips">' +
-      list
-        .map((lbl) => `<span class="badge kind">${escapeHtml(lbl)}</span>`)
-        .join("") +
-      "</span>"
-    );
-  }
-
-  function eventTargetId(ev) {
-    if (ev.type === "chat_message") return ev.event_id || "";
-    const payload = ev.payload || {};
-    return payload.target_event_id || "";
-  }
-
-  function renderEventRow(ev) {
-    const li = document.createElement("li");
-    li.className = "event-row";
-    const payload = ev.payload || {};
-    const scope =
-      ev.type === "session_start" && payload.capture_scope
-        ? ` · ${payload.capture_scope}`
-        : "";
-    const kind = ev.resolved_kind || "";
-    const labels = Array.isArray(payload.labels) ? payload.labels.join(" · ") : "";
-    const source = payload.source ? ` · ${payload.source}` : "";
-    const mainBits = [`${fmtTime(ev.ts)} · ${ev.type} · ${ev.surface || ""}${scope}`];
-    if (kind) mainBits.push(`kind:${kind}`);
-    else if (labels) mainBits.push(labels);
-    if (source && (ev.type === "label" || kind)) mainBits.push(source.trim());
-
-    const main = document.createElement("div");
-    main.className = "event-main";
-    main.textContent = mainBits.filter(Boolean).join(" · ");
-    if (ev.message_excerpt) {
-      const ex = document.createElement("span");
-      ex.className = "event-excerpt";
-      ex.textContent = ev.message_excerpt;
-      main.appendChild(ex);
-    }
-    li.appendChild(main);
-
-    if (kind) {
-      const chip = document.createElement("span");
-      chip.className = "badge kind" + (payload.source === "human" ? " human" : "");
-      chip.textContent = kind;
-      li.appendChild(chip);
-    }
-
-    const targetId = eventTargetId(ev);
-    const canFix =
-      targetId &&
-      ev.session_id &&
-      (ev.type === "chat_message" || ev.type === "label") &&
-      (kind || ev.type === "chat_message");
-    if (canFix) {
-      const fix = document.createElement("div");
-      fix.className = "fix-kind";
-      const sel = document.createElement("select");
-      sel.setAttribute("aria-label", "Fix kind");
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = "Fix kind…";
-      sel.appendChild(blank);
-      (trackingVocab.kinds || []).forEach((k) => {
-        const opt = document.createElement("option");
-        opt.value = k;
-        opt.textContent = k;
-        if (k === kind) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ghost tiny";
-      btn.textContent = "Save";
-      btn.addEventListener("click", async () => {
-        const next = sel.value;
-        if (!next) return;
-        setError("#track-error", "");
-        const { res, data } = await api("/api/tracking/labels/correct", {
-          method: "POST",
-          body: JSON.stringify({
-            session_id: ev.session_id,
-            event_id: targetId,
-            kind: next,
-            auto_kind: kind || undefined,
-          }),
-        });
-        if (!res.ok) {
-          setError("#track-error", data?.error || "Failed to correct kind");
-          return;
-        }
-        loadTracking();
-      });
-      fix.appendChild(sel);
-      fix.appendChild(btn);
-      li.appendChild(fix);
-    }
-    return li;
-  }
-
-  async function loadTracking() {
-    setError("#track-error", "");
-    pingCaptureExtension();
-    const vocab = await api("/api/tracking/labels/vocab");
-    if (vocab.res.ok && vocab.data?.kinds) {
-      trackingVocab = {
-        kinds: vocab.data.kinds,
-        topics: vocab.data.topics || [],
-        intents: vocab.data.intents || [],
-        states: vocab.data.states || [],
-      };
-    }
-    const summary = await api("/api/tracking/summary");
-    if (!summary.res.ok) {
-      setError("#track-error", summary.data?.error || "Failed to load tracking");
-      return;
-    }
-    const active = summary.data?.active_session;
-    const activeLabels = Array.isArray(active?.labels) && active.labels.length
-      ? ` · ${active.labels.join(", ")}`
-      : "";
-    $("#active-session").textContent = active
-      ? `${active.title} (${active.session_id})${activeLabels}`
-      : "None";
-    const scopeHint = $("#active-scope");
-    if (active && active.capture_scope) {
-      scopeHint.hidden = false;
-      scopeHint.textContent = `Scope: ${SCOPE_LABELS[active.capture_scope] || active.capture_scope}`;
-      const radio = document.querySelector(
-        `input[name="capture-scope"][value="${active.capture_scope}"]`
-      );
-      if (radio) radio.checked = true;
-    } else {
-      scopeHint.hidden = true;
-      scopeHint.textContent = "";
-    }
-    const trackingOn = !!(active && active.status === "open");
-    $("#start-session-btn").disabled = trackingOn;
-    $("#end-session-btn").disabled = !trackingOn;
-    $("#capture-scope-fieldset").disabled = trackingOn;
-
-    const list = $("#summary-list");
-    list.innerHTML = "";
-    const s = summary.data?.summary || {};
-    Object.entries(s).forEach(([k, v]) => {
-      const li = document.createElement("li");
-      li.textContent = `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`;
-      list.appendChild(li);
-    });
-
-    const sessions = await api("/api/tracking/sessions?limit=30");
-    const tbody = $("#sessions-table tbody");
-    tbody.innerHTML = "";
-    (sessions.data?.sessions || []).forEach((row) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(row.title)}</td>
-        <td>${labelChipsHtml(row.labels)}</td>
-        <td>${escapeHtml(row.surface)}</td>
-        <td>${escapeHtml(row.status)}</td>
-        <td>${escapeHtml(fmtTime(row.started_at))}</td>`;
-      tbody.appendChild(tr);
-    });
-
-    const events = await api("/api/tracking/events?limit=40");
-    const el = $("#events-list");
-    el.innerHTML = "";
-    (events.data?.events || []).forEach((ev) => {
-      el.appendChild(renderEventRow(ev));
-    });
-  }
-
-  $("#start-session-btn").addEventListener("click", async () => {
-    const title = ($("#session-title").value || "").trim() || "Research session";
-    const capture_scope = selectedCaptureScope();
-    const { res, data } = await api("/api/tracking/session/start", {
-      method: "POST",
-      body: JSON.stringify({ title, capture_scope }),
-    });
-    if (!res.ok) {
-      setError("#track-error", data?.error || "Failed to start session");
-      return;
-    }
-    const session = data?.session || {};
-    const session_id = session.session_id || null;
-    if (BROWSER_SCOPES.has(capture_scope)) {
-      // Bridge opens the tab picker; websites cannot open the Chrome toolbar popup.
-      postToCapture("session_started", { capture_scope, session_id });
-      if (!captureExt.connected) {
-        pingCaptureExtension();
-        setError(
-          "#track-error",
-          "Tracking started, but Capture is not connected — tab visits will not be recorded until you install/reload the extension."
-        );
-      }
-    }
-    loadTracking();
-  });
-  const openCaptureBtn = $("#open-capture-btn");
-  if (openCaptureBtn) {
-    openCaptureBtn.addEventListener("click", () => {
-      const activeText = $("#active-session")?.textContent || "";
-      const match = activeText.match(/\(sess_[^)]+\)/);
-      const session_id = match ? match[0].slice(1, -1) : null;
-      openCapturePicker({
-        capture_scope: selectedCaptureScope(),
-        session_id,
-      });
-    });
-  }
-  $("#end-session-btn").addEventListener("click", async () => {
-    await api("/api/tracking/session/end", {
-      method: "POST",
-      body: JSON.stringify({ tags: ["neutral"] }),
-    });
-    loadTracking();
-  });
-  $("#add-note-btn").addEventListener("click", async () => {
-    const text = $("#session-note").value.trim();
-    if (!text) return;
-    await api("/api/tracking/session/note", {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-    $("#session-note").value = "";
-    loadTracking();
-  });
-  const classifyBtn = $("#classify-pending-btn");
-  if (classifyBtn) {
-    classifyBtn.addEventListener("click", async () => {
-      setError("#track-error", "");
-      const { res, data } = await api("/api/tracking/classify-pending", {
-        method: "POST",
-        body: JSON.stringify({ limit: 20 }),
-      });
-      if (!res.ok) {
-        setError("#track-error", data?.error || "Classify failed");
-        return;
-      }
-      loadTracking();
-    });
-  }
 
   // --- Account settings ------------------------------------------------------
 
@@ -2452,8 +4158,14 @@
     if (!res.ok || !data?.authenticated) return;
     state.me = { ...(state.me || {}), ...data };
     $("#settings-display-name").value = data.display_name || "";
+    const usernameInput = $("#settings-username");
+    if (usernameInput) usernameInput.value = data.username || "";
     $("#settings-email").value = data.email || "";
-    $("#who-label").textContent = data.display_name || data.name || "";
+    const who = data.username
+      ? `${data.display_name || data.name || ""} · @${data.username}`
+      : data.display_name || data.name || "";
+    $("#who-label").textContent = who;
+    setNotifyBadge(data.unread_notifications || 0);
     const status = $("#settings-email-status");
     status.textContent = data.email_verified ? "Email verified" : "Email not verified";
     status.classList.toggle("unverified", !data.email_verified);
@@ -2473,6 +4185,7 @@
     }
     const toggleBtn = $("#toggle-2fa-btn");
     if (toggleBtn) toggleBtn.textContent = twoFaOn ? "Disable email 2FA" : "Enable email 2FA";
+    await loadProfileFriends();
   }
 
   $$(".settings-nav-btn").forEach((button) => {
@@ -2485,7 +4198,10 @@
     settingsMessage("#profile-settings-message", "");
     const { res, data } = await api("/api/auth/profile", {
       method: "PATCH",
-      body: JSON.stringify({ display_name: $("#settings-display-name").value }),
+      body: JSON.stringify({
+        display_name: $("#settings-display-name").value,
+        username: $("#settings-username")?.value || "",
+      }),
     });
     if (!res.ok) {
       setError(
@@ -2493,7 +4209,11 @@
         data?.message ||
           (data?.error === "bad_name"
             ? "Enter a display name (not just spaces)."
-            : data?.error) ||
+            : data?.error === "bad_username"
+              ? "Username must be 3–24 characters: letter first, then letters, numbers, or underscores."
+              : data?.error === "username_taken"
+                ? "That username is already taken."
+                : data?.error) ||
           "Could not update profile"
       );
       return;
@@ -2580,11 +4300,18 @@
     if ((localStorage.getItem(THEME_KEY) || "system") === "system") applyTheme("system");
   });
 
-  $("#privacy-tracking-btn")?.addEventListener("click", () => switchTab("tracking"));
-
   // --- Settings → Models -----------------------------------------------------
 
   const FRONTIER_PRESETS = {
+    openrouter: {
+      hint: "One key for many models. Paste your OpenRouter key (sk-or-…). Billing is on your OpenRouter account.",
+      model: "anthropic/claude-sonnet-4",
+      models: [
+        "anthropic/claude-sonnet-4",
+        "openai/gpt-4o",
+        "google/gemini-2.5-flash",
+      ],
+    },
     anthropic: {
       hint: "Paste your Anthropic API key (sk-ant-…). Billing is on your Anthropic account.",
       model: "claude-sonnet-5",
@@ -2607,8 +4334,8 @@
   };
 
   function applyFrontierPreset() {
-    const id = $("#frontier-provider")?.value || "anthropic";
-    const preset = FRONTIER_PRESETS[id] || FRONTIER_PRESETS.anthropic;
+    const id = $("#frontier-provider")?.value || "openrouter";
+    const preset = FRONTIER_PRESETS[id] || FRONTIER_PRESETS.openrouter;
     const hint = $("#frontier-hint");
     if (hint) hint.textContent = preset.hint;
     const modelInput = $("#frontier-model");
@@ -3176,7 +4903,7 @@
       await api(`/api/settings/models/${profileId}/enable`, { method: "POST" });
       if (state.kind === "people" && state.roomId) {
         const room = currentRoom();
-        if (room?.owner_user_id === state.me?.user_id) {
+        if (canEditRoom(room)) {
           await api(`/api/rooms/${encodeURIComponent(state.roomId)}/model`, {
             method: "POST",
             body: JSON.stringify({ profile_id: profileId }),
@@ -3285,6 +5012,9 @@
     linkCompanion();
   });
   $("#start-local-model-btn")?.addEventListener("click", () => {
+    startLocalModelFromBrowser();
+  });
+  $("#mgmt-start-local-model-btn")?.addEventListener("click", () => {
     startLocalModelFromBrowser();
   });
   $("#room-model-select")?.addEventListener("change", async () => {
@@ -3445,11 +5175,12 @@
     showShell();
     switchTab("chats");
     await refreshChatRails();
-    // Auto-open current room if present
+    refreshNotifyBadge();
+    // Auto-open current room if present (Master lives under Management).
     if (me.room_id) {
       await selectPeople(me.room_id, me.room_title || "Room");
-    } else if (state.threads[0]) {
-      await selectAgent(state.threads[0].session_id, state.threads[0].title, !!state.threads[0].master);
+    } else if (state.rooms[0]) {
+      await selectPeople(state.rooms[0].room_id, state.rooms[0].title, state.rooms[0]);
     } else {
       await refreshModelStatus();
     }

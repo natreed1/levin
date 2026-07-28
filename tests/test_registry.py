@@ -46,7 +46,13 @@ def test_friend_personalities_derived_from_registry():
     assert PERSONALITIES_BY_ID["qwen-bull"].name == get_agent("qwen-bull").name
     assert PERSONALITIES_BY_ID["qwen"].prompt == get_agent("qwen").prompt
     ids = {row["id"] for row in specialists_public()}
-    assert ids == {"qwen", "qwen-bull", "qwen-contrarian", "qwen-synthesizer"}
+    assert ids == {
+        "qwen",
+        "qwen-bull",
+        "qwen-contrarian",
+        "qwen-synthesizer",
+        "orchestrator",
+    }
 
 
 def test_create_automation_persists_registry_capability(tmp_path: Path, monkeypatch):
@@ -127,3 +133,42 @@ def test_room_guidance_includes_objective():
     assert "Keep NVDA filings current" in text
     assert "Prefer primary sources" in text
     assert "sec_filings_check" in text
+
+
+def test_room_guidance_includes_workspace_repo():
+    from messenger.specialist_room import _room_guidance
+
+    text = _room_guidance(
+        {
+            "config": {
+                "objective": "Review PRs",
+                "workspace": {
+                    "repo_url": "https://github.com/acme/app",
+                    "default_ref": "main",
+                    "notes": "Focus on auth changes",
+                    "needs": [
+                        {
+                            "id": "github_repo",
+                            "kind": "github_repo",
+                            "label": "GitHub repository URL",
+                            "filled": True,
+                        },
+                        {
+                            "id": "github_token",
+                            "kind": "github_token",
+                            "label": "GitHub token",
+                            "filled": True,
+                        },
+                    ],
+                },
+            }
+        }
+    )
+    assert "https://github.com/acme/app" in text
+    assert "default ref: main" in text
+    assert "Focus on auth changes" in text
+    assert "GitHub token" in text
+    assert "audit/review target" in text
+    # Never leak secret material via guidance.
+    assert "ghp_" not in text
+    assert "enc:v1:" not in text

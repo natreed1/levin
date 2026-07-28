@@ -339,7 +339,7 @@ class Ledger:
             existing = self.get_session(row["session_id"])
             if existing:
                 return existing
-        title = "Master workflows" if master else str(ritual_id).replace("_", " ").title()
+        title = "Master" if master else str(ritual_id).replace("_", " ").title()
         return self.start_background_session(
             title=title,
             surface=Surface.CHAT.value,

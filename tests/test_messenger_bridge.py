@@ -58,6 +58,25 @@ def test_personality_mentions_use_exact_longest_match():
     assert PERSONALITIES_BY_ID["qwen-bull"].name == "Bullish Agent"
 
 
+def test_custom_agent_mention_resolves_via_extra_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANALYST_LEDGER_DATA", str(tmp_path / "ledger"))
+    from analyst_ledger.paths import use_data_dir
+    from analyst_ledger.registry import create_composed_agent
+
+    with use_data_dir(tmp_path / "ledger"):
+        agent = create_composed_agent(
+            name="Hawk Scout",
+            prompt="You are Hawk Scout. Be terse.",
+        )
+        assert match_personality("@HawkScout ping") is None
+        found = mentioned_personalities(
+            "@HawkScout what's the angle?",
+            extra_agent_ids=[agent.id],
+        )
+        assert [p.id for p in found] == [agent.id]
+        assert found[0].name == "Hawk Scout"
+
+
 def test_find_pending_mention_skips_old_and_self():
     raw = [
         {"id": 1, "author": "Nat", "body": "@Qwen hi"},

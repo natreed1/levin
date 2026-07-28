@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import time
 from typing import Any, Dict, Optional
@@ -15,10 +16,13 @@ COOKIE_NAME = "messenger_session"
 MAX_NAME_LEN = 40
 MAX_TITLE_LEN = 80
 MAX_EMAIL_LEN = 254
+MAX_USERNAME_LEN = 24
+MIN_USERNAME_LEN = 3
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 _PBKDF2_ITERATIONS = 260_000
 # Reject HTML / attribute breakout characters in user-facing labels.
 _FORBIDDEN_LABEL_CHARS = frozenset("<>\"'`")
+_USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,23}$")
 
 
 def invite_token() -> str:
@@ -73,6 +77,16 @@ def normalize_email(email: str) -> Optional[str]:
         return None
     local, _, domain = cleaned.partition("@")
     if not local or not domain or "." not in domain:
+        return None
+    return cleaned
+
+
+def normalize_username(username: str) -> Optional[str]:
+    """Public handle: lowercase letters, digits, underscore; 3–24 chars."""
+    cleaned = (username or "").strip().lower().lstrip("@")
+    if not cleaned or len(cleaned) < MIN_USERNAME_LEN or len(cleaned) > MAX_USERNAME_LEN:
+        return None
+    if not _USERNAME_RE.fullmatch(cleaned):
         return None
     return cleaned
 
@@ -208,3 +222,29 @@ def utc_expiry_iso(*, hours: float = 24.0) -> str:
 
     when = datetime.now(timezone.utc) + timedelta(hours=hours)
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_fly_runtime() -> bool:
+    return bool((os.environ.get("FLY_APP_NAME") or "").strip())
+
+
+def dev_auto_login_enabled() -> bool:
+    """Local-only convenience login. Never active on Fly."""
+    if is_fly_runtime():
+        return False
+    raw = (os.environ.get("MESSENGER_DEV_AUTO_LOGIN") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def dev_user_email() -> str:
+    return normalize_email(os.environ.get("MESSENGER_DEV_EMAIL") or "dev@example.com") or "dev@example.com"
+
+
+def dev_user_name() -> str:
+    return normalize_name(os.environ.get("MESSENGER_DEV_NAME") or "Dev") or "Dev"
+
+
+def utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

@@ -31,11 +31,12 @@ def list_specialists() -> list[dict]:
     return specialists_public()
 
 
-def _sanitize_body(text: str) -> str:
+def _sanitize_body(text: str, *, max_len: int = 2000) -> str:
     """Strip illegal control chars so JSON/WS clients don't choke."""
+    limit = max(200, min(int(max_len or 2000), 12000))
     return "".join(
         ch if (ord(ch) >= 32 or ch in "\n\r\t") else " " for ch in (text or "")
-    )[:2000]
+    )[:limit]
 
 
 def _broadcast(hub: Any, loop: Any, room_id: str, payload: dict[str, Any]) -> None:
@@ -58,9 +59,12 @@ def _post(
     body: str,
     *,
     loop: Any = None,
+    max_len: int = 2000,
 ) -> dict[str, Any]:
     msg = store.add_message(
-        author=author, body=_sanitize_body(body), room_id=room_id
+        author=author,
+        body=_sanitize_body(body, max_len=max_len),
+        room_id=room_id,
     )
     _broadcast(hub, loop, room_id, {"type": "message", "message": msg})
     return msg
@@ -147,6 +151,7 @@ def _live_reply(
     *,
     system_extra: str,
     user_prompt: str,
+    max_tokens: int = 700,
 ) -> str:
     from analyst_ledger.synthesize import call_chat_messages
 
@@ -156,14 +161,18 @@ def _live_reply(
     )
     return call_chat_messages(
         [{"role": "user", "content": user_prompt}],
-        max_tokens=700,
+        max_tokens=max(200, min(int(max_tokens or 700), 4000)),
         system=system,
         temperature=0.35,
     ).strip()
 
 
 def _room_guidance(room: dict[str, Any]) -> str:
-    """Objective + prompts from room config — guides autonomous / specialist turns."""
+    """Objective, prompts, skills, and workspace from room config for agent turns.
+
+    Includes the Room-settings GitHub repo URL (and related non-secret workspace
+    fields). Never injects decrypted secrets — only filled/unfilled integration flags.
+    """
     config = room.get("config") if isinstance(room.get("config"), dict) else {}
     if not isinstance(config, dict):
         return ""
@@ -181,6 +190,62 @@ def _room_guidance(room: dict[str, Any]) -> str:
         ids = [str(s).strip() for s in skills if str(s).strip()]
         if ids:
             parts.append("Room skills (capabilities): " + ", ".join(ids[:12]))
+
+    ws = config.get("workspace") if isinstance(config.get("workspace"), dict) else {}
+    if ws:
+        repo_url = str(ws.get("repo_url") or "").strip()[:400]
+        default_ref = str(ws.get("default_ref") or "").strip()[:80]
+        notes = str(ws.get("notes") or "").strip()[:800]
+        if repo_url:
+            ref_bit = f" (default ref: {default_ref})" if default_ref else ""
+            parts.append(f"Room workspace GitHub repo: {repo_url}{ref_bit}")
+        elif default_ref:
+            parts.append(f"Room workspace default ref: {default_ref}")
+        if notes:
+            parts.append(f"Room workspace notes: {notes}")
+        needs = ws.get("needs") if isinstance(ws.get("needs"), list) else []
+        # Prefer public filled flags when present; else infer from encrypted map.
+        secrets_map = (
+            config.get("workspace_secrets")
+            if isinstance(config.get("workspace_secrets"), dict)
+            else {}
+        )
+        filled_labels: list[str] = []
+        missing_labels: list[str] = []
+        for raw in needs[:16]:
+            if not isinstance(raw, dict):
+                continue
+            kind = str(raw.get("kind") or "").strip().lower()
+            label = str(raw.get("label") or kind or "integration").strip()[:120]
+            if not label:
+                continue
+            if "filled" in raw:
+                is_filled = bool(raw.get("filled"))
+            elif kind == "github_repo":
+                is_filled = bool(repo_url)
+            else:
+                need_id = str(raw.get("id") or kind).strip()
+                is_filled = bool(
+                    str(secrets_map.get(need_id) or secrets_map.get(kind) or "").strip()
+                )
+            if kind == "github_repo":
+                # Repo URL already listed above; skip duplicate need line.
+                continue
+            (filled_labels if is_filled else missing_labels).append(label)
+        if filled_labels:
+            parts.append(
+                "Room integrations configured (secrets not shown): "
+                + ", ".join(filled_labels)
+            )
+        if missing_labels:
+            parts.append(
+                "Room integrations still missing: " + ", ".join(missing_labels)
+            )
+        if repo_url:
+            parts.append(
+                "Treat the Room workspace GitHub repo above as the audit/review "
+                "target unless the user names a different repository."
+            )
     return "\n".join(parts)
 
 
@@ -196,6 +261,8 @@ def _speak(
     rounds_total: int = 1,
     continuous: bool = False,
     room_guidance: str = "",
+    max_tokens: int = 700,
+    word_budget: int = 350,
 ) -> str:
     round_hint = ""
     if mode == "debate":
@@ -218,13 +285,14 @@ def _speak(
                     "Close your case; name what would change your mind."
                 )
     guidance_block = f"\n{room_guidance}\n" if room_guidance else ""
+    budget = max(120, min(int(word_budget or 350), 2000))
     user_prompt = (
         f"Topic: {topic or '(none)'}\n"
         f"{round_hint}\n"
         f"{guidance_block}\n"
         f"Ledger brief (INTERNAL only):\n{brief}\n\n"
         f"Prior turns:\n" + ("\n---\n".join(prior[-12:]) if prior else "(none)") + "\n\n"
-        "Write your turn now. Plain text, under 350 words. No markdown fences."
+        f"Write your turn now. Plain text, about {budget} words max. No markdown fences."
     )
     system_extra = (
         f"Mode={mode}. Stay in character as {personality.name} ({personality.role}). "
@@ -241,6 +309,7 @@ def _speak(
                 personality,
                 system_extra=system_extra,
                 user_prompt=user_prompt,
+                max_tokens=max_tokens,
             )
             if live:
                 prefix = f"**{personality.name}**"

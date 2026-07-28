@@ -481,14 +481,36 @@ class WorkflowEngine:
 
 
 class MasterCoordinator:
-    """Route a master-chat request to approved workflows and consolidate results."""
+    """Master chat: set up rooms/agents/workflows (website APIs) + optionally run approved loops."""
 
-    def __init__(self, ledger: Ledger, gateway: Optional[ClaudeGateway] = None) -> None:
+    def __init__(
+        self,
+        ledger: Ledger,
+        gateway: Optional[ClaudeGateway] = None,
+        *,
+        store: Any = None,
+        user_id: Optional[str] = None,
+    ) -> None:
         self.ledger = ledger
         self.gateway = gateway or ClaudeGateway(ledger)
+        self.store = store
+        self.user_id = user_id
 
-    def run(self, message: str, *, job: Optional[BackgroundJob] = None) -> Dict[str, Any]:
+    def run(
+        self,
+        message: str,
+        *,
+        job: Optional[BackgroundJob] = None,
+        stub: bool = False,
+    ) -> Dict[str, Any]:
         from .rituals import list_automations
+        from messenger.master_setup import (
+            catalog_snapshot,
+            execute_tool,
+            remember_setup,
+            retrieve_setup_memory,
+            stub_plan_from_message,
+        )
 
         master = self.ledger.get_or_create_chat_thread(master=True)
         approved = [
@@ -496,66 +518,409 @@ class MasterCoordinator:
             for a in list_automations(self.ledger)
             if a.get("approved") and a.get("enabled", True) and a.get("model")
         ]
-        if not approved:
-            raise RuntimeError(
-                "No approved, enabled automations with an agent model are available. "
-                "Open each automation and choose Claude or Qwen3 8B before running."
-            )
-        route_prompt = (
-            "Select up to three approved workflows for the user's request. Return JSON only as "
-            "{\"ritual_ids\":[...]}. Use only names from this list: "
-            f"{approved}. User request: {message[:2000]}"
-        )
-        routed = self.gateway.complete(
-            [{"role": "user", "content": route_prompt}],
-            kind="master_route",
+
+        if job:
+            job.update("Planning setup")
+
+        memory = retrieve_setup_memory(message, limit=4)
+        catalog = catalog_snapshot(store=self.store, user_id=self.user_id)
+        plan = self._plan(
+            message,
+            catalog=catalog,
+            memory=memory,
+            approved=approved,
             session_id=master.session_id,
-            max_tokens=500,
+            stub=stub,
         )
-        route = extract_json(routed.text)
-        selected = [
+
+        tool_results: List[Dict[str, Any]] = []
+        created_room_id: Optional[str] = None
+        hired_ids: List[str] = []
+        for step in (plan.get("tools") or [])[:12]:
+            if not isinstance(step, dict):
+                continue
+            name = str(step.get("name") or "").strip()
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            if job:
+                job.check_cancelled()
+                job.update(f"Setup: {name}")
+            # Prompt-inject learned patterns into newly hired agents
+            if name == "hire_agent" and memory and not args.get("memory_hint"):
+                hints = [
+                    str(m.get("summary") or m.get("request") or "")[:200]
+                    for m in memory[:2]
+                ]
+                args = {**args, "memory_hint": " | ".join(h for h in hints if h)}
+            # After create_room in this plan, force room-scoped tools onto that room.
+            # Models invent placeholder room_ids (title / fake tokens) before create
+            # returns the real id — only filling when room_id is missing left those
+            # assigns failing with room_not_found_or_forbidden while the team existed.
+            if created_room_id and name in {
+                "assign_agent",
+                "set_workspace",
+                "configure_room",
+                "create_loop",
+                "apply_recipe",
+            }:
+                args = {**args, "room_id": created_room_id}
+
+            if self.store is None or not self.user_id:
+                result = {
+                    "ok": False,
+                    "error": "master_setup_requires_store",
+                    "tool": name,
+                }
+            else:
+                result = execute_tool(
+                    name, args, store=self.store, user_id=self.user_id
+                )
+            result = {"tool": name, **result}
+            tool_results.append(result)
+            if result.get("ok") and name == "create_room":
+                created_room_id = str(result.get("room_id") or "") or created_room_id
+            if result.get("ok") and name == "hire_agent":
+                aid = str(result.get("agent_id") or "")
+                if aid:
+                    hired_ids.append(aid)
+            if result.get("ok") and name == "apply_recipe":
+                rid = str(result.get("room_id") or "")
+                if rid:
+                    created_room_id = created_room_id or rid
+
+        # If we created a room but never wrote a graph, and the ask matches a recipe,
+        # apply it — covers models that create_room + hire without apply_recipe.
+        applied_recipe = any(
+            r.get("tool") == "apply_recipe" and r.get("ok") for r in tool_results
+        )
+        if (
+            created_room_id
+            and not applied_recipe
+            and self.store is not None
+            and self.user_id
+        ):
+            from messenger.graph_recipes import match_recipe
+            from messenger.team_harness import normalize_graph
+
+            matched = match_recipe(message)
+            room = self.store.room(created_room_id)
+            layers = normalize_graph((room or {}).get("config", {}).get("graph")).get(
+                "layers"
+            ) or []
+            if matched and room and not layers:
+                if job:
+                    job.update(f"Apply recipe {matched['id']}")
+                apply = execute_tool(
+                    "apply_recipe",
+                    {
+                        "recipe_id": matched["id"],
+                        "room_id": created_room_id,
+                        "objective": message[:400],
+                        "query": message[:400],
+                    },
+                    store=self.store,
+                    user_id=self.user_id,
+                )
+                tool_results.append({"tool": "apply_recipe", **apply})
+
+        # Auto-assign hired agents to the room we just created
+        if (
+            created_room_id
+            and hired_ids
+            and self.store is not None
+            and self.user_id
+        ):
+            room_after = self.store.room(created_room_id) or {}
+            already = set(
+                (room_after.get("config") or {}).get("agents")
+                or (room_after.get("config") or {}).get("specialists")
+                or []
+            )
+            for aid in hired_ids:
+                if aid in already:
+                    continue
+                if job:
+                    job.update(f"Assign {aid}")
+                assign = execute_tool(
+                    "assign_agent",
+                    {"room_id": created_room_id, "agent_id": aid},
+                    store=self.store,
+                    user_id=self.user_id,
+                )
+                tool_results.append({"tool": "assign_agent", **assign})
+
+        # Optional: still run approved workflows when explicitly requested
+        selected: List[str] = []
+        workflow_summaries: List[Dict[str, Any]] = []
+        requested = [
             rid
-            for rid in (route.get("ritual_ids") if isinstance(route, dict) else [])
-            if rid in approved
+            for rid in (plan.get("run_workflows") or [])
+            if isinstance(rid, str) and rid in approved
         ][:3]
-        if not selected:
-            selected = approved[:1]
-        results = []
-        for rid in selected:
+        # Legacy path: if the plan is empty but user clearly wants a run and we have tools none
+        if not tool_results and not requested and approved and self._looks_like_run(message):
+            requested = approved[:1]
+        for rid in requested:
             if job:
                 job.check_cancelled()
                 job.update(f"Running {rid}")
-            results.append(
-                WorkflowEngine(self.ledger, self.gateway).run(
-                    rid, request=message, stub=False, job=job
-                )
+            run = WorkflowEngine(self.ledger, self.gateway).run(
+                rid, request=message, stub=stub, job=job
             )
+            selected.append(rid)
+            workflow_summaries.append(
+                {"ritual_id": run.get("ritual_id"), "output": run.get("output")}
+            )
+
         if job:
-            job.update("Consolidating workflow results")
-        summaries = [{"ritual_id": r["ritual_id"], "output": r["output"]} for r in results]
-        final = self.gateway.complete(
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "Consolidate these workflow handoffs into one concise response to the "
-                        "user. Preserve disagreements and uncertainty; do not invent facts or "
-                        "recommend trades.\nUser request: "
-                        + message[:2000]
-                        + "\nHandoffs: "
-                        + json.dumps(summaries, ensure_ascii=False)
-                    ),
-                }
-            ],
-            kind="master_synthesis",
+            job.update("Writing reply")
+
+        final = self._compose_reply(
+            message=message,
+            plan=plan,
+            tool_results=tool_results,
+            workflow_summaries=workflow_summaries,
             session_id=master.session_id,
-            max_tokens=2048,
-        ).text
+            stub=stub,
+        )
+
+        ok_actions = [r for r in tool_results if r.get("ok")]
+        if ok_actions:
+            remember_setup(
+                user_request=message,
+                actions=[
+                    {
+                        "tool": a.get("tool"),
+                        "room_id": a.get("room_id"),
+                        "agent_id": a.get("agent_id"),
+                        "ritual_id": a.get("ritual_id"),
+                        "title": a.get("title") or a.get("name"),
+                    }
+                    for a in ok_actions
+                ],
+                summary=final[:600],
+            )
+
         self.ledger.append_chat_message(
             master.session_id,
             role="assistant",
-            kind="synthesis",
+            kind="master_setup" if ok_actions else "synthesis",
             content=final,
-            metadata={"workflows": selected},
+            metadata={
+                "workflows": selected,
+                "tools": [
+                    {
+                        "tool": r.get("tool"),
+                        "ok": r.get("ok"),
+                        "room_id": r.get("room_id"),
+                        "agent_id": r.get("agent_id"),
+                        "ritual_id": r.get("ritual_id"),
+                        "error": r.get("error"),
+                    }
+                    for r in tool_results
+                ],
+                "workspace_hints": [
+                    r.get("needs_user_input") or r.get("workspace")
+                    for r in tool_results
+                    if r.get("needs_user_input") or r.get("workspace")
+                ],
+            },
         )
-        return {"status": "ok", "thread_id": master.session_id, "workflows": selected, "output": final}
+        return {
+            "status": "ok",
+            "thread_id": master.session_id,
+            "workflows": selected,
+            "tools": tool_results,
+            "output": final,
+        }
+
+    @staticmethod
+    def _looks_like_run(message: str) -> bool:
+        lower = (message or "").lower()
+        setup_words = (
+            "create",
+            "set up",
+            "setup",
+            "hire",
+            "build a",
+            "make a",
+            "room",
+            "team",
+            "agent",
+            "workflow",
+            "loop",
+        )
+        if any(w in lower for w in setup_words):
+            return False
+        return any(w in lower for w in ("run", "execute", "kick off", "start "))
+
+    def _plan(
+        self,
+        message: str,
+        *,
+        catalog: Dict[str, Any],
+        memory: List[Dict[str, Any]],
+        approved: List[str],
+        session_id: str,
+        stub: bool,
+    ) -> Dict[str, Any]:
+        from messenger.master_setup import stub_plan_from_message
+
+        if stub:
+            return stub_plan_from_message(message)
+
+        slim_catalog = {
+            "agents": [
+                {"id": a.get("id"), "name": a.get("name"), "capabilities": a.get("capabilities")}
+                for a in (catalog.get("agents") or [])[:30]
+            ],
+            "capabilities": [
+                {
+                    "id": c.get("id"),
+                    "name": c.get("name"),
+                    "runner": c.get("runner"),
+                    "action": c.get("action"),
+                }
+                for c in (catalog.get("capabilities") or [])[:30]
+            ],
+            "lenses": (catalog.get("lenses") or [])[:20],
+            "rooms": [
+                {
+                    "room_id": r.get("room_id"),
+                    "title": r.get("title"),
+                    "skills": r.get("skills"),
+                    "agents": r.get("agents"),
+                }
+                for r in (catalog.get("rooms") or [])[:20]
+            ],
+            "recipes": (catalog.get("recipes") or [])[:12],
+            "tools": catalog.get("tools"),
+            "need_kinds": catalog.get("need_kinds"),
+            "approved_workflows": approved[:20],
+        }
+        prompt = (
+            "You are Master on Flyleaf. You set up Teams (rooms), hire agents, apply "
+            "Graph recipes, and draft workflow loops using ONLY the allowlisted tools — "
+            "the same building blocks as Hire + Graph on the website. You do NOT invent "
+            "runners or merge code.\n"
+            "Return JSON only:\n"
+            '{"reply":str,"tools":[{"name":str,"args":{}}],"run_workflows":[str]}\n'
+            "Tools: apply_recipe, create_room, hire_agent, assign_agent, configure_room, "
+            "set_workspace, create_loop, draft_capability, list_catalog.\n"
+            "Tool args (required fields must be present — use these exact keys):\n"
+            "- apply_recipe: {\"recipe_id\":str from catalog.recipes OR \"query\":str, "
+            "\"objective\":str optional, \"title\":str optional, \"room_id\":str optional, "
+            "\"edits\":{\"disable_steps\":[str],\"agent_overrides\":{role:name},"
+            "\"guard_overrides\":{from_to:prompt}}}. "
+            "Creates the team + specialists + Graph steps from the library. "
+            "Prefer this whenever a catalog recipe matches (equity research, PR+security, "
+            "filings digest, multi-analyst).\n"
+            "- hire_agent: {\"name\":str (required; also accepts title/agent_name/label), "
+            "\"capability_ids\":[str], \"lens_ids\":[str], \"prompt\":str, "
+            "\"summary\":str, \"stage\":str}. If no catalog agent fits, hire a new one "
+            "instead of only assign_agent on missing ids.\n"
+            "- assign_agent: {\"agent_id\":str, \"role\":str, \"room_id\":str optional}. "
+            "Use catalog ids; display names like \"Diff Reviewer\" auto-create when missing. "
+            "After create_room in the same plan, omit room_id (runtime injects the new id).\n"
+            "- create_room: {\"title\":str (required), \"objective\":str, "
+            "\"orchestrator\":\"chat\"|\"debate\"|\"workflow\", \"agents\":[str], "
+            "\"skills\":[str], \"needs\":[{\"kind\":str,\"label\":str}]}\n"
+            "- set_workspace: {\"repo_url\":str, \"needs\":[...], \"room_id\":str optional}\n"
+            "Rules:\n"
+            "- When the user asks to create a research/equities/coding/filings team, "
+            "call apply_recipe with the matching recipe_id. Do NOT invent graph JSON.\n"
+            "- Prefer composing existing capability ids from the catalog.\n"
+            "- Never invent room_id values. create_room / apply_recipe first, then "
+            "room-scoped tools without a fabricated id.\n"
+            "- When the plan needs a specialist not in catalog, call hire_agent first "
+            "(with name + capability_ids), then assign_agent.\n"
+            "- For coding/GitHub rooms prefer recipe pr_security (includes workspace needs). "
+            "Never ask the user to paste secrets in chat — tell them to use Room settings.\n"
+            "- create_loop drafts are always unapproved.\n"
+            "- run_workflows only for approved workflow ids when the user wants a run now.\n"
+            "- If the ask is just conversation, tools=[] and a helpful reply.\n"
+            f"Catalog: {json.dumps(slim_catalog, ensure_ascii=False)[:12000]}\n"
+            f"Past successful setups (RAG): {json.dumps(memory, ensure_ascii=False)[:3000]}\n"
+            f"User request: {message[:2000]}"
+        )
+        try:
+            routed = self.gateway.complete(
+                [{"role": "user", "content": prompt}],
+                kind="master_setup_plan",
+                session_id=session_id,
+                max_tokens=1800,
+            )
+            plan = extract_json(routed.text)
+            if not isinstance(plan, dict):
+                return stub_plan_from_message(message)
+            tools = plan.get("tools") if isinstance(plan.get("tools"), list) else []
+            plan["tools"] = [t for t in tools if isinstance(t, dict)][:12]
+            plan["run_workflows"] = [
+                str(x)
+                for x in (plan.get("run_workflows") or [])
+                if str(x) in approved
+            ][:3]
+            plan["reply"] = str(plan.get("reply") or "").strip()
+            return plan
+        except Exception:
+            return stub_plan_from_message(message)
+
+    def _compose_reply(
+        self,
+        *,
+        message: str,
+        plan: Dict[str, Any],
+        tool_results: List[Dict[str, Any]],
+        workflow_summaries: List[Dict[str, Any]],
+        session_id: str,
+        stub: bool,
+    ) -> str:
+        base = str(plan.get("reply") or "").strip()
+        lines: List[str] = []
+        if base:
+            lines.append(base)
+        for r in tool_results:
+            if r.get("ok") and r.get("message"):
+                lines.append(f"• {r['message']}")
+            elif not r.get("ok"):
+                lines.append(f"• Failed {r.get('tool')}: {r.get('error')}")
+            if r.get("needs_user_input"):
+                needs = r["needs_user_input"]
+                if isinstance(needs, list) and needs:
+                    labels = ", ".join(
+                        str(n.get("label") or n.get("id")) for n in needs if isinstance(n, dict)
+                    )
+                    lines.append(
+                        f"• Still needed in Room settings: {labels}. "
+                        "Open the team → Harness to paste them (not in this chat)."
+                    )
+        if workflow_summaries and not stub:
+            try:
+                final = self.gateway.complete(
+                    [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Consolidate these workflow handoffs into one concise response. "
+                                "Preserve uncertainty; do not invent facts or recommend trades.\n"
+                                f"User request: {message[:2000]}\n"
+                                f"Setup notes: {base[:800]}\n"
+                                f"Handoffs: {json.dumps(workflow_summaries, ensure_ascii=False)}"
+                            ),
+                        }
+                    ],
+                    kind="master_synthesis",
+                    session_id=session_id,
+                    max_tokens=2048,
+                ).text
+                return final
+            except Exception:
+                pass
+        if workflow_summaries:
+            for w in workflow_summaries:
+                lines.append(f"• Ran {w.get('ritual_id')}: {str(w.get('output') or '')[:400]}")
+        if not lines:
+            return (
+                "I'm Master. Ask me to create a team, hire agents, or draft a workflow loop — "
+                "I'll use the same Hire/Harness building blocks as the website."
+            )
+        return "\n".join(lines)

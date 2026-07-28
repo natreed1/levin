@@ -8,6 +8,7 @@ from messenger.routers.agents_catalog import router as agents_catalog_router
 from messenger.routers.registry_routes import router as registry_router
 from messenger.routers.agent_chats import router as agent_chats_router
 from messenger.routers.review import router as review_router
+from messenger.routers.friends import router as friends_router
 
 __all__ = [
     "auth_router",
@@ -18,4 +19,5 @@ __all__ = [
     "registry_router",
     "agent_chats_router",
     "review_router",
+    "friends_router",
 ]

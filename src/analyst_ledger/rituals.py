@@ -932,6 +932,20 @@ def list_automations(ledger: Optional[Ledger] = None) -> List[Dict[str, Any]]:
         row["model"] = s["spec"].get("model")
         row["watchlist"] = s.get("watchlist") or row.get("watchlist") or []
         row["build"] = build_status(rid)
+        row["room_id"] = s["spec"].get("room_id")
+        row["schedule"] = s["spec"].get("schedule")
+        row["name"] = s["spec"].get("name") or rid
+        caps = s["spec"].get("capability_ids")
+        if isinstance(caps, list):
+            row["capability_ids"] = caps
+        else:
+            step_ids = []
+            for step in s["spec"].get("steps") or []:
+                if isinstance(step, dict) and step:
+                    step_ids.append(str(next(iter(step))))
+                elif isinstance(step, str):
+                    step_ids.append(step)
+            row["capability_ids"] = step_ids
         by_id[rid] = row
     for rid, row in by_id.items():
         row["last_run"] = runs.get(rid)

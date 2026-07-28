@@ -33,6 +33,7 @@ from messenger.routers import (
     auth_router,
     automations_router,
     capabilities_router,
+    friends_router,
     registry_router,
     review_router,
     tracking_router,
@@ -165,24 +166,29 @@ def _maybe_dispatch_agent_mention(
     body: str,
     owner_user_id: Optional[str],
 ) -> None:
-    """In-process agent / @workflow hooks (no HTTP bridge hop)."""
+    """In-process agent / TF / Orchestrator / @workflow hooks (no HTTP bridge hop)."""
     text = body or ""
-    lower = text.lower()
-    # Cheap prefilter before spinning a thread. Keep in sync with
-    # friend_personalities mentions (role names + legacy @Qwen*).
-    mention_hints = (
-        "@qwen",
-        "@analyst",
-        "@bullish",
-        "@bull",
-        "@contrarian",
-        "@synthesizer",
-        "@workflow",
-    )
-    if not any(h in lower for h in mention_hints):
+    # @mentions always dispatch. Rostered teams also route un-mentioned asks
+    # through reverse-TF / Orchestrator (simple vs complex).
+    has_at = "@" in text
+    has_roster = False
+    try:
+        room = app.state.store.room(room_id)
+        config = (room or {}).get("config") if isinstance(room, dict) else {}
+        if isinstance(config, dict) and (
+            "agents" in config or "specialists" in config
+        ):
+            raw = config.get("agents") or config.get("specialists") or []
+            has_roster = isinstance(raw, (list, tuple)) and len(raw) > 0
+    except Exception:
+        has_roster = False
+    if not has_at and not has_roster:
         return
     # Defer to a daemon thread so the request path stays fast.
+    import logging
     import threading
+
+    log = logging.getLogger("messenger.app")
 
     def work() -> None:
         try:
@@ -198,7 +204,9 @@ def _maybe_dispatch_agent_mention(
                 loop=getattr(app.state, "loop", None),
             )
         except Exception:
-            pass
+            log.exception(
+                "agent mention hook failed room=%s author=%s", room_id, author
+            )
 
     threading.Thread(target=work, name="agent-mention", daemon=True).start()
 
@@ -254,6 +262,16 @@ def create_app() -> FastAPI:
             app.state.scheduler.start()
         if classify_enabled:
             app.state.classify_sweep.start()
+        try:
+            from messenger.model_link import env_frontier_api_key_present, registry
+
+            if env_frontier_api_key_present():
+                for uid in store.list_user_ids():
+                    registry().ensure_env_frontier_profile(str(uid))
+        except Exception:  # noqa: BLE001
+            logging.getLogger("messenger.app").debug(
+                "startup env frontier wire skipped", exc_info=True
+            )
         yield
         app.state.scheduler.stop()
         app.state.classify_sweep.stop()
@@ -281,6 +299,7 @@ def create_app() -> FastAPI:
     app.include_router(automations_router)
     app.include_router(agent_chats_router)
     app.include_router(review_router)
+    app.include_router(friends_router)
 
     # --- Browser extension ingest (same response shape as local dashboard) -------
     from fastapi import Depends as FastAPIDepends
@@ -717,8 +736,12 @@ def create_app() -> FastAPI:
                     "email": user["email"],
                     "name": identity["name"],
                     "display_name": user["display_name"],
+                    "username": user.get("username"),
                     "room_id": room_id,
                     "room_title": (room or {}).get("title") or "Private room",
+                    "unread_notifications": store.count_unread_notifications(
+                        user["user_id"]
+                    ),
                     "dev_auto_login": False,
                 }
             )
@@ -758,11 +781,22 @@ def create_app() -> FastAPI:
     ) -> JSONResponse:
         rooms = store.list_rooms_for_user(user["user_id"])
         from messenger.model_link import registry as model_registry
+        from messenger.master_setup import public_workspace
 
         models = model_registry()
         for room in rooms:
             owner_id = str(room.get("owner_user_id") or user["user_id"])
-            config = room.get("config") or {}
+            config = dict(room.get("config") or {})
+            # Never expose encrypted secret blobs to the client
+            if "workspace_secrets" in config:
+                config = {
+                    **{k: v for k, v in config.items() if k != "workspace_secrets"},
+                    "workspace": public_workspace(config),
+                }
+                room["config"] = config
+            elif isinstance(config.get("workspace"), dict):
+                config["workspace"] = public_workspace(config)
+                room["config"] = config
             override_id = config.get("model_profile_id")
             active = (
                 models.get_profile(owner_id, str(override_id))
@@ -788,25 +822,70 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "rooms": rooms})
 
     @app.get("/api/specialists")
-    def specialists_list() -> JSONResponse:
-        """Room palette — same Agent registry as the Agents tab."""
+    def specialists_list(
+        user: Optional[dict[str, Any]] = _Depends(current_user_optional),
+    ) -> JSONResponse:
+        """Room palette — same Agent registry as the Hire tab (per-user when signed in)."""
         from analyst_ledger.registry import list_room_palette_public
+        from messenger.tenancy import user_context
 
+        if user and user.get("user_id"):
+            with user_context(user["user_id"]):
+                rows = list_room_palette_public()
+        else:
+            rows = list_room_palette_public()
         return JSONResponse(
-            {"ok": True, "specialists": list_room_palette_public(), "source": "registry"}
+            {"ok": True, "specialists": rows, "source": "registry"}
         )
 
-    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+    def _owned_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        """Owner-only: delete team, invite friends, change member access."""
         room = store.room(room_id)
         if not room:
             return None, JSONResponse(
                 {"ok": False, "error": "not_found"}, status_code=404
             )
-        if room.get("owner_user_id") != user_id:
+        owner = str(room.get("owner_user_id") or "").strip()
+        if owner == user_id:
+            return room, None
+        # Orphan rooms (created before ownership, or while logged out): first
+        # member who manages them claims ownership so Delete / Harness work.
+        if not owner and store.user_in_room(room_id, user_id):
+            claimed = store.set_room_owner(room_id, user_id)
+            if claimed and str(claimed.get("owner_user_id") or "") == user_id:
+                return claimed, None
+        return None, JSONResponse(
+            {"ok": False, "error": "owner_required"}, status_code=403
+        )
+
+    def _editable_room(room_id: str, user_id: str) -> tuple[Optional[dict[str, Any]], Optional[JSONResponse]]:
+        """Owner or editor: graph, agents, room config, harness runs."""
+        room = store.room(room_id)
+        if not room:
             return None, JSONResponse(
-                {"ok": False, "error": "owner_required"}, status_code=403
+                {"ok": False, "error": "not_found"}, status_code=404
             )
-        return room, None
+        role = store.room_member_role(room_id, user_id)
+        if role in {"owner", "editor"}:
+            return room, None
+        # Orphan rooms: claim ownership so first manager can edit.
+        owner = str(room.get("owner_user_id") or "").strip()
+        if not owner and store.user_in_room(room_id, user_id):
+            claimed = store.set_room_owner(room_id, user_id)
+            if claimed and str(claimed.get("owner_user_id") or "") == user_id:
+                return claimed, None
+        if role == "viewer":
+            return None, JSONResponse(
+                {
+                    "ok": False,
+                    "error": "editor_required",
+                    "message": "Viewers can chat but can’t edit this team. Ask the owner for Editor access.",
+                },
+                status_code=403,
+            )
+        return None, JSONResponse(
+            {"ok": False, "error": "forbidden"}, status_code=403
+        )
 
     @app.post("/api/rooms/{room_id}/invite")
     def room_invite(
@@ -814,7 +893,7 @@ def create_app() -> FastAPI:
         request: Request,
         user: dict[str, Any] = _Depends(current_user),
     ) -> JSONResponse:
-        _, error = _editable_room(room_id, user["user_id"])
+        _, error = _owned_room(room_id, user["user_id"])
         if error:
             return error
         room_invite = secrets.token_urlsafe(24)
@@ -903,7 +982,7 @@ def create_app() -> FastAPI:
                 {"ok": False, "error": "cannot_delete_legacy"},
                 status_code=400,
             )
-        _, error = _editable_room(room_id, user["user_id"])
+        _, error = _owned_room(room_id, user["user_id"])
         if error:
             return error
         try:
@@ -1125,8 +1204,122 @@ def create_app() -> FastAPI:
             raw = body.get("skills")
             if isinstance(raw, list):
                 config["skills"] = [str(s).strip() for s in raw if str(s).strip()][:20]
+        if "orchestrator" in body:
+            mode = str(body.get("orchestrator") or "chat").strip().lower()
+            if mode not in {"chat", "debate", "workflow"}:
+                return JSONResponse(
+                    {"ok": False, "error": "invalid_orchestrator"},
+                    status_code=400,
+                )
+            config["orchestrator"] = mode
+        if "roles" in body:
+            raw = body.get("roles")
+            roles: dict[str, str] = {}
+            if isinstance(raw, dict):
+                for k, v in list(raw.items())[:24]:
+                    aid = str(k).strip()
+                    label = str(v or "").strip()[:80]
+                    if aid:
+                        roles[aid] = label
+            config["roles"] = roles
+        if "graph" in body:
+            from messenger.team_harness import normalize_graph
+
+            config["graph"] = normalize_graph(body.get("graph"))
+        if "agents" in body:
+            raw = body.get("agents")
+            if isinstance(raw, list):
+                agents = [str(a).strip() for a in raw if str(a).strip()][:24]
+                config["agents"] = agents
+                config["specialists"] = agents
+                # Drop roles for removed agents
+                roles_map = dict(config.get("roles") or {})
+                config["roles"] = {k: v for k, v in roles_map.items() if k in set(agents)}
+        # Room workspace: repo URL + integration needs / encrypted secrets
+        if any(
+            k in body
+            for k in ("workspace", "repo_url", "workspace_secrets", "default_ref")
+        ):
+            from messenger.master_setup import apply_workspace_patch, public_workspace
+
+            ws_body = body.get("workspace") if isinstance(body.get("workspace"), dict) else {}
+            secrets_body = body.get("workspace_secrets")
+            if not isinstance(secrets_body, dict):
+                secrets_body = ws_body.get("secrets") if isinstance(ws_body.get("secrets"), dict) else None
+            config = apply_workspace_patch(
+                config,
+                repo_url=(
+                    body.get("repo_url")
+                    if "repo_url" in body
+                    else ws_body.get("repo_url")
+                    if "repo_url" in ws_body or "workspace" in body
+                    else None
+                ),
+                default_ref=(
+                    body.get("default_ref")
+                    if "default_ref" in body
+                    else ws_body.get("default_ref")
+                    if "default_ref" in ws_body
+                    else None
+                ),
+                notes=ws_body.get("notes") if "notes" in ws_body else None,
+                needs=ws_body.get("needs") if isinstance(ws_body.get("needs"), list) else None,
+                secrets=secrets_body,
+            )
         updated = store.update_room_config(room_id, config)
-        return JSONResponse({"ok": True, "room": updated, "config": config})
+        from messenger.master_setup import public_workspace
+
+        public_cfg = {
+            **{k: v for k, v in config.items() if k != "workspace_secrets"},
+            "workspace": public_workspace(config),
+        }
+        return JSONResponse({"ok": True, "room": updated, "config": public_cfg})
+
+    @app.post("/api/rooms/{room_id}/harness-run")
+    async def room_harness_run(
+        room_id: str,
+        request: Request,
+        user: dict[str, Any] = _Depends(current_user),
+    ) -> JSONResponse:
+        """Run the team workflow harness once (or continuously when requested)."""
+        room, error = _editable_room(room_id, user["user_id"])
+        if error:
+            return error
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        from messenger.team_harness import start_workflow_job
+
+        owner_id = room.get("owner_user_id") or user["user_id"]
+        run_focus = str(
+            body.get("focus") or body.get("prompt") or body.get("topic") or ""
+        ).strip()[:800]
+        try:
+            job = start_workflow_job(
+                store=store,
+                hub=hub,
+                room=room,
+                owner_user_id=owner_id,
+                stub=bool(body.get("stub", False)),
+                continuous=bool(body.get("continuous", False)),
+                run_focus=run_focus,
+                loop=getattr(app.state, "loop", None),
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"ok": False, "error": "harness_busy", "message": str(exc)},
+                status_code=400,
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "job": job.public(),
+                "message": "Team Graph running — safe to leave.",
+            }
+        )
 
     @app.post("/api/rooms/{room_id}/autonomy")
     async def room_autonomy(
@@ -1156,14 +1349,29 @@ def create_app() -> FastAPI:
                     "ok": True,
                     "autonomy": config["autonomy"],
                     "room": updated,
-                    "message": "Autonomy stopped.",
+                    "message": "Harness stopped.",
                 }
             )
 
         agents = config.get("agents") or config.get("specialists") or []
-        if len(agents) < 1:
+        skills = config.get("skills") or []
+        from messenger.team_harness import normalize_graph
+
+        graph_layers = (normalize_graph(config.get("graph")).get("layers") or [])
+        orch = str(config.get("orchestrator") or "debate").strip().lower()
+        if orch == "workflow":
+            if not graph_layers and not skills and not agents:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "add_graph_or_capabilities_first",
+                        "message": "Add Graph steps (or a capability allowlist/loop) before running.",
+                    },
+                    status_code=400,
+                )
+        elif len(agents) < 1:
             return JSONResponse(
-                {"ok": False, "error": "add_agents_first", "message": "Assign agents to this room first."},
+                {"ok": False, "error": "add_agents_first", "message": "Assign agents to this team first."},
                 status_code=400,
             )
         existing = job_registry().active_for_room(room_id)
@@ -1178,26 +1386,51 @@ def create_app() -> FastAPI:
             )
 
         objective = str(config.get("objective") or "").strip()
-        topic = objective or "Pursue the room objective and keep the conversation useful."
+        topic = objective or "Pursue the team objective and keep the conversation useful."
         started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         config["autonomy"] = {"enabled": True, "started_at": started}
         store.update_room_config(room_id, config)
         owner_id = room.get("owner_user_id") or user["user_id"]
         # Refresh room after config write
         room = store.room(room_id) or room
+        if orch == "chat":
+            orch = "debate"  # Run harness with chat mode still needs a runner; use debate
         try:
-            job = start_specialist_job(
-                store=store,
-                hub=hub,
-                room=room,
-                action="debate" if len(agents) >= 2 else "present",
-                topic=topic,
-                owner_user_id=owner_id,
-                stub=bool((body or {}).get("stub", False)),
-                rounds=5,
-                continuous=len(agents) >= 2,
-                loop=getattr(app.state, "loop", None),
-            )
+            if orch == "workflow":
+                from messenger.team_harness import start_workflow_job
+
+                job = start_workflow_job(
+                    store=store,
+                    hub=hub,
+                    room=room,
+                    owner_user_id=owner_id,
+                    stub=bool((body or {}).get("stub", False)),
+                    continuous=True,
+                    loop=getattr(app.state, "loop", None),
+                )
+                announce = (
+                    f"Harness running (workflow)"
+                    f"{' — ' + objective if objective else ''}."
+                    " Toggle Run Graph off to stop."
+                )
+            else:
+                job = start_specialist_job(
+                    store=store,
+                    hub=hub,
+                    room=room,
+                    action="debate" if len(agents) >= 2 else "present",
+                    topic=topic,
+                    owner_user_id=owner_id,
+                    stub=bool((body or {}).get("stub", False)),
+                    rounds=5,
+                    continuous=len(agents) >= 2,
+                    loop=getattr(app.state, "loop", None),
+                )
+                announce = (
+                    f"Harness running (debate)"
+                    f"{' guided by: ' + objective if objective else ''}."
+                    " Toggle Run Graph off to stop."
+                )
         except ValueError as exc:
             config["autonomy"] = {"enabled": False, "started_at": None}
             store.update_room_config(room_id, config)
@@ -1208,11 +1441,7 @@ def create_app() -> FastAPI:
         # Announce in-room so runs are visible
         store.add_message(
             author="Moderator",
-            body=(
-                f"Autonomy on — agents will converse here"
-                f"{' guided by: ' + objective if objective else ''}."
-                " Toggle Autonomy off to stop."
-            ),
+            body=announce,
             room_id=room_id,
         )
         return JSONResponse(
@@ -1220,7 +1449,7 @@ def create_app() -> FastAPI:
                 "ok": True,
                 "autonomy": config["autonomy"],
                 "job": job.public(),
-                "message": "Autonomy started — agents are conversing in this room.",
+                "message": "Harness started — agents are working in this team.",
             }
         )
 
@@ -1389,7 +1618,8 @@ def create_app() -> FastAPI:
         if not name:
             return JSONResponse({"ok": False, "error": "bad_name"}, status_code=400)
         if user_id and room_id != "legacy":
-            store.add_room_member(room_id, user_id)
+            # Invite-link joins default to viewer; owner can upgrade in Share.
+            store.add_room_member(room_id, user_id, role="viewer")
         resp = JSONResponse(
             {
                 "ok": True,
