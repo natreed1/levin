@@ -2070,6 +2070,14 @@
     const results = $("#friend-search-results");
     if (results) results.innerHTML = "";
     openShareDialog("", null);
+    // Focus search after the dialog paints (showModal is sync; focus next frame).
+    requestAnimationFrame(() => {
+      const input = $("#friend-search");
+      if (input && !input.disabled) {
+        input.focus();
+        input.select?.();
+      }
+    });
   }
 
   function closeShareDialog() {
@@ -2201,10 +2209,17 @@
 
   async function searchFriends() {
     setError("#friends-dialog-error", "");
-    const q = ($("#friend-search")?.value || "").trim();
+    const raw = ($("#friend-search")?.value || "").trim();
+    const q = raw.replace(/^@+/, "").trim();
     const list = $("#friend-search-results");
     if (!q) {
-      if (list) list.innerHTML = "";
+      if (list) {
+        list.innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "muted tiny-hint friend-empty-row";
+        li.textContent = "Type a username to search.";
+        list.appendChild(li);
+      }
       return;
     }
     if (list) {

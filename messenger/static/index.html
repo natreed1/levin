@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=52" />
+  <link rel="stylesheet" href="/static/style.css?v=53" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -190,44 +190,6 @@
           </div>
         </div>
 
-        <dialog id="share-dialog">
-          <form method="dialog" class="share-dialog-form friends-dialog-form" id="friends-dialog-form">
-            <h3 id="share-dialog-title">Share</h3>
-            <div class="friends-dialog-scroll">
-              <p class="muted tiny-hint" id="friends-dialog-hint">Search usernames to send friend requests. Add friends to this team once they’re accepted.</p>
-              <p id="friends-username-needed" class="auth-banner hidden">Set your username in Settings → Profile so people can find you.</p>
-              <div id="room-access-section" class="friends-dialog-section hidden">
-                <h4>People with access</h4>
-                <ul id="room-access-list" class="friend-results room-access-list"></ul>
-                <p id="room-access-empty" class="muted tiny-hint hidden">Only you have access so far.</p>
-              </div>
-              <label for="friend-search">Find by username</label>
-              <div class="share-row">
-                <input id="friend-search" type="text" maxlength="24" placeholder="search @username" autocomplete="off" />
-                <button type="button" id="friend-search-btn">Search</button>
-              </div>
-              <ul id="friend-search-results" class="friend-results"></ul>
-              <div class="friends-dialog-section">
-                <h4>Your friends</h4>
-                <ul id="friends-dialog-list" class="friend-results"></ul>
-              </div>
-              <details class="invite-link-details">
-                <summary>Or share an invite link</summary>
-                <p class="muted tiny-hint">Anyone with this link joins as a Viewer. Upgrade them under People with access.</p>
-                <label for="share-url">Invite link</label>
-                <div class="share-row">
-                  <input id="share-url" type="text" readonly />
-                  <button type="button" id="copy-share">Copy</button>
-                </div>
-              </details>
-              <p id="friends-dialog-message" class="auth-banner" hidden></p>
-              <p id="friends-dialog-error" class="error" hidden></p>
-            </div>
-            <div class="dialog-actions">
-              <button type="submit" value="close">Done</button>
-            </div>
-          </form>
-        </dialog>
         <dialog id="new-room-dialog">
           <form id="new-room-form">
             <h3>New team</h3>
@@ -431,7 +393,47 @@
         </div>
       </section>
 
-      <!-- Studio dialogs live outside tab panels so showModal works when Teams is hidden -->
+      <!-- Friends / share + studio dialogs live outside tab panels so showModal works from Settings -->
+      <dialog id="share-dialog">
+        <form method="dialog" class="share-dialog-form friends-dialog-form" id="friends-dialog-form">
+          <h3 id="share-dialog-title">Friends</h3>
+          <div class="friends-dialog-scroll">
+            <p class="muted tiny-hint" id="friends-dialog-hint">Search usernames to send friend requests.</p>
+            <p id="friends-username-needed" class="auth-banner hidden">Set your username in Settings → Profile so people can find you.</p>
+            <div id="room-access-section" class="friends-dialog-section hidden">
+              <h4>People with access</h4>
+              <ul id="room-access-list" class="friend-results room-access-list"></ul>
+              <p id="room-access-empty" class="muted tiny-hint hidden">Only you have access so far.</p>
+            </div>
+            <label for="friend-search">Find by username</label>
+            <div class="share-row">
+              <input id="friend-search" type="text" maxlength="24" placeholder="search @username" autocomplete="off" />
+              <button type="button" id="friend-search-btn">Search</button>
+            </div>
+            <ul id="friend-search-results" class="friend-results"></ul>
+            <div class="friends-dialog-section">
+              <h4>Your friends</h4>
+              <ul id="friends-dialog-list" class="friend-results"></ul>
+            </div>
+            <details class="invite-link-details">
+              <summary>Or share an invite link</summary>
+              <p class="muted tiny-hint">Anyone with this link joins as a Viewer. Upgrade them under People with access.</p>
+              <label for="share-url">Invite link</label>
+              <div class="share-row">
+                <input id="share-url" type="text" readonly />
+                <button type="button" id="copy-share">Copy</button>
+              </div>
+            </details>
+            <p id="friends-dialog-message" class="auth-banner" hidden></p>
+            <p id="friends-dialog-error" class="error" hidden></p>
+          </div>
+          <div class="dialog-actions">
+            <button type="submit" value="close">Done</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Studio dialogs -->
       <dialog id="agent-builder-dialog">
         <form id="agent-builder-form" class="automate-dialog-form">
           <h3 id="agent-builder-title">Hire agent</h3>
@@ -932,6 +934,6 @@
 
   <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=56"></script>
+  <script src="/static/app.js?v=57"></script>
 </body>
 </html>
