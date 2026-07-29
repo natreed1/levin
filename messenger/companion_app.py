@@ -16,6 +16,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -562,7 +563,7 @@ def _ensure_gateway(upstream: str, token: str) -> str:
             if _gateway_healthy(working):
                 return working
         _gateway_proc = subprocess.Popen(
-            [os.environ.get("PYTHON", "python3"), "-m", "messenger.qwen_gateway"],
+            [os.environ.get("PYTHON") or sys.executable, "-m", "messenger.qwen_gateway"],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
