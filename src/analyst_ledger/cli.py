@@ -101,6 +101,12 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tokens(args: argparse.Namespace) -> int:
+    rows = Ledger().token_usage_summary(days=args.days, group_by=args.group_by)
+    _print_json(rows)
+    return 0
+
+
 def cmd_install_extension(args: argparse.Namespace) -> int:
     from .install_extension import install_yahoo_extension
 
@@ -499,6 +505,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     summary = sub.add_parser("summary", help="Ledger summary")
     summary.set_defaults(func=cmd_summary)
+
+    tokens = sub.add_parser(
+        "tokens", help="Token usage summary, aggregated from model_call events"
+    )
+    tokens.add_argument(
+        "--group-by",
+        default="call_site",
+        choices=["call_site", "model", "room_id"],
+    )
+    tokens.add_argument("--days", type=int, default=None)
+    tokens.set_defaults(func=cmd_tokens)
 
     # synthesize
     syn = sub.add_parser("synthesize", help="Draft memo from session (redacted egress)")

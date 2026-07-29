@@ -4,6 +4,7 @@ from analyst_ledger.labels import (
     LabelError,
     is_valid_label,
     labels_by_axis,
+    normalize_call_site,
     normalize_label,
     normalize_labels,
     slugify,
@@ -59,3 +60,13 @@ def test_is_valid_label():
 def test_slugify():
     assert slugify("  Acme AI, Inc. ") == "acme-ai-inc"
     assert slugify("NVDA") == "nvda"
+
+
+def test_call_site_controlled_values():
+    assert normalize_call_site("graph-layer") == "graph-layer"
+    assert normalize_call_site("Team Orchestrator") == "team-orchestrator"
+
+
+def test_call_site_rejects_unknown_values():
+    with pytest.raises(LabelError):
+        normalize_call_site("specialist-room")

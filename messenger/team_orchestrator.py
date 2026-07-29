@@ -517,6 +517,8 @@ def _chat_as(
     endpoint: Any,
     room_guidance: str = "",
     stub: bool = False,
+    room_id: str = "",
+    user_id: Optional[str] = None,
 ) -> str:
     if stub:
         return _stub_persona_reply(agent, snippet=snippet, context=context)
@@ -526,6 +528,7 @@ def _chat_as(
             "select a room model or Start local model.)"
         )
     try:
+        from analyst_ledger import synthesize
         from analyst_ledger.synthesize import call_chat_messages, use_llm_endpoint
     except Exception as exc:
         return f"(model stack unavailable: {exc})"
@@ -541,7 +544,7 @@ def _chat_as(
         system += f"\n{room_guidance}"
     try:
         with use_llm_endpoint(endpoint):
-            return call_chat_messages(
+            result = call_chat_messages(
                 [
                     {
                         "role": "user",
@@ -556,6 +559,24 @@ def _chat_as(
                 system=system,
                 temperature=0.35,
             ).strip()
+        usage = synthesize.last_usage()
+        if usage:
+            try:
+                from analyst_ledger.ledger import Ledger
+
+                Ledger().record_model_call(
+                    call_site="team-orchestrator",
+                    model=usage.get("model"),
+                    tokens_in=usage.get("tokens_in"),
+                    tokens_out=usage.get("tokens_out"),
+                    latency_ms=usage.get("latency_ms"),
+                    room_id=room_id,
+                    agent_id=getattr(agent, "id", None),
+                    user_id=user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("token usage log failed: %s", exc)
+        return result
     except Exception as exc:  # noqa: BLE001
         return f"({getattr(agent, 'name', agent.id)} unavailable: {exc})"
 
@@ -746,6 +767,8 @@ def execute_plan(
                 endpoint=endpoint,
                 room_guidance=room_guidance,
                 stub=stub,
+                room_id=room_id,
+                user_id=owner_user_id,
             )
             name = getattr(agent, "name", aid)
             critique_notes.append((name, reply))
@@ -833,6 +856,8 @@ def execute_plan(
                         endpoint=endpoint,
                         room_guidance=room_guidance,
                         stub=stub,
+                        room_id=room_id,
+                        user_id=owner_user_id,
                     )
         else:
             material = evidence
@@ -865,6 +890,8 @@ def execute_plan(
                             endpoint=endpoint,
                             room_guidance=room_guidance,
                             stub=stub,
+                            room_id=room_id,
+                            user_id=owner_user_id,
                         )
                         if stage.kind == "synthesize":
                             synth_brief = reply

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -23,6 +24,20 @@ LOCAL_DESTINATIONS = {"qwen", "local_stub", "ollama", "lmstudio"}
 _QWEN_ENDPOINT: ContextVar[Optional[Dict[str, str]]] = ContextVar(
     "qwen_endpoint", default=None
 )
+
+# Token usage from the most recent _call_* invocation on this call stack. Reset
+# to None at the top of each _call_* function so a failed/usage-less call never
+# leaves a stale value from a prior call for a caller to misread.
+_LAST_USAGE: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "last_model_usage", default=None
+)
+
+
+def last_usage() -> Optional[Dict[str, Any]]:
+    """Token usage (model/tokens_in/tokens_out/latency_ms) from the most
+    recent _call_anthropic_messages/_call_openai_compatible_messages/
+    _call_bedrock call in this call stack, or None if unavailable."""
+    return _LAST_USAGE.get()
 
 
 def assert_destination_allowed(destination: str, max_sensitivity: Sensitivity) -> None:
@@ -259,9 +274,22 @@ def _call_anthropic_messages(
     }
     if system:
         kwargs["system"] = system
+    _LAST_USAGE.set(None)
+    started = time.perf_counter()
     message = client.messages.create(
         **kwargs,
     )
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    usage = getattr(message, "usage", None)
+    if usage is not None:
+        _LAST_USAGE.set(
+            {
+                "model": model,
+                "tokens_in": getattr(usage, "input_tokens", None),
+                "tokens_out": getattr(usage, "output_tokens", None),
+                "latency_ms": latency_ms,
+            }
+        )
     parts = []
     for block in message.content:
         text = getattr(block, "text", None)
@@ -341,6 +369,8 @@ def _call_openai_compatible_messages(
         headers=headers,
         method="POST",
     )
+    _LAST_USAGE.set(None)
+    started = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = json.loads(resp.read().decode("utf-8"))
@@ -355,6 +385,17 @@ def _call_openai_compatible_messages(
         raise RuntimeError(
             f"Local model unreachable at {base_url}. {hint}"
         ) from exc
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    raw_usage = body.get("usage") or {}
+    if raw_usage:
+        _LAST_USAGE.set(
+            {
+                "model": model,
+                "tokens_in": raw_usage.get("prompt_tokens"),
+                "tokens_out": raw_usage.get("completion_tokens"),
+                "latency_ms": latency_ms,
+            }
+        )
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("Local model returned no choices.")
@@ -382,13 +423,26 @@ def _call_bedrock(prompt: str) -> str:
         "max_tokens": 2048,
         "messages": [{"role": "user", "content": prompt}],
     }
+    _LAST_USAGE.set(None)
+    started = time.perf_counter()
     resp = client.invoke_model(
         modelId=model_id,
         contentType="application/json",
         accept="application/json",
         body=json.dumps(body),
     )
+    latency_ms = int((time.perf_counter() - started) * 1000)
     payload = json.loads(resp["body"].read())
+    raw_usage = payload.get("usage") or {}
+    if raw_usage:
+        _LAST_USAGE.set(
+            {
+                "model": model_id,
+                "tokens_in": raw_usage.get("input_tokens"),
+                "tokens_out": raw_usage.get("output_tokens"),
+                "latency_ms": latency_ms,
+            }
+        )
     parts = []
     for block in payload.get("content") or []:
         if block.get("type") == "text":

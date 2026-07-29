@@ -875,9 +875,10 @@ def _run_graph_layers(
     except Exception as exc:  # noqa: BLE001
         logger.debug("graph model link lookup failed: %s", exc)
 
+    from analyst_ledger import synthesize
     from analyst_ledger.synthesize import use_llm_endpoint
 
-    with user_context(owner_user_id), use_llm_endpoint(endpoint):
+    with user_context(owner_user_id) as ledger, use_llm_endpoint(endpoint):
         n_steps = len(layers)
         step_bit = f"{n_steps} step{'s' if n_steps != 1 else ''}."
         if focus:
@@ -1065,6 +1066,21 @@ def _run_graph_layers(
                         max_tokens=1800,
                         word_budget=900,
                     )
+                    usage = synthesize.last_usage()
+                    if usage:
+                        try:
+                            ledger.record_model_call(
+                                call_site="graph-layer",
+                                model=usage.get("model"),
+                                tokens_in=usage.get("tokens_in"),
+                                tokens_out=usage.get("tokens_out"),
+                                latency_ms=usage.get("latency_ms"),
+                                room_id=room_id,
+                                agent_id=personality.id,
+                                user_id=owner_user_id,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("token usage log failed: %s", exc)
                     _post(
                         store,
                         hub,
@@ -1109,6 +1125,20 @@ def _run_graph_layers(
                     layer_goal=goal,
                     stub=stub,
                 )
+                guard_usage = synthesize.last_usage()
+                if guard_usage:
+                    try:
+                        ledger.record_model_call(
+                            call_site="graph-layer",
+                            model=guard_usage.get("model"),
+                            tokens_in=guard_usage.get("tokens_in"),
+                            tokens_out=guard_usage.get("tokens_out"),
+                            latency_ms=guard_usage.get("latency_ms"),
+                            room_id=room_id,
+                            user_id=owner_user_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("token usage log failed: %s", exc)
                 _post(
                     store,
                     hub,

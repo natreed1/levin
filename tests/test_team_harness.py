@@ -7,6 +7,17 @@ from pathlib import Path
 
 import pytest
 
+from analyst_ledger import synthesize
+
+
+@pytest.fixture(autouse=True)
+def _reset_last_usage():
+    """Defensive: a stray real usage value from another test file must never
+    leak into these stub-mode tests (none of them call a real model)."""
+    synthesize._LAST_USAGE.set(None)
+    yield
+    synthesize._LAST_USAGE.set(None)
+
 
 def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MESSENGER_INVITE_TOKEN", "server-secret")
@@ -764,6 +775,125 @@ def test_graph_guard_exhaustion_flags_evidence_gap(monkeypatch: pytest.MonkeyPat
     assert "Graph finished" in joined
     assert job.status == "completed"
     assert calls["n"] == th._GRAPH_LAYER_MAX_ATTEMPTS
+
+
+def test_graph_layer_logs_token_usage(monkeypatch: pytest.MonkeyPatch):
+    """When a real model call reports usage, the Graph logs a model_call
+    event tagged call_site=graph-layer via the per-user ledger."""
+    from messenger import team_harness as th
+    from messenger.specialist_room import SpecialistJob
+
+    def fake_post(store, hub, room_id, name, body, loop=None, **_kwargs):
+        pass
+
+    monkeypatch.setattr(th, "_post", fake_post)
+    monkeypatch.setattr(th, "_guard_allows", lambda *_a, **_k: (True, "YES"))
+
+    import messenger.specialist_room as sr
+
+    monkeypatch.setattr(sr, "_recent_work_brief", lambda *_a, **_k: "")
+    monkeypatch.setattr(sr, "_room_guidance", lambda *_a, **_k: "")
+    monkeypatch.setattr(sr, "_speak", lambda personality, **_k: "reply text")
+
+    class FakePersonality:
+        def __init__(self, pid: str, name: str):
+            self.id = pid
+            self.name = name
+
+    monkeypatch.setattr(
+        "analyst_ledger.friend_personalities.resolve_specialists",
+        lambda ids: [FakePersonality(i, i) for i in ids],
+    )
+
+    class FakeLedger:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def record_model_call(self, **kwargs):
+            self.calls.append(kwargs)
+
+    class FakeCtx:
+        def __init__(self, yield_value=None):
+            self._yield_value = yield_value
+
+        def __enter__(self):
+            return self._yield_value if self._yield_value is not None else self
+
+        def __exit__(self, *exc):
+            return False
+
+    fake_ledger = FakeLedger()
+    monkeypatch.setattr(
+        "messenger.tenancy.user_context", lambda *_a, **_k: FakeCtx(fake_ledger)
+    )
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize.use_llm_endpoint", lambda *_a, **_k: FakeCtx()
+    )
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize.last_usage",
+        lambda: {
+            "model": "qwen3:8b",
+            "tokens_in": 42,
+            "tokens_out": 84,
+            "latency_ms": 500,
+        },
+    )
+
+    job = SpecialistJob(job_id="job_tok", room_id="r1", action="graph", topic="t")
+    room = {
+        "room_id": "r1",
+        "config": {
+            "objective": "Generic research",
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Gather",
+                        "prompt": "Dig in",
+                        "goal": "Notes",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                    {
+                        "id": "L2",
+                        "title": "Synthesize",
+                        "prompt": "Write",
+                        "goal": "Memo",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                ],
+                "guards": [
+                    {
+                        "id": "G1",
+                        "from_layer_id": "L1",
+                        "to_layer_id": "L2",
+                        "prompt": "Enough?",
+                    }
+                ],
+            },
+        },
+    }
+
+    th._run_graph_layers(
+        store=None,
+        hub=None,
+        room=room,
+        room_id="r1",
+        config=room["config"],
+        job=job,
+        stub=False,
+        loop=None,
+        owner_user_id="u1",
+    )
+
+    assert fake_ledger.calls, "expected at least one record_model_call"
+    for call in fake_ledger.calls:
+        assert call["call_site"] == "graph-layer"
+        assert call["tokens_in"] == 42
+        assert call["tokens_out"] == 84
+        assert call["room_id"] == "r1"
+        assert call["user_id"] == "u1"
+    # The speak-turn call additionally carries agent identity.
+    assert any(c.get("agent_id") == "qwen-bull" for c in fake_ledger.calls)
 
 
 def test_web_search_query_strips_make_imperative():

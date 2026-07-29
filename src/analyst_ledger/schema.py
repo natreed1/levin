@@ -81,6 +81,7 @@ EVENT_TYPES = frozenset(
         "external_note",
         "review_run",
         "file_search",
+        "model_call",
     }
 )
 
