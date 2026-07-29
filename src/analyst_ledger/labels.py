@@ -30,7 +30,7 @@ import re
 from typing import Dict, Iterable, List
 
 # All recognised label axes.
-AXES = ("topic", "entity", "project", "intent", "state", "kind")
+AXES = ("topic", "entity", "project", "intent", "state", "kind", "call_site")
 
 # --- Controlled vocabularies (edit TOPICS to grow the shared theme list) ---
 TOPICS = frozenset(
@@ -58,12 +58,17 @@ INTENTS = frozenset({"research", "monitor", "summarize", "compare", "watch"})
 STATES = frozenset({"open", "done", "blocked"})
 # What KIND of thing a chat message is — the stream classifier's primary axis.
 KINDS = frozenset({"research", "build", "observation", "idea", "question"})
+# Which instrumented code location logged a model_call token-usage event.
+# Grows by one entry each time another call site gets wired in — never gates
+# whether a call is tracked, only labels which known location logged it.
+CALL_SITES = frozenset({"graph-layer", "team-orchestrator"})
 
 _CONTROLLED: Dict[str, frozenset] = {
     "topic": TOPICS,
     "intent": INTENTS,
     "state": STATES,
     "kind": KINDS,
+    "call_site": CALL_SITES,
 }
 _OPEN = frozenset({"entity", "project"})
 
@@ -122,6 +127,15 @@ def labels_by_axis(labels: Iterable[str]) -> Dict[str, List[str]]:
         axis, _, value = str(raw).partition(":")
         grouped.setdefault(axis.strip().lower(), []).append(value)
     return grouped
+
+
+def normalize_call_site(raw: str) -> str:
+    """Validate a call_site against CALL_SITES; return the bare slug.
+
+    Raises LabelError on anything outside the controlled list — deliberate,
+    since only instrumented locations should ever produce this value.
+    """
+    return normalize_label(f"call_site:{raw}").split(":", 1)[1]
 
 
 def is_valid_label(raw: str) -> bool:

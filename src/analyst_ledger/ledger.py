@@ -6,12 +6,12 @@ import hashlib
 import json
 import mimetypes
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .paths import artifacts_dir, events_dir, sqlite_path, state_path
-from .labels import normalize_labels
+from .labels import normalize_call_site, normalize_labels
 from .schema import (
     SESSION_TAGS,
     ArtifactRef,
@@ -728,6 +728,90 @@ class Ledger:
             out.append({"text": text, "kind": kinds[0]})
             if len(out) >= limit:
                 break
+        return out
+
+    def record_model_call(
+        self,
+        *,
+        call_site: str,
+        model: Optional[str] = None,
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
+        latency_ms: Optional[int] = None,
+        room_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        surface: str = Surface.CHAT.value,
+        sensitivity: str = Sensitivity.INTERNAL.value,
+    ) -> Event:
+        """Record one model call's token usage as a passive fact — pure
+        capture, no session mutation, mirrors record_ask_labels.
+
+        call_site is validated against labels.CALL_SITES (raises LabelError
+        on an uninstrumented location) — this only guards against the calling
+        code typo'ing the same location's label two different ways; it never
+        gates whether a call gets tracked.
+
+        room_id is a messenger concept, distinct from session_id (a ledger
+        concept enforced by a real FOREIGN KEY to sessions). room_id only
+        ever goes into payload — passing it as session_id would raise
+        sqlite3.IntegrityError against an unregistered session.
+        """
+        site = normalize_call_site(call_site)
+        payload: Dict[str, Any] = {
+            "call_site": site,
+            "model": model,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "latency_ms": latency_ms,
+            "room_id": room_id,
+            "agent_id": agent_id,
+            "user_id": user_id,
+        }
+        return self.append_event(
+            Event(
+                type="model_call",
+                surface=surface,
+                session_id=session_id,
+                sensitivity=sensitivity,
+                payload=payload,
+            )
+        )
+
+    def token_usage_summary(
+        self,
+        *,
+        days: Optional[int] = None,
+        group_by: str = "call_site",
+        scan_limit: int = 20000,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate model_call events: total call count / tokens_in /
+        tokens_out, grouped by call_site, model, or room_id. Sorted by total
+        tokens (in + out) descending — biggest spenders first. This is what
+        answers "which agent/room/model is burning the most."
+        """
+        if group_by not in {"call_site", "model", "room_id"}:
+            raise ValueError(
+                f"group_by must be one of call_site/model/room_id, got {group_by!r}"
+            )
+        cutoff = None
+        if days is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        totals: Dict[str, Dict[str, Any]] = {}
+        for ev in self.list_events(types=["model_call"], limit=scan_limit):
+            if cutoff and (ev.get("ts") or "") < cutoff:
+                continue
+            payload = ev.get("payload") or {}
+            key = str(payload.get(group_by) or "unknown")
+            row = totals.setdefault(
+                key, {"key": key, "call_count": 0, "tokens_in": 0, "tokens_out": 0}
+            )
+            row["call_count"] += 1
+            row["tokens_in"] += int(payload.get("tokens_in") or 0)
+            row["tokens_out"] += int(payload.get("tokens_out") or 0)
+        out = list(totals.values())
+        out.sort(key=lambda r: r["tokens_in"] + r["tokens_out"], reverse=True)
         return out
 
     def attach_artifact(

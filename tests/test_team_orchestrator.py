@@ -270,3 +270,111 @@ def test_orchestrator_stub_execute_posts_progress(ledger: Ledger):
     assert store.messages[0]["author"] == "Orchestrator"
     assert "Consensus report" in store.messages[0]["body"]
     assert "Process" in store.messages[0]["body"] or "Fact-check" in store.messages[0]["body"]
+
+
+def test_chat_as_logs_token_usage(monkeypatch: pytest.MonkeyPatch):
+    """_chat_as logs a model_call event tagged call_site=team-orchestrator
+    when the underlying model call reports real usage."""
+    import analyst_ledger.ledger as ledger_module
+    from analyst_ledger import synthesize
+
+    class FakeEndpointCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        synthesize, "use_llm_endpoint", lambda *_a, **_k: FakeEndpointCtx()
+    )
+    monkeypatch.setattr(
+        synthesize, "call_chat_messages", lambda *_a, **_k: "a reply in character"
+    )
+    monkeypatch.setattr(
+        synthesize,
+        "last_usage",
+        lambda: {
+            "model": "claude-sonnet-5",
+            "tokens_in": 10,
+            "tokens_out": 20,
+            "latency_ms": 300,
+        },
+    )
+
+    calls: list[dict] = []
+
+    class FakeLedger:
+        def record_model_call(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(ledger_module, "Ledger", lambda: FakeLedger())
+
+    class FakeAgent:
+        id = "qwen-bull"
+        name = "Bull"
+        prompt = "Be bullish."
+
+    result = team_orchestrator._chat_as(
+        FakeAgent(),
+        author="Nat",
+        snippet="what do you think?",
+        context="some evidence",
+        endpoint={"kind": "anthropic"},
+        room_id="r1",
+        user_id="u1",
+    )
+
+    assert result == "a reply in character"
+    assert len(calls) == 1
+    assert calls[0]["call_site"] == "team-orchestrator"
+    assert calls[0]["tokens_in"] == 10
+    assert calls[0]["tokens_out"] == 20
+    assert calls[0]["room_id"] == "r1"
+    assert calls[0]["agent_id"] == "qwen-bull"
+    assert calls[0]["user_id"] == "u1"
+
+
+def test_chat_as_skips_logging_when_no_usage(monkeypatch: pytest.MonkeyPatch):
+    """No usage in the response (e.g. local model with no usage block) means
+    no model_call event — never a crash."""
+    import analyst_ledger.ledger as ledger_module
+    from analyst_ledger import synthesize
+
+    class FakeEndpointCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        synthesize, "use_llm_endpoint", lambda *_a, **_k: FakeEndpointCtx()
+    )
+    monkeypatch.setattr(synthesize, "call_chat_messages", lambda *_a, **_k: "ok")
+    monkeypatch.setattr(synthesize, "last_usage", lambda: None)
+
+    calls: list[dict] = []
+
+    class FakeLedger:
+        def record_model_call(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(ledger_module, "Ledger", lambda: FakeLedger())
+
+    class FakeAgent:
+        id = "qwen-bull"
+        name = "Bull"
+        prompt = "Be bullish."
+
+    result = team_orchestrator._chat_as(
+        FakeAgent(),
+        author="Nat",
+        snippet="hi",
+        context="evidence",
+        endpoint={"kind": "anthropic"},
+        room_id="r1",
+        user_id="u1",
+    )
+    assert result == "ok"
+    assert calls == []
