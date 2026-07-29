@@ -361,7 +361,148 @@ def _topic_wants_cs_academic_search(focus: str) -> bool:
     )
 
 
-def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
+def _topic_wants_filings_search(focus: str) -> bool:
+    """True when a Graph step is about company filings/financials (→ target EDGAR)."""
+    import re
+
+    from analyst_ledger.web_search import extract_tickers
+
+    if extract_tickers(focus or "", limit=1):
+        return True
+    return bool(
+        re.search(
+            r"\b10-?[KQ]\b|\b8-?K\b|\bSEC\b|\bEDGAR\b|filing|earnings|"
+            r"gross margin|guidance|revenue|risk factors|balance sheet",
+            focus or "",
+            re.I,
+        )
+    )
+
+
+def _edgar_sources(focus: str, context: str = "") -> tuple[str, List[Dict[str, Any]]]:
+    """Deterministic EDGAR facts block + filing hits for a finance Graph step.
+
+    Bing RSS ignores ``site:`` filters, so filings never surface through search —
+    go to EDGAR directly. Returns ``("", [])`` when no ticker resolves.
+    """
+    try:
+        from analyst_ledger.finance_research import (
+            fetch_recent_filings,
+            fetch_sec_trends,
+            resolve_symbol,
+        )
+        from analyst_ledger.web_search import extract_tickers
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edgar helper import failed: %s", exc)
+        return "", []
+
+    symbol = ""
+    # The ticker may live in the step title/prompt rather than the run focus.
+    for text in (focus, context):
+        found = extract_tickers(text or "", limit=1)
+        if found:
+            symbol = found[0]
+            break
+    if not symbol:
+        # Company names ("nvidia") resolve from the local alias table; the
+        # network fallback is a 1 MB fuzzy name match, too loose to trust here.
+        try:
+            symbol = resolve_symbol(focus, context or "", allow_network=False) or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("resolve_symbol failed: %s", exc)
+    if not symbol:
+        return "", []
+
+    def _money(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            if abs(float(value)) >= 1e9:
+                return f"${float(value) / 1e9:.3f}B"
+            return f"${float(value):,.0f}"
+        return str(value)
+
+    def _pct(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return f"{float(value):+.1f}%"
+        return "unavailable"
+
+    facts: List[str] = []
+    notes: List[str] = []
+    trends: Dict[str, Any] = {}
+    try:
+        trends = fetch_sec_trends(symbol) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.info("fetch_sec_trends failed symbol=%s: %s", symbol, exc)
+        notes.append(f"- SEC quarterly facts unavailable: {exc}")
+    revenue = trends.get("revenue") or {}
+    eps = trends.get("eps") or {}
+    rev_latest = revenue.get("latest") or {}
+    rev_prior = revenue.get("prior") or {}
+    eps_latest = eps.get("latest") or {}
+    eps_prior = eps.get("prior") or {}
+    if rev_latest:
+        facts.append(
+            f"- Latest discrete quarterly revenue: {_money(rev_latest.get('val'))}; "
+            f"period {rev_latest.get('start') or '?'} to "
+            f"{rev_latest.get('end') or '?'}; filed {rev_latest.get('filed') or '?'}; "
+            f"accession {rev_latest.get('accn') or '?'}."
+        )
+        facts.append(
+            f"- Prior-year quarter revenue: {_money(rev_prior.get('val'))} "
+            f"(period end {rev_prior.get('end') or '?'}); year-over-year growth "
+            f"{_pct(revenue.get('growth_pct'))}."
+        )
+    if eps_latest:
+        facts.append(
+            f"- Diluted EPS: ${eps_latest.get('val')} vs ${eps_prior.get('val')} "
+            f"a year earlier; growth {_pct(eps.get('growth_pct'))} "
+            f"(period end {eps_latest.get('end') or '?'}, "
+            f"filed {eps_latest.get('filed') or '?'})."
+        )
+    if facts and trends.get("source_url"):
+        facts.append(f"- SEC company-facts source: {trends.get('source_url')}")
+
+    filings: List[Dict[str, Any]] = []
+    try:
+        filings = list(fetch_recent_filings(symbol, limit=4) or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.info("fetch_recent_filings failed symbol=%s: %s", symbol, exc)
+        notes.append(f"- Recent EDGAR filing index unavailable: {exc}")
+    # Enrichment fetches only 2 pages — spend them on periodic reports, not 8-Ks.
+    filings.sort(key=lambda f: 0 if str(f.get("form") or "") in ("10-Q", "10-K") else 1)
+
+    hits: List[Dict[str, Any]] = []
+    for filing in filings:
+        url = str(filing.get("url") or "")
+        if not url:
+            continue
+        form = str(filing.get("form") or "filing")
+        filed = str(filing.get("filed") or "?")
+        accession = str(filing.get("accession") or "?")
+        hits.append(
+            {
+                "title": f"{symbol} {form} filed {filed}",
+                "url": url,
+                "snippet": (
+                    f"SEC EDGAR primary document — {form} for {symbol}, "
+                    f"filed {filed}, accession {accession}."
+                ),
+            }
+        )
+        facts.append(f"- {form} filed {filed}: {url}")
+
+    if not facts:
+        return "", hits
+    entity = str(trends.get("entity") or symbol)
+    header = (
+        f"SEC EDGAR facts for {symbol} ({entity}) — retrieved directly from EDGAR, "
+        "not from web search:"
+    )
+    return "\n".join([header] + facts + notes), hits
+
+
+def _retrieve_web_sources(
+    topic: str, *, stub: bool = False, context: str = ""
+) -> str:
     """Public web search pack for Graph research steps (Bing RSS + optional page enrich)."""
     focus = " ".join(str(topic or "").split()).strip()
     if not focus:
@@ -384,6 +525,11 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
         return ""
 
     import re
+
+    # Step title/prompt feeds intent detection only — never query building, so
+    # the search subject stays clean.
+    step_context = " ".join(str(context or "").split()).strip()
+    detect_text = f"{focus} {step_context}".strip()
 
     # Guiding question stays intact for agents; search uses the subject only.
     subject = _web_search_query_from_focus(focus)
@@ -413,6 +559,14 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
                 "retrieval augmented generation hallucination",
             ]
         )
+
+    # Finance / SEC filings: a "pull the 10-Q / earnings" step must reach EDGAR.
+    # Bing RSS ignores site: filters, so no query can get us there — fetch the
+    # facts and filing URLs from EDGAR itself and seed them into the hit list.
+    facts_block = ""
+    edgar_hits: List[Dict[str, Any]] = []
+    if _topic_wants_filings_search(detect_text):
+        facts_block, edgar_hits = _edgar_sources(focus, step_context)
 
     queries.append(focus_q[:160])
     expanded = re.sub(r"\bww2\b", "World War II", focus_q, flags=re.I)
@@ -454,6 +608,11 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
 
     all_hits: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    for hit in edgar_hits:
+        url = str(hit.get("url") or "")
+        if url and url not in seen:
+            seen.add(url)
+            all_hits.append(hit)
     for aq in arxiv_queries[:3]:
         for hit in _arxiv_search(aq, limit=5):
             url = str(hit.get("url") or "")
@@ -519,12 +678,16 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
                 pass
 
     if not all_hits:
-        return ""
+        # Zero search hits must not discard the EDGAR facts we already have.
+        return (facts_block or "").strip()[:4500]
 
     def _rank_key(hit: Dict[str, Any]) -> tuple:
         url = str(hit.get("url") or "").lower()
         title = str(hit.get("title") or "").lower()
         score = 0
+        # Primary filings outrank anything a general search returns.
+        if "sec.gov" in url:
+            score += 8
         if "arxiv.org" in url:
             score += 5
         if any(
@@ -550,7 +713,19 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
         ranked = rank_search_hits(all_hits, intent="general")
         preferred = all_hits[:8]
         merged = preferred + [h for h in ranked if h not in preferred]
-        trusted = enrich_trusted_hits(merged[:8], max_pages=2)
+        window = merged[:8]
+        # EDGAR primary documents are iXBRL tag soup, not prose — fetching them
+        # wastes the 2-page budget and floods the pack. Keep them as list lines
+        # (the facts block already carries the numbers) and spend the page
+        # fetches on prose sources instead.
+        fetchable = [
+            h for h in window if "sec.gov" not in str(h.get("url") or "").lower()
+        ]
+        by_url = {
+            str(e.get("url") or ""): e
+            for e in enrich_trusted_hits(fetchable, max_pages=2)
+        }
+        trusted = [by_url.get(str(h.get("url") or ""), h) for h in window]
         text = format_hits_for_prompt(trusted)
     except Exception as exc:  # noqa: BLE001
         logger.debug("rank/enrich failed: %s", exc)
@@ -563,6 +738,9 @@ def _retrieve_web_sources(topic: str, *, stub: bool = False) -> str:
         text = "\n".join(lines)
     if text and subject and subject.casefold() != focus.casefold():
         text = f"(search subject: {subject})\n{text}"
+    if facts_block:
+        # Facts lead so they survive this cap and the prompt cap downstream.
+        text = f"{facts_block}\n\n{text}" if text else facts_block
     return (text or "").strip()[:4500]
 
 
@@ -682,6 +860,8 @@ def _run_graph_layers(
     brief = _recent_work_brief(owner_user_id)
     base_guidance = _room_guidance(room)
     prior: List[str] = []
+    # Steps that finished without evidence — flagged, not fatal; travels downstream.
+    evidence_gaps: List[str] = []
 
     endpoint = None
     try:
@@ -791,7 +971,11 @@ def _run_graph_layers(
                         "Retrieving public sources for this step…",
                         loop=loop,
                     )
-                    retrieved = _retrieve_web_sources(topic or title, stub=stub)
+                    retrieved = _retrieve_web_sources(
+                        topic or title,
+                        stub=stub,
+                        context=f"{title} {prompt}",
+                    )
                     if retrieved:
                         src_post = f"**Retrieved sources**\n{retrieved}"
                         _post(
@@ -806,6 +990,7 @@ def _run_graph_layers(
                         prior.append(f"Harness: {src_post[:1200]}")
                         job.posted += 1
                     else:
+                        evidence_gaps.append(f"{title}: no sources retrieved")
                         _post(
                             store,
                             hub,
@@ -834,6 +1019,13 @@ def _run_graph_layers(
                     )
                 if objective and focus and objective != focus:
                     layer_bits.append(f"Standing team objective: {objective}")
+                if evidence_gaps:
+                    layer_bits.append(
+                        "Evidence gaps so far: "
+                        + "; ".join(evidence_gaps[-6:])
+                        + ". Do not present conclusions that depend on the "
+                        "missing evidence; say Unavailable."
+                    )
                 if retrieved:
                     layer_bits.append(
                         "Retrieved sources for this step:\n" + retrieved[:3500]
@@ -931,6 +1123,9 @@ def _run_graph_layers(
                     break
 
                 if attempt >= _GRAPH_LAYER_MAX_ATTEMPTS:
+                    evidence_gaps.append(
+                        f"{title}: guard unsatisfied after {attempt} tries"
+                    )
                     _post(
                         store,
                         hub,
@@ -938,7 +1133,8 @@ def _run_graph_layers(
                         "Harness",
                         (
                             f"Guard still not satisfied after {attempt} tries on "
-                            f"“{title}” — continuing to the next step."
+                            f"“{title}” — flagging this step as an evidence gap "
+                            "and continuing to the next step."
                         ),
                         loop=loop,
                     )
@@ -957,6 +1153,20 @@ def _run_graph_layers(
                 )
 
         if job.status == "running":
+            if evidence_gaps:
+                _post(
+                    store,
+                    hub,
+                    room_id,
+                    "Harness",
+                    (
+                        "**Evidence gap** — this run finished with unmet evidence:\n"
+                        + "\n".join(f"- {gap}" for gap in evidence_gaps[:12])
+                        + "\nTreat conclusions that depend on it as unsupported."
+                    ),
+                    loop=loop,
+                    max_len=4000,
+                )
             _post(store, hub, room_id, "Harness", "Graph finished.", loop=loop)
             job.status = "completed"
 

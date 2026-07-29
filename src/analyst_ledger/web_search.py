@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import html
 import json
 import re
@@ -298,6 +299,9 @@ def fetch_yahoo_chart_snapshot(symbol: str) -> Dict[str, Any]:
     }
 
 
+# ticker→CIK is stable; the directory is ~1 MB and every SEC helper calls this.
+# lru_cache never caches exceptions, so a failed lookup still retries.
+@functools.lru_cache(maxsize=256)
 def _sec_cik_for_symbol(symbol: str) -> str:
     payload = _get_json(
         "https://www.sec.gov/files/company_tickers.json", sec=True

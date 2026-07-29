@@ -477,6 +477,295 @@ def test_graph_guard_rejection_continues_layer(monkeypatch: pytest.MonkeyPatch):
     assert calls["n"] == 2
 
 
+_SEC_TRENDS = {
+    "symbol": "NVDA",
+    "entity": "NVIDIA CORP",
+    "revenue": {
+        "latest": {
+            "val": 81_615_000_000,
+            "start": "2026-01-26",
+            "end": "2026-04-26",
+            "filed": "2026-05-20",
+            "accn": "0001045810-26-000123",
+        },
+        "prior": {"val": 44_062_000_000, "end": "2025-04-27"},
+        "growth_pct": 85.24,
+    },
+    "eps": {
+        "latest": {"val": 2.39, "end": "2026-04-26", "filed": "2026-05-20"},
+        "prior": {"val": 0.76},
+        "growth_pct": 214.47,
+    },
+    "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0001045810.json",
+}
+_SEC_FILINGS = [
+    {
+        "form": "8-K",
+        "filed": "2026-06-01",
+        "accession": "0001045810-26-000200",
+        "url": (
+            "https://www.sec.gov/Archives/edgar/data/1045810/"
+            "000104581026000200/nvda-8k.htm"
+        ),
+    },
+    {
+        "form": "10-Q",
+        "filed": "2026-05-20",
+        "accession": "0001045810-26-000123",
+        "url": (
+            "https://www.sec.gov/Archives/edgar/data/1045810/"
+            "000104581026000123/nvda-20260426.htm"
+        ),
+    },
+]
+
+
+def _patch_edgar(monkeypatch: pytest.MonkeyPatch, *, filings=None):
+    """Offline EDGAR + Bing. Source modules are patched (imports are function-local)."""
+    import analyst_ledger.finance_research as fr
+    import analyst_ledger.web_search as ws
+
+    monkeypatch.setattr(fr, "fetch_sec_trends", lambda symbol: dict(_SEC_TRENDS))
+    monkeypatch.setattr(
+        fr,
+        "fetch_recent_filings",
+        lambda symbol, limit=5: list(
+            _SEC_FILINGS if filings is None else filings
+        ),
+    )
+    monkeypatch.setattr(ws, "bing_search", lambda *_a, **_k: [])
+    monkeypatch.setattr(ws, "enrich_trusted_hits", lambda hits, **_k: list(hits))
+
+
+def test_edgar_sources_builds_facts_and_ordered_hits(monkeypatch: pytest.MonkeyPatch):
+    from messenger.team_harness import _edgar_sources
+
+    _patch_edgar(monkeypatch)
+    block, hits = _edgar_sources("NVDA 10-Q gross margin")
+
+    assert "SEC EDGAR facts for NVDA (NVIDIA CORP)" in block
+    assert "$81.615B" in block
+    assert "$44.062B" in block
+    assert "+85.2%" in block
+    assert "$2.39" in block
+    assert "data.sec.gov" in block
+
+    assert [h["title"] for h in hits] == [
+        "NVDA 10-Q filed 2026-05-20",
+        "NVDA 8-K filed 2026-06-01",
+    ]
+    assert all("sec.gov" in h["url"] for h in hits)
+
+
+def test_retrieve_web_sources_returns_edgar_facts_without_bing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression: zero Bing hits used to yield an empty source pack."""
+    from messenger.team_harness import _retrieve_web_sources
+
+    _patch_edgar(monkeypatch)
+    pack = _retrieve_web_sources("balanced NVDA research 10-Q gross margin")
+
+    assert "$81.615B" in pack
+    assert "www.sec.gov/Archives" in pack
+    # Facts lead so they survive the prompt truncation downstream.
+    assert pack.startswith("SEC EDGAR facts for NVDA")
+
+
+def test_retrieve_web_sources_keeps_facts_when_no_hits_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from messenger.team_harness import _retrieve_web_sources
+
+    _patch_edgar(monkeypatch, filings=[])
+    pack = _retrieve_web_sources("NVDA quarterly revenue")
+
+    assert "$81.615B" in pack
+    assert "+85.2%" in pack
+
+
+def test_retrieve_web_sources_detects_filings_from_step_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The ticker may live in the step title/prompt, not the run focus."""
+    from messenger.team_harness import _retrieve_web_sources
+
+    _patch_edgar(monkeypatch, filings=[])
+    assert _retrieve_web_sources("latest quarterly results") == ""
+    with_context = _retrieve_web_sources(
+        "latest quarterly results",
+        context="Pull the latest NVDA 10-Q",
+    )
+    assert "SEC EDGAR facts for NVDA" in with_context
+
+
+def test_retrieve_web_sources_excludes_edgar_from_page_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """EDGAR primary docs are iXBRL tag soup — keep them as list lines but
+    spend the page-fetch budget on prose sources."""
+    import analyst_ledger.web_search as ws
+
+    from messenger.team_harness import _retrieve_web_sources
+
+    _patch_edgar(monkeypatch)
+    monkeypatch.setattr(
+        ws,
+        "bing_search",
+        lambda *_a, **_k: [
+            {
+                "title": "NVDA earnings coverage",
+                "url": "https://www.reuters.com/nvda-earnings",
+                "snippet": "Data-center revenue grew again.",
+            }
+        ],
+    )
+
+    fetched: list = []
+
+    def record_enrich(hits, **_k):
+        fetched.extend(str(h.get("url") or "") for h in hits)
+        return list(hits)
+
+    monkeypatch.setattr(ws, "enrich_trusted_hits", record_enrich)
+
+    pack = _retrieve_web_sources("balanced NVDA research 10-Q gross margin")
+
+    assert "www.sec.gov/Archives" in pack
+    assert fetched
+    assert all("sec.gov" not in url for url in fetched)
+
+
+def test_retrieve_web_sources_stub_skips_network(monkeypatch: pytest.MonkeyPatch):
+    from messenger.team_harness import _retrieve_web_sources
+
+    def boom(*_a, **_k):  # pragma: no cover - must never run
+        raise AssertionError("stub must not touch the network")
+
+    import analyst_ledger.finance_research as fr
+    import analyst_ledger.web_search as ws
+
+    monkeypatch.setattr(fr, "fetch_sec_trends", boom)
+    monkeypatch.setattr(ws, "bing_search", boom)
+    assert "(stub) Sources for" in _retrieve_web_sources("NVDA 10-Q", stub=True)
+
+
+def test_graph_guard_exhaustion_flags_evidence_gap(monkeypatch: pytest.MonkeyPatch):
+    """Guard exhaustion flags the run instead of silently passing it."""
+    from messenger import team_harness as th
+    from messenger.specialist_room import SpecialistJob
+
+    posts: list[str] = []
+
+    def fake_post(store, hub, room_id, name, body, loop=None, **_kwargs):
+        posts.append(str(body))
+
+    calls = {"n": 0}
+
+    def fake_guard(prompt, *, prior, layer_goal, stub):
+        calls["n"] += 1
+        return False, "NO — no evidence was retrieved."
+
+    monkeypatch.setattr(th, "_post", fake_post)
+    monkeypatch.setattr(th, "_guard_allows", fake_guard)
+
+    import messenger.specialist_room as sr
+
+    monkeypatch.setattr(sr, "_recent_work_brief", lambda *_a, **_k: "")
+    monkeypatch.setattr(sr, "_room_guidance", lambda *_a, **_k: "")
+    monkeypatch.setattr(
+        sr,
+        "_speak",
+        lambda personality, **_k: f"{personality.name} stub turn",
+    )
+
+    class FakePersonality:
+        def __init__(self, pid: str, name: str):
+            self.id = pid
+            self.name = name
+
+    monkeypatch.setattr(
+        "analyst_ledger.friend_personalities.resolve_specialists",
+        lambda ids: [FakePersonality(i, i) for i in ids],
+    )
+
+    class FakeEndpointCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        "analyst_ledger.synthesize.use_llm_endpoint",
+        lambda *_a, **_k: FakeEndpointCtx(),
+    )
+    monkeypatch.setattr(
+        "messenger.tenancy.user_context",
+        lambda *_a, **_k: FakeEndpointCtx(),
+    )
+
+    job = SpecialistJob(
+        job_id="job_gap",
+        room_id="r1",
+        action="graph",
+        topic="focus topic",
+    )
+    room = {
+        "room_id": "r1",
+        "config": {
+            "objective": "Generic research",
+            "graph": {
+                "layers": [
+                    {
+                        "id": "L1",
+                        "title": "Gather",
+                        "prompt": "Dig in",
+                        "goal": "Notes",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                    {
+                        "id": "L2",
+                        "title": "Synthesize",
+                        "prompt": "Write",
+                        "goal": "Memo",
+                        "members": [{"agent_id": "qwen-bull"}],
+                    },
+                ],
+                "guards": [
+                    {
+                        "id": "G1",
+                        "from_layer_id": "L1",
+                        "to_layer_id": "L2",
+                        "prompt": "Any real evidence?",
+                    }
+                ],
+            },
+        },
+    }
+
+    th._run_graph_layers(
+        store=None,
+        hub=None,
+        room=room,
+        room_id="r1",
+        config=room["config"],
+        job=job,
+        stub=True,
+        loop=None,
+        owner_user_id="u1",
+        run_focus="NVDA AI demand",
+    )
+
+    joined = "\n".join(posts)
+    assert "**Evidence gap**" in joined
+    assert "Gather: guard unsatisfied after 3 tries" in joined
+    assert "flagging this step as an evidence gap" in joined
+    assert "Graph finished" in joined
+    assert job.status == "completed"
+    assert calls["n"] == th._GRAPH_LAYER_MAX_ATTEMPTS
+
+
 def test_web_search_query_strips_make_imperative():
     from messenger.team_harness import _web_search_query_from_focus
 
