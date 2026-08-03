@@ -9,6 +9,7 @@ from messenger.routers.registry_routes import router as registry_router
 from messenger.routers.agent_chats import router as agent_chats_router
 from messenger.routers.review import router as review_router
 from messenger.routers.friends import router as friends_router
+from messenger.routers.room_files import router as room_files_router
 
 __all__ = [
     "auth_router",
@@ -20,4 +21,5 @@ __all__ = [
     "agent_chats_router",
     "review_router",
     "friends_router",
+    "room_files_router",
 ]

@@ -1198,6 +1198,25 @@ def _run_graph_layers(
                     max_len=4000,
                 )
             _post(store, hub, room_id, "Harness", "Graph finished.", loop=loop)
+            try:
+                from messenger.room_files import save_report
+
+                report_title = f"Graph report — {(focus or objective or 'team run')[:120]}"
+                report_body = "\n\n".join(prior).strip()
+                if evidence_gaps:
+                    report_body += (
+                        "\n\n## Evidence gaps\n"
+                        + "\n".join(f"- {gap}" for gap in evidence_gaps[:12])
+                    )
+                save_report(
+                    room_id,
+                    title=report_title,
+                    body=report_body or "Graph completed without a text deliverable.",
+                    source="graph",
+                    created_by=owner_user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("graph report save failed: %s", exc)
             job.status = "completed"
 
 
