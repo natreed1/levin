@@ -177,6 +177,20 @@ def _room_guidance(room: dict[str, Any]) -> str:
     if not isinstance(config, dict):
         return ""
     parts: list[str] = []
+    room_id = str(room.get("room_id") or "").strip()
+    if room_id:
+        try:
+            from messenger.room_files import context_for_room
+
+            file_context = context_for_room(room_id)
+            if file_context:
+                parts.append(
+                    "Team file context (human grades and reviewer notes are authoritative "
+                    "feedback for improving this run):\n"
+                    + file_context
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("room file context unavailable: %s", exc)
     objective = str(config.get("objective") or "").strip()
     if objective:
         parts.append(f"Room objective: {objective}")

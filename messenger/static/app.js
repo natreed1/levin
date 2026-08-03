@@ -548,6 +548,9 @@
     if (tab === "notifications") {
       loadNotificationsTab();
     }
+    if (tab === "files") {
+      openFilesTab();
+    }
     if (tab === "management") {
       openManagement();
       return;
@@ -1375,12 +1378,14 @@
       if (canManageRoom(room)) show($("#invite-friend-btn"));
       else hide($("#invite-friend-btn"));
       show($("#room-design-btn"));
+      show($("#room-files-btn"));
       if (canEditRoom(room)) show($("#room-settings-btn"));
       else hide($("#room-settings-btn"));
       syncAutonomyToggle(room);
     } else {
       hide($("#invite-friend-btn"));
       hide($("#room-design-btn"));
+      hide($("#room-files-btn"));
       hide($("#room-settings-btn"));
       hide($("#autonomy-toggle-wrap"));
       hide($("#room-overflow"));
@@ -1436,6 +1441,7 @@
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-files-btn"));
     hide($("#room-settings-btn"));
     hide($("#autonomy-toggle-wrap"));
     hide($("#room-overflow"));
@@ -1962,6 +1968,7 @@
     hide($("#delete-room"));
     hide($("#invite-friend-btn"));
     hide($("#room-design-btn"));
+    hide($("#room-files-btn"));
     hide($("#room-settings-btn"));
     hide($("#autonomy-toggle-wrap"));
     hide($("#room-overflow"));
@@ -3678,6 +3685,7 @@
 
   $("#room-design-btn")?.addEventListener("click", () => openRoomDesign());
   $("#room-settings-btn")?.addEventListener("click", () => openRoomSettings());
+  $("#room-files-btn")?.addEventListener("click", () => switchTab("files"));
   $("#room-design-cancel")?.addEventListener("click", () => {
     state.graphFocusLayerId = null;
     $("#room-design-dialog")?.close();
@@ -5445,6 +5453,297 @@
       await refreshModelStatus();
     }
   }
+
+  // ── Room Files, output grades, and reviewer context ────────────────
+  let filesLoadToken = 0;
+  let filesCanEdit = false;
+  let activeFileRoomId = "";
+  let activeFileId = "";
+
+  function filesRoomId() {
+    return (
+      ($("#files-room-select")?.value || "").trim() ||
+      state.roomId ||
+      (state.rooms[0] && state.rooms[0].room_id) ||
+      ""
+    );
+  }
+
+  function formatFileSize(n) {
+    const x = Number(n) || 0;
+    if (x < 1024) return `${x} B`;
+    if (x < 1024 * 1024) return `${Math.round(x / 102.4) / 10} KB`;
+    return `${Math.round(x / (1024 * 102.4)) / 10} MB`;
+  }
+
+  function populateFilesRoomSelect() {
+    const sel = $("#files-room-select");
+    if (!sel) return;
+    const preferred =
+      (sel.value || "").trim() ||
+      state.roomId ||
+      (state.rooms[0] && state.rooms[0].room_id) ||
+      "";
+    const rooms = state.rooms || [];
+    sel.innerHTML =
+      `<option value="">Select a team…</option>` +
+      rooms
+        .map(
+          (r) =>
+            `<option value="${escapeHtml(r.room_id)}">${escapeHtml(
+              r.title || r.room_id
+            )}</option>`
+        )
+        .join("");
+    if (preferred && rooms.some((r) => r.room_id === preferred)) {
+      sel.value = preferred;
+    }
+  }
+
+  async function openFilesTab() {
+    await refreshChatRails();
+    populateFilesRoomSelect();
+    const rid = ($("#files-room-select")?.value || "").trim();
+    if (rid) {
+      await loadRoomFiles(rid);
+    } else {
+      hide($("#files-upload-form"));
+      $("#files-list").innerHTML = "";
+      show($("#files-empty"));
+      $("#files-list-title").textContent = "Outputs";
+      $("#files-room-hint").textContent = "Select a team to browse its file library.";
+      hide($("#files-preview"));
+    }
+  }
+
+  async function loadRoomFiles(roomId) {
+    setError("#files-list-error", "");
+    hide($("#files-preview"));
+    activeFileId = "";
+    const rid = (roomId || filesRoomId() || "").trim();
+    if (!rid) return;
+    const token = ++filesLoadToken;
+    const { data, res } = await api(`/api/rooms/${encodeURIComponent(rid)}/files`);
+    if (token !== filesLoadToken) return;
+    if ($("#files-room-select") && $("#files-room-select").value !== rid) return;
+    if (!res.ok || !data?.ok) {
+      setError("#files-list-error", data?.message || data?.error || "Could not load files");
+      $("#files-list").innerHTML = "";
+      show($("#files-empty"));
+      hide($("#files-upload-form"));
+      return;
+    }
+    filesCanEdit = !!data.can_edit;
+    if (filesCanEdit) show($("#files-upload-form"));
+    else hide($("#files-upload-form"));
+    $("#files-room-hint").textContent = filesCanEdit
+      ? `Library for ${data.title || "this team"} — grades and notes guide future runs.`
+      : `Viewing ${data.title || "this team"} — ask an editor to grade or add context.`;
+    $("#files-list-title").textContent = data.title
+      ? `${data.title} outputs`
+      : "Outputs";
+    const files = data.files || [];
+    const list = $("#files-list");
+    list.innerHTML = "";
+    if (!files.length) {
+      show($("#files-empty"));
+      return;
+    }
+    hide($("#files-empty"));
+    files.forEach((f) => {
+      const li = document.createElement("li");
+      const tags = (f.tags || []).slice(0, 4).join(", ");
+      const ctx = f.use_for_context ? "In context" : "Not in context";
+      const grade =
+        f.grade == null ? "Not graded" : `Grade ${escapeHtml(String(f.grade))}/5`;
+      li.innerHTML = `
+        <div class="files-item-main" data-act="preview">
+          <strong>${escapeHtml(f.title || f.name || "document")}</strong>
+          <div class="muted tiny-hint">
+            ${escapeHtml(f.kind || "file")} · ${escapeHtml(f.source || "")}
+            · ${escapeHtml(formatFileSize(f.size))}
+            ${tags ? " · " + escapeHtml(tags) : ""}
+          </div>
+          <div>
+            <span class="files-chip${f.use_for_context ? " on" : ""}">${escapeHtml(ctx)}</span>
+            <span class="files-chip${f.grade == null ? "" : " graded"}">${grade}</span>
+          </div>
+        </div>
+        <div class="files-item-actions">
+          <button type="button" class="ghost tiny" data-act="preview">Open &amp; grade</button>
+          ${
+            filesCanEdit
+              ? `<button type="button" class="ghost tiny" data-act="toggle">${
+                  f.use_for_context ? "Remove from context" : "Use for context"
+                }</button>
+                 <button type="button" class="ghost danger tiny" data-act="delete">Delete</button>`
+              : ""
+          }
+        </div>`;
+      li.querySelectorAll("[data-act]").forEach((btn) => {
+        btn.addEventListener("click", async (ev) => {
+          ev.preventDefault();
+          const act = btn.getAttribute("data-act");
+          if (act === "preview") await previewRoomFile(rid, f.id);
+          if (act === "toggle") {
+            const result = await api(
+              `/api/rooms/${encodeURIComponent(rid)}/files/${encodeURIComponent(f.id)}`,
+              {
+                method: "PATCH",
+                body: JSON.stringify({ use_for_context: !f.use_for_context }),
+              }
+            );
+            if (!result.res.ok) {
+              setError("#files-list-error", result.data?.message || "Could not update context");
+              return;
+            }
+            await loadRoomFiles(rid);
+          }
+          if (act === "delete") {
+            if (!confirm(`Delete “${f.title || f.name}”?`)) return;
+            await api(
+              `/api/rooms/${encodeURIComponent(rid)}/files/${encodeURIComponent(f.id)}`,
+              { method: "DELETE" }
+            );
+            await loadRoomFiles(rid);
+          }
+        });
+      });
+      list.appendChild(li);
+    });
+  }
+
+  async function previewRoomFile(roomId, fileId) {
+    const { data, res } = await api(
+      `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}`
+    );
+    if (!res.ok || !data?.ok) {
+      setError("#files-list-error", data?.message || data?.error || "Could not open file");
+      return;
+    }
+    const f = data.file || {};
+    activeFileRoomId = roomId;
+    activeFileId = fileId;
+    show($("#files-preview"));
+    $("#files-preview-title").textContent = f.title || f.name || "Preview";
+    $("#files-preview-meta").textContent = [
+      f.kind,
+      f.mime,
+      formatFileSize(f.size),
+      f.use_for_context ? "in context" : "not in context",
+      f.grade == null ? "not graded" : `${f.grade}/5`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    $("#files-preview-body").textContent =
+      data.text ||
+      (f.notes
+        ? `(No text extract)\n\nNotes: ${f.notes}`
+        : "(Binary or empty — download to view.)");
+    $("#files-grade").value = f.grade == null ? "" : String(f.grade);
+    $("#files-grade-notes").value = f.grade_notes || "";
+    $("#files-grade-status").textContent = f.graded_at
+      ? `Last saved ${f.graded_at}${f.graded_by ? ` by ${f.graded_by}` : ""}`
+      : "";
+    setError("#files-grade-error", "");
+    if (filesCanEdit) show($("#files-grade-form"));
+    else hide($("#files-grade-form"));
+    $("#files-preview-download").onclick = () => {
+      window.open(
+        `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(
+          fileId
+        )}?download=1`,
+        "_blank"
+      );
+    };
+  }
+
+  $("#files-room-select")?.addEventListener("change", () => {
+    const rid = filesRoomId();
+    if (rid) loadRoomFiles(rid);
+  });
+  $("#files-refresh-btn")?.addEventListener("click", () => openFilesTab());
+  $("#files-preview-close")?.addEventListener("click", () => hide($("#files-preview")));
+  $("#files-grade-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#files-grade-error", "");
+    if (!activeFileRoomId || !activeFileId) return;
+    const roomId = activeFileRoomId;
+    const fileId = activeFileId;
+    const btn = $("#files-grade-save");
+    if (btn) btn.disabled = true;
+    const grade = $("#files-grade").value;
+    const { data, res } = await api(
+      `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(
+        fileId
+      )}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          grade: grade ? Number(grade) : null,
+          grade_notes: $("#files-grade-notes").value || "",
+        }),
+      }
+    );
+    if (btn) btn.disabled = false;
+    if (!res.ok || !data?.ok) {
+      setError("#files-grade-error", data?.message || "Could not save grade");
+      return;
+    }
+    $("#files-grade-status").textContent = "Saved — agents will receive this context.";
+    await loadRoomFiles(roomId);
+    await previewRoomFile(roomId, fileId);
+  });
+  $("#files-upload-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("#files-upload-error", "");
+    const rid = filesRoomId();
+    if (!rid) {
+      setError("#files-upload-error", "Select a team first");
+      return;
+    }
+    const fd = new FormData();
+    const body = $("#files-body")?.value || "";
+    const file = $("#files-input")?.files?.[0];
+    fd.append("title", $("#files-title")?.value || "");
+    fd.append("tags", $("#files-tags")?.value || "");
+    fd.append("notes", $("#files-notes")?.value || "");
+    fd.append("use_for_context", $("#files-use-context")?.checked ? "1" : "0");
+    if (file) fd.append("upload", file);
+    if (body.trim()) {
+      fd.append("body", body);
+      fd.append("kind", file ? "upload" : "note");
+    } else {
+      fd.append("kind", "upload");
+    }
+    if (!file && !body.trim()) {
+      setError("#files-upload-error", "Attach a file or paste text");
+      return;
+    }
+    const btn = $("#files-upload-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(`/api/rooms/${encodeURIComponent(rid)}/files`, {
+        method: "POST",
+        body: fd,
+        credentials: "same-origin",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        setError("#files-upload-error", data?.message || data?.error || "Upload failed");
+        return;
+      }
+      ["#files-title", "#files-tags", "#files-notes", "#files-body", "#files-input"].forEach(
+        (selector) => {
+          if ($(selector)) $(selector).value = "";
+        }
+      );
+      await loadRoomFiles(rid);
+      if (typeof showFlowToast === "function") showFlowToast("Added to team Files");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
 
   bootstrap();
 })();

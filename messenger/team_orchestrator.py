@@ -925,6 +925,18 @@ def execute_plan(
         dry=dry,
     )
     _post(store, hub, room_id, "Orchestrator", report, loop=loop)
+    try:
+        from messenger.room_files import save_report
+
+        save_report(
+            room_id,
+            title=f"Orchestrator report — {(text or 'team run').strip()[:120]}",
+            body=report,
+            source="orchestrator",
+            created_by=owner_user_id or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("orchestrator report save failed: %s", exc)
     _notify_run(hub, room_id, status="completed", topic=text, loop=loop)
     return {
         "ok": True,

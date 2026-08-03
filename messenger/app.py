@@ -36,6 +36,7 @@ from messenger.routers import (
     friends_router,
     registry_router,
     review_router,
+    room_files_router,
     tracking_router,
 )
 from messenger.scheduler import CloudScheduler, ClassifySweep
@@ -336,6 +337,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_chats_router)
     app.include_router(review_router)
     app.include_router(friends_router)
+    app.include_router(room_files_router)
 
     # --- Browser extension ingest (same response shape as local dashboard) -------
     from fastapi import Depends as FastAPIDepends

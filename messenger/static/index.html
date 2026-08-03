@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=54" />
+  <link rel="stylesheet" href="/static/style.css?v=57" />
 </head>
 <body>
   <div id="auth-screen" class="auth-screen">
@@ -83,6 +83,7 @@
         <button type="button" class="nav-btn active" data-tab="chats">Teams</button>
         <button type="button" class="nav-btn" data-tab="management">Management</button>
         <button type="button" class="nav-btn" data-tab="agents">Hire</button>
+        <button type="button" class="nav-btn" data-tab="files">Files</button>
         <button type="button" class="nav-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="rail-foot">
@@ -152,6 +153,7 @@
                   <summary class="ghost tiny overflow-summary" aria-label="More team actions">⋯</summary>
                   <div class="overflow-panel" role="menu">
                     <button type="button" id="room-design-btn" class="overflow-item" role="menuitem" title="Graph map: steps, analysts, guards">Graph</button>
+                    <button type="button" id="room-files-btn" class="overflow-item" role="menuitem" title="Room documents, reports, and grades">Files</button>
                     <button type="button" id="room-settings-btn" class="overflow-item" role="menuitem" title="GitHub repo, API keys, integrations">Room settings</button>
                     <button type="button" id="invite-friend-btn" class="overflow-item" role="menuitem">Share</button>
                     <button type="button" id="clear-chat" class="overflow-item danger" role="menuitem">Clear</button>
@@ -472,6 +474,103 @@
         </form>
       </dialog>
 
+      <!-- ROOM FILES -->
+      <section id="tab-files" class="tab-panel hidden">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Library</p>
+            <h1>Files</h1>
+            <p class="sub muted">Review team outputs, grade their quality, and leave notes that become context for the next run.</p>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="files-refresh-btn" class="ghost">Refresh</button>
+          </div>
+        </header>
+        <div class="files-layout">
+          <aside class="files-rail settings-subcard">
+            <label class="files-room-pick">Team
+              <select id="files-room-select">
+                <option value="">Select a team…</option>
+              </select>
+            </label>
+            <p id="files-room-hint" class="muted tiny-hint">Open a team to browse its file library.</p>
+            <form id="files-upload-form" class="files-upload-form hidden">
+              <h2>Add for context</h2>
+              <p class="muted tiny-hint">Add company filings, notes, or paste a doc. Marked text is injected into agent context.</p>
+              <label>Title
+                <input id="files-title" type="text" maxlength="200" placeholder="e.g. NVDA FY26 Q1 notes" />
+              </label>
+              <label>Tags (comma-separated)
+                <input id="files-tags" type="text" maxlength="200" placeholder="company, filings" />
+              </label>
+              <label>File
+                <input id="files-input" type="file" />
+              </label>
+              <label>Or paste text
+                <textarea id="files-body" rows="5" maxlength="100000" placeholder="Paste notes, excerpts, or a report…"></textarea>
+              </label>
+              <label>Notes (optional)
+                <input id="files-notes" type="text" maxlength="800" placeholder="Why this matters for the team" />
+              </label>
+              <label class="scope-option">
+                <input type="checkbox" id="files-use-context" checked />
+                Use for agent context
+              </label>
+              <button type="submit" id="files-upload-btn">Add to library</button>
+              <p id="files-upload-error" class="error" hidden></p>
+            </form>
+          </aside>
+          <section class="files-main settings-subcard stacked">
+            <div class="settings-panel-head">
+              <div>
+                <h2 id="files-list-title">Outputs</h2>
+                <p id="files-list-sub" class="muted">Finished Graph and Orchestrator reports land here automatically.</p>
+              </div>
+            </div>
+            <ul id="files-list" class="files-list"></ul>
+            <p id="files-empty" class="muted tiny-hint">No outputs or documents yet.</p>
+            <p id="files-list-error" class="error" hidden></p>
+            <article id="files-preview" class="files-preview hidden">
+              <header class="files-preview-head">
+                <div>
+                  <h3 id="files-preview-title">Preview</h3>
+                  <p id="files-preview-meta" class="muted tiny-hint"></p>
+                </div>
+                <div class="header-actions">
+                  <button type="button" id="files-preview-download" class="ghost tiny">Download</button>
+                  <button type="button" id="files-preview-close" class="ghost tiny">Close</button>
+                </div>
+              </header>
+              <form id="files-grade-form" class="files-grade-form hidden">
+                <div>
+                  <h4>Grade this output</h4>
+                  <p class="muted tiny-hint">Your score and notes are supplied to agents as context on future runs.</p>
+                </div>
+                <label>Score
+                  <select id="files-grade">
+                    <option value="">Not graded</option>
+                    <option value="5">5 — Excellent</option>
+                    <option value="4">4 — Strong</option>
+                    <option value="3">3 — Useful, needs work</option>
+                    <option value="2">2 — Major gaps</option>
+                    <option value="1">1 — Incorrect or unusable</option>
+                  </select>
+                </label>
+                <label>Reviewer notes for agent context
+                  <textarea id="files-grade-notes" rows="3" maxlength="2000" placeholder="What was right, what was missing, and what to change next time…"></textarea>
+                </label>
+                <div class="files-grade-actions">
+                  <button type="submit" id="files-grade-save">Save grade &amp; notes</button>
+                  <span id="files-grade-status" class="muted tiny-hint" role="status"></span>
+                </div>
+                <p id="files-grade-error" class="error" hidden></p>
+              </form>
+              <pre id="files-preview-body" class="files-preview-body"></pre>
+            </article>
+          </section>
+        </div>
+      </section>
+
       <!-- HIRE STUDIO -->
       <section id="tab-agents" class="tab-panel hidden">
         <header class="page-header studio-hero-head">
@@ -760,7 +859,7 @@
               </div>
               <div class="settings-subcard stacked">
                 <strong>Your Flyleaf data</strong>
-                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Team Graph runs use the <strong>team owner’s</strong> ledger and model links. Invited people get Viewer or Editor access (Docs-style); Editors can edit graphs, hire agents, and change room config. Only the owner can delete the team or manage who has access.</p>
+                <p class="muted">Account details, teams (rooms), and messages are stored in Flyleaf’s database. Research sessions, events, and artifacts are kept in a separate directory for your account. Each team also has a <strong>Files</strong> library for uploads, finished reports, grades, and reviewer context. Team Graph runs use the <strong>team owner’s</strong> ledger and model links. Invited people get Viewer or Editor access (Docs-style); Editors can edit graphs, hire agents, grade outputs, and change room config. Only the owner can delete the team or manage who has access.</p>
                 <p class="muted">Passwords are hashed. Connected model keys are encrypted before being written to disk. Flyleaf does not send ledger content to a model unless you explicitly start a model-backed action.</p>
               </div>
             </section>
@@ -895,6 +994,7 @@
       <button type="button" class="mobile-tab active" data-tab="chats">Teams</button>
       <button type="button" class="mobile-tab" data-tab="management">Master</button>
       <button type="button" class="mobile-tab" data-tab="agents">Hire</button>
+      <button type="button" class="mobile-tab" data-tab="files">Files</button>
       <button type="button" class="mobile-tab" data-tab="settings">Settings</button>
       <button type="button" class="mobile-tab mobile-tab-notify" data-tab="notifications" id="mobile-nav-notifications">
         Alerts
@@ -945,6 +1045,6 @@
 
   <div id="app-toast" class="app-toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=61"></script>
+  <script src="/static/app.js?v=64"></script>
 </body>
 </html>
